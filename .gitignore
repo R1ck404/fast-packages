@@ -1,0 +1,7 @@
+node_modules/
+corpus/
+target/
+target-*/
+*.wasm.tmp
+# copied from esbuild-wasm by fast-esbuild-wasm/build.mjs
+fast-esbuild-wasm/esbuild.wasm
