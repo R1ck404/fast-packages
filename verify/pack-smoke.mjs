@@ -5,7 +5,8 @@
 //   * Node ESM and CommonJS entry points, results identical
 //   * a browser bundle (esbuild, platform=browser) of all six resolves and
 //     builds (browser fields / export conditions, no Node builtins)
-// usage: node verify/pack-smoke.mjs
+// With --registry the published versions are installed from npm instead.
+// usage: node verify/pack-smoke.mjs [--registry]
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,15 +22,21 @@ rmSync(work, { recursive: true, force: true });
 mkdirSync(join(work, "tgz"), { recursive: true });
 
 const pkgs = ["pako", "acorn", "acorn-jsx", "esbuild-wasm", "es-module-lexer", "brotli-wasm"];
-// packages/fast-<name> -> r1ck404-fast-<name>-<version>.tgz, installed as <name>
+// packages/fast-<name> -> r1ck404-fast-<name>-<version>.tgz (or the published
+// @r1ck404/fast-<name>@<version>), installed as <name>
+const fromRegistry = process.argv.includes("--registry");
 const deps = {};
 for (const p of pkgs) {
   const dir = join(root, "packages", "fast-" + p);
   const { version } = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  if (fromRegistry) {
+    deps[p] = `npm:@r1ck404/fast-${p}@${version}`;
+    continue;
+  }
   run(npm, ["pack", "--silent", "--pack-destination", join(work, "tgz")], dir);
   deps[p] = `file:./tgz/r1ck404-fast-${p}-${version}.tgz`;
 }
-console.log("packed:", readdirSync(join(work, "tgz")).join(" "));
+console.log(fromRegistry ? "from npm: " + Object.values(deps).join(" ") : "packed: " + readdirSync(join(work, "tgz")).join(" "));
 writeFileSync(join(work, "package.json"), JSON.stringify({ name: "smoke", private: true, type: "module", dependencies: deps }, null, 2));
 run(npm, ["install", "--silent", "--no-audit", "--no-fund"], work);
 
