@@ -1,0 +1,51 @@
+{
+  "name": "@r1ck404/fast-pako",
+  "version": "2.1.0",
+  "description": "Faster drop-in replacement for pako 2.1.0: pako's zlib ported to Rust/WebAssembly, byte-identical output, same API and errors",
+  "keywords": [
+    "pako",
+    "zlib",
+    "deflate",
+    "inflate",
+    "gzip",
+    "ungzip",
+    "compression",
+    "wasm",
+    "drop-in"
+  ],
+  "license": "(MIT AND Zlib)",
+  "author": "R1ck404 (https://github.com/R1ck404)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R1ck404/fast-packages.git",
+    "directory": "packages/fast-pako"
+  },
+  "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-pako#readme",
+  "upstream": "pako@2.1.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "module": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "fastzlib.wasm.mjs",
+    "vendor/pako.esm.mjs",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/equiv.mjs --quick && node test/fuzz.mjs --quick",
+    "test:full": "node test/equiv.mjs && node test/fuzz.mjs && node test/corpus.mjs"
+  },
+  "devDependencies": {
+    "pako": "2.1.0",
+    "binaryen": "^132.0.0"
+  }
+}
