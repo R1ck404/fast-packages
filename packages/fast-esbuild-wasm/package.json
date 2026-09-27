@@ -20,6 +20,9 @@
     "directory": "packages/fast-esbuild-wasm"
   },
   "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-esbuild-wasm#readme",
+  "bugs": {
+    "url": "https://github.com/R1ck404/fast-packages/issues"
+  },
   "upstream": "esbuild-wasm@0.28.2",
   "main": "lib/main.js",
   "browser": "lib/browser.js",
@@ -55,5 +58,8 @@
   "devDependencies": {
     "esbuild-wasm": "0.28.2",
     "esbuild": "0.28.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

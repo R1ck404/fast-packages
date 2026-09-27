@@ -20,6 +20,9 @@
     "directory": "packages/fast-acorn"
   },
   "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-acorn#readme",
+  "bugs": {
+    "url": "https://github.com/R1ck404/fast-packages/issues"
+  },
   "upstream": "acorn@8.18.0",
   "type": "module",
   "main": "./index.mjs",
@@ -57,5 +60,8 @@
     "acorn": "8.18.0",
     "acorn-jsx": "5.3.2",
     "@r1ck404/fast-acorn-jsx": "5.3.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

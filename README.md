@@ -1,19 +1,21 @@
 # fast-* drop-ins: faster pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm
 
+[![CI](https://github.com/R1ck404/fast-packages/actions/workflows/ci.yml/badge.svg)](https://github.com/R1ck404/fast-packages/actions/workflows/ci.yml)
+
 Faster drop-in replacements for the packages Nodepod uses, published as
 `@r1ck404/fast-<name of the package it replaces>` with the **same version**
 as the original. Each is verified to produce **identical results**
 (byte-identical output, identical ASTs, errors and callbacks) against the
 original on large real-world corpora. Nothing here is wired into Nodepod yet.
 
-| package | replaces | typical speedup | approach |
-|---|---|---|---|
-| [`@r1ck404/fast-pako`](packages/fast-pako) | pako 2.1.0 | ungzip 5-6x, inflate 4x, deflate L1 3x | pako's zlib ported to Rust/wasm, same bytes |
-| [`@r1ck404/fast-acorn`](packages/fast-acorn) | acorn 8.18.0 | parse 2.5-3.1x, JSX and `parseFunctionBody` subclasses 2.2-2.6x | a parser mirroring acorn function by function |
-| [`@r1ck404/fast-acorn-jsx`](packages/fast-acorn-jsx) | acorn-jsx 5.3.2 | (enables the JSX fast path in minified bundles) | acorn-jsx + a registration hook |
-| [`@r1ck404/fast-esbuild-wasm`](packages/fast-esbuild-wasm) | esbuild-wasm 0.28.2 | transform 5-35x small/medium, 3-4x on 1MB | JavaScript port of esbuild's transform pipeline in esbuild's own glue |
-| [`@r1ck404/fast-es-module-lexer`](packages/fast-es-module-lexer) | es-module-lexer 1.7.0 | 3-18x (Node), 2.3-7.4x (Chromium) | SIMD Rust/wasm port of lexer.c |
-| [`@r1ck404/fast-brotli-wasm`](packages/fast-brotli-wasm) | brotli-wasm 3.0.1 | compress q11 3-12.7x, decompress 2-3.6x | same Rust crates, rewritten encoder hot paths, new decoder |
+| package | npm | replaces | typical speedup | approach |
+|---|---|---|---|---|
+| [`@r1ck404/fast-pako`](packages/fast-pako) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-pako.svg)](https://www.npmjs.com/package/@r1ck404/fast-pako) | pako 2.1.0 | ungzip 5-6x, inflate 4x, deflate L1 3x | pako's zlib ported to Rust/wasm, same bytes |
+| [`@r1ck404/fast-acorn`](packages/fast-acorn) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-acorn.svg)](https://www.npmjs.com/package/@r1ck404/fast-acorn) | acorn 8.18.0 | parse 2.5-3.1x, JSX and `parseFunctionBody` subclasses 2.2-2.6x | a parser mirroring acorn function by function |
+| [`@r1ck404/fast-acorn-jsx`](packages/fast-acorn-jsx) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-acorn-jsx.svg)](https://www.npmjs.com/package/@r1ck404/fast-acorn-jsx) | acorn-jsx 5.3.2 | (enables the JSX fast path in minified bundles) | acorn-jsx + a registration hook |
+| [`@r1ck404/fast-esbuild-wasm`](packages/fast-esbuild-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-esbuild-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-esbuild-wasm) | esbuild-wasm 0.28.2 | transform 5-35x small/medium, 3-4x on 1MB | JavaScript port of esbuild's transform pipeline in esbuild's own glue |
+| [`@r1ck404/fast-es-module-lexer`](packages/fast-es-module-lexer) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-es-module-lexer.svg)](https://www.npmjs.com/package/@r1ck404/fast-es-module-lexer) | es-module-lexer 1.7.0 | 3-18x (Node), 2.3-7.4x (Chromium) | SIMD Rust/wasm port of lexer.c |
+| [`@r1ck404/fast-brotli-wasm`](packages/fast-brotli-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-brotli-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-brotli-wasm) | brotli-wasm 3.0.1 | compress q11 3-12.7x, decompress 2-3.6x | same Rust crates, rewritten encoder hot paths, new decoder |
 
 ## Naming and versions
 
@@ -213,7 +215,8 @@ bundle for the browser.
 
 The larger corpora are optional: Nodepod's pnpm store (a `Nodepod` checkout
 next to this repo), `corpus/*.tgz` for the pako bench, and the JSX corpus
-(`node verify/make-jsx-corpus.mjs`, from .tsx/.jsx files near this repo).
+(`node verify/make-jsx-corpus.mjs [max] [dir ...]`, from .tsx/.jsx files in
+other projects; by default the ones next to this repo).
 
 Benchmarks:
 
@@ -257,3 +260,9 @@ from `.scratch/prev/` (not in git) for before/after comparisons.
   direct `Parser.prototype` patches (costs more than a small parse). `locations`
   costs are dominated by GC of the Position/SourceLocation objects the AST
   must contain.
+
+## License
+
+Each package is distributed under the license of the package it replaces
+(MIT, MIT AND Zlib for fast-pako, Apache-2.0 for fast-brotli-wasm), included in
+its directory. The rest of the repository is MIT; see [LICENSE](LICENSE).

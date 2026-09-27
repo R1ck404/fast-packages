@@ -21,6 +21,9 @@
     "directory": "packages/fast-pako"
   },
   "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-pako#readme",
+  "bugs": {
+    "url": "https://github.com/R1ck404/fast-packages/issues"
+  },
   "upstream": "pako@2.1.0",
   "type": "module",
   "main": "./index.mjs",
@@ -47,5 +50,8 @@
   "devDependencies": {
     "pako": "2.1.0",
     "binaryen": "^132.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

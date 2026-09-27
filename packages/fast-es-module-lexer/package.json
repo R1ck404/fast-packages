@@ -20,6 +20,9 @@
     "directory": "packages/fast-es-module-lexer"
   },
   "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-es-module-lexer#readme",
+  "bugs": {
+    "url": "https://github.com/R1ck404/fast-packages/issues"
+  },
   "upstream": "es-module-lexer@1.7.0",
   "type": "module",
   "main": "./index.mjs",
@@ -53,5 +56,8 @@
   "devDependencies": {
     "es-module-lexer": "1.7.0",
     "binaryen": "^132.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

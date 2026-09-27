@@ -17,6 +17,9 @@
     "directory": "packages/fast-acorn-jsx"
   },
   "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-acorn-jsx#readme",
+  "bugs": {
+    "url": "https://github.com/R1ck404/fast-packages/issues"
+  },
   "upstream": "acorn-jsx@5.3.2",
   "main": "index.js",
   "types": "index.d.ts",
@@ -34,5 +37,8 @@
   },
   "devDependencies": {
     "acorn-jsx": "5.3.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

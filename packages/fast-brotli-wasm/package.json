@@ -18,6 +18,9 @@
     "directory": "packages/fast-brotli-wasm"
   },
   "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-brotli-wasm#readme",
+  "bugs": {
+    "url": "https://github.com/R1ck404/fast-packages/issues"
+  },
   "upstream": "brotli-wasm@3.0.1",
   "main": "./index.node.cjs",
   "browser": "./index.mjs",
@@ -62,5 +65,8 @@
   "devDependencies": {
     "brotli-wasm": "3.0.1",
     "binaryen": "^132.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
