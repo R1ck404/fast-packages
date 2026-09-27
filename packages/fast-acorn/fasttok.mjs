@@ -1,4 +1,4 @@
-// fast-acorn: a faster `nextToken` for the vendored acorn Parser itself.
+// @r1ck404/fast-acorn: a faster `nextToken` for the vendored acorn Parser itself.
 //
 // Everything that runs real acorn — Parser.extend() plugins (e.g. Nodepod's
 // topLevelParser), tokenizer(), and the re-parse that produces the exact

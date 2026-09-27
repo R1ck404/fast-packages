@@ -1,6 +1,6 @@
 // A/B harness for parser variants: alternates variants in fresh processes for
 // several rounds and reports the minimum time per file (robust to turbo /
-// thermal noise). usage: node bench/ab.mjs <moduleA> <moduleB> [rounds] [--locs]
+// thermal noise). usage: node packages/fast-acorn/tools/ab.mjs <moduleA> <moduleB> [rounds] [--locs]
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -11,8 +11,8 @@ const self = fileURLToPath(import.meta.url);
 
 if (process.env.AB_CHILD) {
   const { fastParse } = await import(process.env.AB_CHILD);
-  const { _getOptions: getOptions } = await import("../fast-acorn/vendor/acorn.mjs");
-  const { loadJs } = await import("./corpus.mjs");
+  const { _getOptions: getOptions } = await import("../vendor/acorn.mjs");
+  const { loadJs } = await import("../../../bench/corpus.mjs");
   const files = loadJs(true);
   const out = {};
   for (const f of files) {

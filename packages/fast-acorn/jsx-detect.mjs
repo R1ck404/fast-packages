@@ -2,9 +2,10 @@
 // can parse exactly like acorn-jsx 5.3.2 does, and determines their options.
 //
 // A class qualifies when
-//  * it was created by fast-acorn's own copy of acorn-jsx (./acorn-jsx.mjs,
-//    registered by identity: works for bundled/minified builds), or
-//  * it is the genuine acorn-jsx 5.3.2 class applied to fast-acorn's Parser:
+//  * it was created by @r1ck404/fast-acorn-jsx directly on this Parser (registered
+//    by identity through the hook in index.mjs: works for bundled/minified
+//    builds), or
+//  * it is the genuine acorn-jsx 5.3.2 class applied to @r1ck404/fast-acorn's Parser:
 //    direct subclass of Parser, the exact own properties, the class and
 //    every method (and the static acornJsx getter, and the context hooks of
 //    its token types) have exactly acorn-jsx 5.3.2's source text, its token
@@ -23,7 +24,7 @@ import { fastParse } from "./parser.mjs";
 const fnToString = Function.prototype.toString;
 const METHOD_NAMES = Object.keys(JSX_METHOD_SRC);
 const recognised = new WeakMap(); // class -> record | null
-const registry = new WeakMap(); // classes made by ./acorn-jsx.mjs -> record
+const registry = new WeakMap(); // classes made by @r1ck404/fast-acorn-jsx -> record
 
 function srcOf(f) {
   try {
@@ -213,7 +214,8 @@ export function jsxOptionsOf(C) {
   return intact(C, rec) ? rec.options : null;
 }
 
-// called by ./acorn-jsx.mjs for every class it creates on fast-acorn's Parser
+// called (through index.mjs's hook) for every class @r1ck404/fast-acorn-jsx creates
+// on this package's Parser
 export function registerJsxClass(C, options) {
   const methods = methodsOf(C.prototype);
   const gd = Object.getOwnPropertyDescriptor(C, "acornJsx");

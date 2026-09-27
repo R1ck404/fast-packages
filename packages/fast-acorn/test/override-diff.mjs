@@ -1,13 +1,13 @@
 // Differential test for Parser.extend() subclasses that override
 // parseFunctionBody (override.mjs): for each variant, the class built on
-// acorn 8.18 (node_modules) vs the class built on fast-acorn's Parser, over
+// acorn 8.18 (node_modules) vs the class built on @r1ck404/fast-acorn's Parser, over
 // the corpus and mutations of it: identical result or error (message, pos,
 // loc, raisedAt), compared with a serializer that also covers object
 // identity (shared nodes / Positions), prototypes and key order. Variants
 // that must be recognised are checked to take the fast path; variants that
 // must not be recognised are checked to be rejected.
 //
-// node fast-acorn/test/override-diff.mjs [--limit N] [--nodepod] [--mutations N]
+// node packages/fast-acorn/test/override-diff.mjs [--limit N] [--nodepod] [--mutations N]
 import * as ref from "acorn";
 import * as fast from "../index.mjs";
 import * as V from "../vendor/acorn.mjs";
@@ -22,7 +22,7 @@ const argVal = (name, def) => (args.includes(name) ? args[args.indexOf(name) + 1
 const limit = Number(argVal("--limit", Infinity));
 const mutations = Number(argVal("--mutations", 2));
 const here = fileURLToPath(new URL(".", import.meta.url));
-const dirs = [join(here, "../../node_modules"), ...(args.includes("--nodepod") ? [join(here, "../../../Nodepod/node_modules/.pnpm")] : [])];
+const dirs = [join(here, "../../../node_modules"), ...(args.includes("--nodepod") ? [join(here, "../../../../Nodepod/node_modules/.pnpm")] : [])];
 
 // ---- variants: (lib) => class
 let sideEffects = 0;

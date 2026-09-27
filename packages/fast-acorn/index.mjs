@@ -1,4 +1,4 @@
-// fast-acorn: drop-in replacement for acorn 8.18 (same exports, same ASTs,
+// @r1ck404/fast-acorn: drop-in replacement for acorn 8.18 (same exports, same ASTs,
 // same errors). `parse()` / `Parser.parse()` run the fast parser for the
 // configurations it supports and fall back to the vendored original for
 // everything else — including every input that is not valid JavaScript, so
@@ -10,7 +10,7 @@
 //
 // Parser.extend() subclasses take the fast path when they are acorn-jsx
 // (jsx-detect.mjs: the genuine acorn-jsx 5.3.2 class, recognised exactly, or
-// the one made by ./acorn-jsx.mjs) or only override parseFunctionBody in a
+// one made by @r1ck404/fast-acorn-jsx) or only override parseFunctionBody in a
 // way the fast parser can host (override.mjs: e.g. Nodepod's topLevelParser).
 //
 // onToken, onInsertedSemicolon, onTrailingComma, program, startLocation,
@@ -22,8 +22,17 @@ import * as V from "./vendor/acorn.mjs";
 import "./fasttok.mjs"; // faster nextToken for everything that still runs acorn itself
 import { fastParse, fastParseExpressionAt, BodyFacade, exactErrors } from "./parser.mjs";
 import { bodyOverrideOf } from "./override.mjs";
-import { jsxOptionsOf } from "./jsx-detect.mjs";
+import { jsxOptionsOf, registerJsxClass } from "./jsx-detect.mjs";
 import { getOptions as fastGetOptions } from "./options.mjs";
+
+// @r1ck404/fast-acorn-jsx hands every class it creates to this hook. Registration
+// is by identity, so it survives bundling and minification; only classes
+// made directly on this Parser take the native JSX path.
+Object.defineProperty(V.Parser, Symbol.for("@r1ck404/fast-acorn:registerJsxClass"), {
+  value: (Parser, cls, options) => {
+    if (Parser === V.Parser) registerJsxClass(cls, options);
+  },
+});
 
 // (same result as acorn's getOptions, see options.mjs)
 const getOptions = fastGetOptions;

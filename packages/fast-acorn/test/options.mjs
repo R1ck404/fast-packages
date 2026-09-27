@@ -1,4 +1,4 @@
-// fast-acorn/options.mjs getOptions() vs acorn's own getOptions (the vendored
+// options.mjs getOptions() vs acorn's own getOptions (the vendored
 // copy of acorn 8.18's code): result keys (order), values, the onToken /
 // onComment array wrappers' behaviour, thrown errors, and the exact sequence
 // of operations on the given options object (via a Proxy).

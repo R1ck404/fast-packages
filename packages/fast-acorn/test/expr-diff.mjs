@@ -1,6 +1,6 @@
 // Differential test for parseExpressionAt: real acorn vs the fast path at
 // sampled start positions in real files.
-// usage: node fast-acorn/test/expr-diff.mjs [--limit N]
+// usage: node packages/fast-acorn/test/expr-diff.mjs [--limit N]
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +25,7 @@ const files = [];
     if (e.isDirectory()) walk(p);
     else if (/\.(m?js|cjs)$/.test(e.name) && statSync(p).size < 2e6) files.push(p);
   }
-})(join(here, "../../node_modules"));
+})(join(here, "../../../node_modules"));
 files.length = Math.min(files.length, limit);
 
 const replacer = (k, v) => (typeof v === "bigint" ? `${v}n` : v instanceof RegExp ? String(v) : v);

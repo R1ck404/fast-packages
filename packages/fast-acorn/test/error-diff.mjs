@@ -1,11 +1,11 @@
-// Error differential test through the public API: fast-acorn's parse /
+// Error differential test through the public API: @r1ck404/fast-acorn's parse /
 // parseExpressionAt vs acorn 8.18 on mutated corpus files (truncations,
 // insertions of syntax-relevant snippets, deletions) and on JSX files parsed
 // as plain JavaScript (Nodepod's rollup parseAst tries plain acorn first):
 // the result or the error (class, message, pos, loc, raisedAt) must match.
 // Also counts how many errors the fast parser produced itself.
 //
-// node fast-acorn/test/error-diff.mjs [--limit N] [--nodepod] [--mutations N] [--jsx N]
+// node packages/fast-acorn/test/error-diff.mjs [--limit N] [--nodepod] [--mutations N] [--jsx N]
 import * as acorn from "acorn";
 import * as fast from "../index.mjs";
 import { errorStats, fastParse, BAIL, exactErrors } from "../parser.mjs";
@@ -20,8 +20,8 @@ const limit = Number(argVal("--limit", Infinity));
 const mutations = Number(argVal("--mutations", 6));
 const jsxCount = Number(argVal("--jsx", Infinity));
 const here = fileURLToPath(new URL(".", import.meta.url));
-const dirs = [join(here, "../../node_modules"), ...(args.includes("--nodepod") ? [join(here, "../../../Nodepod/node_modules/.pnpm")] : [])];
-const jsxDir = join(here, "../../.scratch/verify/jsx-corpus");
+const dirs = [join(here, "../../../node_modules"), ...(args.includes("--nodepod") ? [join(here, "../../../../Nodepod/node_modules/.pnpm")] : [])];
+const jsxDir = join(here, "../../../verify/jsx-corpus");
 
 function collect(dir, out, seen) {
   let entries;

@@ -1,4 +1,4 @@
-// fast-acorn: a speed-oriented re-implementation of acorn 8.18's parser.
+// @r1ck404/fast-acorn: a speed-oriented re-implementation of acorn 8.18's parser.
 //
 // Every grammar decision mirrors acorn function-for-function (same names,
 // same order of checks, same token-context rules for regexp detection), and
@@ -495,7 +495,7 @@ const TT_OBJ = new Array(T_COUNT).fill(undefined);
     "equality", "relational", "bitShift", "plusMin", "modulo", "star", "slash", "starstar", "coalesce"];
   for (let t = 0; t < names.length; t++) TT_OBJ[t] = acornTT[names[t]];
   for (let t = T_KW_FIRST; t < T_COUNT; t++) TT_OBJ[t] = acornTT["_" + KW_NAME[t]];
-  for (let t = 0; t < T_COUNT; t++) if (t < T_JSXNAME || t >= T_KW_FIRST) if (!TT_OBJ[t]) throw new Error("fast-acorn: token type " + t);
+  for (let t = 0; t < T_COUNT; t++) if (t < T_JSXNAME || t >= T_KW_FIRST) if (!TT_OBJ[t]) throw new Error("@r1ck404/fast-acorn: token type " + t);
 }
 
 // acorn's finishNodeAt

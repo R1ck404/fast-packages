@@ -1,17 +1,17 @@
 // Differential test for JSX: acorn 8.18 + acorn-jsx 5.3.2 (node_modules)
-// against fast-acorn's Parser.extend(acornJsx(...)) -- through the public API
+// against @r1ck404/fast-acorn's Parser.extend(acornJsx(...)) -- through the public API
 // (fast path or fallback: result and errors must be identical) and through
 // the fast parser directly (to count fast-path parses and detect false
-// accepts). Inputs: a JSX corpus (default .scratch/verify/jsx-corpus), the
+// accepts). Inputs: a JSX corpus (default verify/jsx-corpus), the
 // JS corpus (--js N files), generated JSX, and mutations of all of those.
 //
-// node fast-acorn/test/jsx-diff.mjs [--dir jsxdir] [--js N] [--gen N] [--mutations N] [--limit N]
+// node packages/fast-acorn/test/jsx-diff.mjs [--dir jsxdir] [--js N] [--gen N] [--mutations N] [--limit N]
 import * as ref from "acorn";
 import * as fast from "../index.mjs";
 import * as V from "../vendor/acorn.mjs";
 import { fastParse, BAIL } from "../parser.mjs";
 import { jsxOptionsOf } from "../jsx-detect.mjs";
-import fastJsx from "../acorn-jsx.mjs";
+import fastJsx from "@r1ck404/fast-acorn-jsx";
 import { idSer } from "./idser.mjs";
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
@@ -23,7 +23,7 @@ const acornJsx = require("acorn-jsx");
 const args = process.argv.slice(2);
 const argVal = (name, def) => (args.includes(name) ? args[args.indexOf(name) + 1] : def);
 const here = fileURLToPath(new URL(".", import.meta.url));
-const jsxDir = argVal("--dir", join(here, "../../.scratch/verify/jsx-corpus"));
+const jsxDir = argVal("--dir", join(here, "../../../verify/jsx-corpus"));
 const jsCount = Number(argVal("--js", 1500));
 const genCount = Number(argVal("--gen", 20000));
 const mutations = Number(argVal("--mutations", 4));
@@ -33,12 +33,12 @@ const PLUGIN_OPTS = [undefined, { allowNamespaces: false }, { allowNamespacedObj
 const pairs = PLUGIN_OPTS.map((po) => ({
   po,
   R: ref.Parser.extend(acornJsx(po)),
-  F: fast.Parser.extend(acornJsx(po)), // genuine acorn-jsx on fast-acorn: recognised by source
-  G: fast.Parser.extend(fastJsx(po)), // fast-acorn's own acorn-jsx copy: registered
+  F: fast.Parser.extend(acornJsx(po)), // genuine acorn-jsx on @r1ck404/fast-acorn: recognised by source
+  G: fast.Parser.extend(fastJsx(po)), // @r1ck404/fast-acorn-jsx: registered
 }));
 for (const p of pairs) {
   if (!jsxOptionsOf(p.F)) throw new Error("genuine acorn-jsx class not recognised: " + JSON.stringify(p.po));
-  if (!jsxOptionsOf(p.G)) throw new Error("fast-acorn acorn-jsx class not recognised: " + JSON.stringify(p.po));
+  if (!jsxOptionsOf(p.G)) throw new Error("@r1ck404/fast-acorn-jsx class not recognised: " + JSON.stringify(p.po));
 }
 
 const replacer = (k, v) => (typeof v === "bigint" ? { $bigint: v.toString() } : v instanceof RegExp ? { $re: String(v) } : typeof v === "function" ? { $fn: v.name } : v);
@@ -239,7 +239,7 @@ const jsFiles = [];
     if (e.isDirectory()) walk(p);
     else if (/\.(m|c)?js$/.test(e.name) && statSync(p).size < 1_000_000) jsFiles.push(p);
   }
-})(join(here, "../../node_modules"));
+})(join(here, "../../../node_modules"));
 for (const f of jsFiles) {
   const code = readFileSync(f, "utf8");
   runInput(f, code, false);

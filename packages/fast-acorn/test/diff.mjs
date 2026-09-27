@@ -1,5 +1,5 @@
 // Differential test: fast parser vs acorn on every JS file we can find.
-// node fast-acorn/test/diff.mjs [--limit N] [--dir path] [--locs]
+// node packages/fast-acorn/test/diff.mjs [--limit N] [--dir path] [--locs]
 import * as acorn from "acorn";
 import { fastParse, BAIL } from "../parser.mjs";
 import { _getOptions as getOptions, Node as VNode } from "../vendor/acorn.mjs";
@@ -15,7 +15,7 @@ const withNodepod = args.includes("--nodepod");
 const here = fileURLToPath(new URL(".", import.meta.url));
 const dirs = args.includes("--dir")
   ? [args[args.indexOf("--dir") + 1]]
-  : [join(here, "../../node_modules"), join(here, "../../../Nodepod/node_modules/.pnpm")];
+  : [join(here, "../../../node_modules"), join(here, "../../../../Nodepod/node_modules/.pnpm")];
 
 function collect(dir, out, seen) {
   let entries;

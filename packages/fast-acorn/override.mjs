@@ -7,7 +7,7 @@
 // real TokenType object, startNode() makes a real Node, ...), and
 // super.parseFunctionBody() reaching acorn's method on the facade runs the
 // fast parser's function body. A class qualifies only when
-//  * it directly extends fast-acorn's Parser, its class body is exactly one
+//  * it directly extends @r1ck404/fast-acorn's Parser, its class body is exactly one
 //    ordinary `parseFunctionBody` method (no constructor, fields, static
 //    members or blocks), and the prototype's function is that method, and
 //  * the method's source (whatever the minifier made of it) passes a

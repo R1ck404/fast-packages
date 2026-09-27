@@ -38,7 +38,7 @@ const NKEYS = KEYS.length;
 {
   const actual = [];
   for (const k in defaultOptions) actual.push(k);
-  if (actual.join() !== KEYS.join()) throw new Error("fast-acorn: unexpected acorn defaultOptions");
+  if (actual.join() !== KEYS.join()) throw new Error("@r1ck404/fast-acorn: unexpected acorn defaultOptions");
 }
 
 // acorn's pushComment

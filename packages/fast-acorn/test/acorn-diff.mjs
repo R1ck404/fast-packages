@@ -1,4 +1,4 @@
-// Differential test for the vendored acorn as fast-acorn ships it (with the
+// Differential test for the vendored acorn as @r1ck404/fast-acorn ships it (with the
 // fast nextToken of fasttok.mjs installed) against pristine acorn 8.18 from
 // node_modules: Parser.parse with many option sets (errors included:
 // message, pos, loc, raisedAt), onToken / onComment output, tokenizer()
@@ -6,10 +6,10 @@
 // the same on mutated inputs (truncations, random edits) so error paths are
 // exercised too.
 //
-// node fast-acorn/test/acorn-diff.mjs [--limit N] [--dir path] [--nodepod] [--mutations N] [--quick]
+// node packages/fast-acorn/test/acorn-diff.mjs [--limit N] [--dir path] [--nodepod] [--mutations N] [--quick]
 import * as ref from "acorn";
 import * as V from "../vendor/acorn.mjs";
-// everything fast-acorn installs on the vendored acorn (fasttok's nextToken,
+// everything @r1ck404/fast-acorn installs on the vendored acorn (fasttok's nextToken,
 // the parseFunctionBody hook); parses below use the instance parse() so
 // they run acorn itself, not the fast parser behind Parser.parse
 import "../index.mjs";
@@ -25,7 +25,7 @@ const quick = args.includes("--quick");
 const here = fileURLToPath(new URL(".", import.meta.url));
 const dirs = args.includes("--dir")
   ? [argVal("--dir")]
-  : [join(here, "../../node_modules"), ...(args.includes("--nodepod") ? [join(here, "../../../Nodepod/node_modules/.pnpm")] : [])];
+  : [join(here, "../../../node_modules"), ...(args.includes("--nodepod") ? [join(here, "../../../../Nodepod/node_modules/.pnpm")] : [])];
 
 function collect(dir, out, seen) {
   let entries;
