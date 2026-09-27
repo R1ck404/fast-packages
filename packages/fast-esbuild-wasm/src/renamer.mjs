@@ -122,6 +122,7 @@ function computeReservedNamesForScope(scope, symbols, names) {
 // noOpRenamer
 
 export class noOpRenamer {
+  ;                    
   constructor(symbols = null) {
     this.symbols = symbols;
   }
@@ -140,6 +141,9 @@ export function newNoOpRenamer(symbols) {
 // MinifyRenamer (only used when minifying identifiers)
 
 export class symbolSlot {
+  ;                    
+  ;                     
+  ;                                  
   constructor(name = "", count = 0, needsCapitalForJSX = 0) {
     this.name = name;
     this.count = count; // uint32
@@ -154,6 +158,10 @@ function makeSymbolSlots(n) {
 }
 
 export class MinifyRenamer {
+  ;                          
+  ;                  
+  ;                                           
+  ;                    
   constructor(reservedNames = null, slots = [[], [], [], []], topLevelSymbolToSlot = new Map(), symbols = null) {
     this.reservedNames = reservedNames; // Map<string, number>
     this.slots = slots; // [4][]symbolSlot
@@ -344,6 +352,9 @@ export function newMinifyRenamer(symbols, firstTopLevelSlots, reservedNames) {
 // in a multi-threaded producer/consumer relationship. So instead we use the
 // index of the source in the DFS order over all entry points for stability.
 export class StableSymbolCount {
+  ;                                 
+  ;                   
+  ;                     
   constructor(stableSourceIndex = 0, ref = InvalidRef, count = 0) {
     this.stableSourceIndex = stableSourceIndex;
     this.ref = ref;
@@ -507,6 +518,8 @@ function assignNestedScopeSlotsHelper(scope, symbols, slot) {
 }
 
 class slotAndCount {
+  ;                    
+  ;                     
   constructor(slot = 0, count = 0) {
     this.slot = slot;
     this.count = count;
@@ -523,6 +536,9 @@ function compareSlotAndCount(ai, aj) {
 // NumberRenamer
 
 export class NumberRenamer {
+  ;                    
+  ;                         
+  ;                    
   constructor(symbols = null, root = new numberScope(), names = []) {
     this.symbols = symbols;
     this.root = root; // numberScope (value)
@@ -672,6 +688,8 @@ export function newNumberRenamer(symbols, reservedNames) {
 }
 
 export class numberScope {
+  ;                   
+  ;                       
   constructor(parent = null, nameCounts = null) {
     this.parent = parent;
 
@@ -764,6 +782,8 @@ export const nameUsedInSameScope = 2;
 // ExportRenamer
 
 export class ExportRenamer {
+                    
+                        
   constructor(used = null, count = 0) {
     this.used = used; // Map<string, number> or null
     this.count = count;
@@ -797,3 +817,4 @@ export class ExportRenamer {
     bail();
   }
 }
+// generated from renamer.mts by tools/ts-build.mjs; edit that file

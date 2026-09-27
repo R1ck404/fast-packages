@@ -677,7 +677,7 @@ export const parseMethods = {
     return ref;
   },
 
-  hoistSymbols(scope) {
+  hoistSymbols(scope       ) {
     const p = this;
 
     // Duplicate function declarations are forbidden in nested blocks in strict
@@ -3309,3 +3309,4 @@ export const parseMethods = {
     return p.parseSuffix(expr, level, errors, flags);
   },
 };
+// generated from js_parser_parse.mts by tools/ts-build.mjs; edit that file

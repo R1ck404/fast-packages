@@ -112,7 +112,10 @@ const idContinueES5OrESNextEnc =
 // A decoded table: a bitmap for the BMP plus sorted astral ranges. Tables are
 // decoded lazily on the first non-ASCII query.
 class IdentTable {
-  constructor(enc) {
+                      
+                                  
+                                    
+  constructor(enc        ) {
     this.enc = enc;
     this.bmp = null; // Uint32Array bitmap of 0x10000 bits
     this.astral = null; // Int32Array [lo0, hi0, lo1, hi1, ...] for ranges above 0xFFFF
@@ -357,3 +360,4 @@ export function isWhitespace(codePoint) {
       return false;
   }
 }
+// generated from js_ident.mts by tools/ts-build.mjs; edit that file

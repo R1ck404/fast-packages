@@ -319,7 +319,18 @@ function configFromFlags(flags, input) {
   return options;
 }
 
-let utf8Decoder = null;
+let utf8Decoder                     = null;
+
+/** The Go service's response packet for a "transform" request */
+                             
+                
+                  
+                  
+               
+                 
+              
+                         
+ 
 
 // Parsed options per distinct flag list. validateDefines/processDefines are
 // expensive (they rebuild the ~800 known-global defines) and their results are
@@ -330,7 +341,7 @@ let utf8Decoder = null;
 // thing the bundler does is to make its own copy (bundler.scanBundle), so the
 // cached object is never mutated otherwise.
 const configCache = new Map(); // key -> {options, stdinTemplate}
-let lastFlags = null; // (the flags and entry of the previous call)
+let lastFlags                  = null; // (the flags and entry of the previous call)
 let lastEntry = null;
 function cachedConfigFromFlags(flags) {
   // Consecutive calls usually use the same options
@@ -360,7 +371,11 @@ function cachedConfigFromFlags(flags) {
 }
 
 // Returns the Go service's transform response, or undefined to fall back.
-export function fastTransform(flags, input, mangleCache) {
+export function fastTransform(
+  flags          ,
+  input                     ,
+  mangleCache                                            ,
+)                                {
   if (mangleCache) return undefined;
   try {
     // The glue encodes strings with TextEncoder (lone surrogates -> U+FFFD);
@@ -396,7 +411,7 @@ export function fastTransform(flags, input, mangleCache) {
     // drops a leading BOM.
     if (code.charCodeAt(0) === 0xfeff) code = code.slice(1);
     // ("map" is the external source map, "" when there is none)
-    const response = { errors: [], warnings: [], codeFS: false, code, mapFS: false, map: result.map };
+    const response                    = { errors: [], warnings: [], codeFS: false, code, mapFS: false, map: result.map };
     if (result.legalComments !== null && result.legalComments !== undefined) {
       let lc = result.legalComments;
       if (lc.charCodeAt(0) === 0xfeff) lc = lc.slice(1);
@@ -415,3 +430,4 @@ export function fastTransform(flags, input, mangleCache) {
     return undefined;
   }
 }
+// generated from transform.mts by tools/ts-build.mjs; edit that file

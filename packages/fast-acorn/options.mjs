@@ -42,9 +42,9 @@ const NKEYS = KEYS.length;
 }
 
 // acorn's pushComment
-function pushComment(options, array) {
-  return function (block, text, start, end, startLoc, endLoc) {
-    const comment = {
+function pushComment(options                     , array       ) {
+  return function (           block         , text        , start        , end        , startLoc      , endLoc      )       {
+    const comment                      = {
       type: block ? "Block" : "Line",
       value: text,
       start: start,
@@ -56,7 +56,7 @@ function pushComment(options, array) {
   };
 }
 
-export function getOptions(opts) {
+export function getOptions(opts                                 )                      {
   const d = defaultOptions;
   let i = 0;
   for (const k in d) if (k !== KEYS[i++]) return acornGetOptions(opts);
@@ -107,3 +107,4 @@ export function getOptions(opts) {
     throw new Error("Cannot use allowAwaitOutsideFunction with sourceType: commonjs");
   return options;
 }
+// generated from options.mts by tools/ts-build.mjs; edit that file

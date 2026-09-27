@@ -32,7 +32,7 @@ Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#r
   answer then depends on what it parsed before). Those inputs are detected and
   handed to the vendored original (`vendor/lexer.js`).
 
-`index.mjs` is the public entry; `lexer.mjs` is the implementation (its extra
+`index.mts` is the public entry; `lexer.mts` is the implementation (TypeScript, shipped as `.mjs`) (its extra
 exports are test hooks). The `es-module-lexer/js` (asm.js) subpath is not
 provided.
 

@@ -556,3 +556,4 @@ export function source(unsupportedJSFeatures) {
   }
   return new Source(new PrettyPaths("<runtime>", "<runtime>"), "runtime", text, new Path("<runtime>"), SourceIndex);
 }
+// generated from runtime.mts by tools/ts-build.mjs; edit that file

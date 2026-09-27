@@ -221,6 +221,9 @@ export function hashCombineString(seed, text) {
 
 // helpers.Joiner: output concatenation that remembers the last character.
 export class Joiner {
+  ;                    
+  ;                      
+  ;                        
   constructor() {
     this.parts = [];
     this.length = 0;
@@ -333,3 +336,4 @@ export function formatFloatF0(x) {
 export function parseFloat64(text) {
   return Number(text);
 }
+// generated from helpers.mts by tools/ts-build.mjs; edit that file

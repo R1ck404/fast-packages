@@ -3,7 +3,7 @@
 // "pako": "npm:@r1ck404/fast-pako@..."), then checks from there, against the
 // originals in this repo's node_modules:
 //   * Node ESM and CommonJS entry points, results identical
-//   * a browser bundle (esbuild, platform=browser) of all six resolves and
+//   * a browser bundle (esbuild, platform=browser) of all seven resolves and
 //     builds (browser fields / export conditions, no Node builtins)
 // With --registry the published versions are installed from npm instead.
 // usage: node verify/pack-smoke.mjs [--registry]
@@ -21,20 +21,22 @@ const work = join(tmpdir(), "fast-pack-smoke");
 rmSync(work, { recursive: true, force: true });
 mkdirSync(join(work, "tgz"), { recursive: true });
 
-const pkgs = ["pako", "acorn", "acorn-jsx", "esbuild-wasm", "es-module-lexer", "brotli-wasm"];
+const pkgs = ["pako", "acorn", "acorn-jsx", "esbuild-wasm", "es-module-lexer", "brotli-wasm", "@noble/hashes"];
 // packages/fast-<name> -> r1ck404-fast-<name>-<version>.tgz (or the published
-// @r1ck404/fast-<name>@<version>), installed as <name>
+// @r1ck404/fast-<name>@<version>), installed as <name> (a scoped original
+// like @noble/hashes is fast-noble-hashes)
 const fromRegistry = process.argv.includes("--registry");
 const deps = {};
 for (const p of pkgs) {
-  const dir = join(root, "packages", "fast-" + p);
+  const flat = p.replace(/^@/, "").replace("/", "-");
+  const dir = join(root, "packages", "fast-" + flat);
   const { version } = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
   if (fromRegistry) {
-    deps[p] = `npm:@r1ck404/fast-${p}@${version}`;
+    deps[p] = `npm:@r1ck404/fast-${flat}@${version}`;
     continue;
   }
   run(npm, ["pack", "--silent", "--pack-destination", join(work, "tgz")], dir);
-  deps[p] = `file:./tgz/r1ck404-fast-${p}-${version}.tgz`;
+  deps[p] = `file:./tgz/r1ck404-fast-${flat}-${version}.tgz`;
 }
 console.log(fromRegistry ? "from npm: " + Object.values(deps).join(" ") : "packed: " + readdirSync(join(work, "tgz")).join(" "));
 writeFileSync(join(work, "package.json"), JSON.stringify({ name: "smoke", private: true, type: "module", dependencies: deps }, null, 2));
@@ -99,6 +101,22 @@ ok(r1.code === r2.code, "esbuild transform (Node API vs node.mjs)");
 ok(Ef.default[Symbol.for("@r1ck404/fast-esbuild-wasm:stats")].fast === 1, "esbuild fast path used");
 await Ef.stop?.();
 
+// @noble/hashes: every entry point in both formats, the fast package in use
+const nobleOrig = (m) => require(${JSON.stringify(join(root, "node_modules/@noble/hashes"))} + "/" + m + ".js");
+const hex = (u) => Buffer.from(u).toString("hex");
+for (const m of ["sha2", "legacy", "hmac", "pbkdf2", "scrypt", "hkdf", "sha3", "blake2", "blake3", "ripemd160", "argon2", "eskdf", "utils", "crypto", "sha256", "sha512", "sha1", "_md"]) {
+  const keys = Object.keys(nobleOrig(m)).sort().join();
+  ok(Object.keys(require("@noble/hashes/" + m)).sort().join() === keys, "@noble/hashes/" + m + " exports (require)");
+  ok(Object.keys(await import("@noble/hashes/" + m)).sort().join() === keys, "@noble/hashes/" + m + " exports (import)");
+}
+const NS = nobleOrig("sha2");
+ok(hex((await import("@noble/hashes/sha2")).sha256(data)) === hex(NS.sha256(data)), "@noble/hashes sha256 (import)");
+ok(hex(require("@noble/hashes/sha2").sha512(data)) === hex(NS.sha512(data)), "@noble/hashes sha512 (require)");
+ok(hex(require("@noble/hashes/legacy").md5("abc")) === hex(nobleOrig("legacy").md5("abc")), "@noble/hashes md5");
+const so = { N: 1024, r: 8, p: 1 };
+ok(hex((await import("@noble/hashes/scrypt")).scrypt("p", "s", so)) === hex(nobleOrig("scrypt").scrypt("p", "s", so)), "@noble/hashes scrypt");
+ok(require("@noble/hashes/package.json").upstream === "@noble/hashes@1.8.0", "@noble/hashes is the fast package");
+
 console.log(\`[pack-smoke] checks: \${checks}  failures: \${fails}\`);
 process.exit(fails ? 1 : 0);
 `,
@@ -106,26 +124,28 @@ process.exit(fails ? 1 : 0);
 const out = run(process.execPath, ["check.mjs"], work);
 process.stdout.write(out);
 
-// browser bundle of all six
+// browser bundle of all seven
 writeFileSync(
   join(work, "browser.mjs"),
   `import pako from "pako";
+import { sha256 } from "@noble/hashes/sha2";
+import { scrypt } from "@noble/hashes/scrypt";
 import * as acorn from "acorn";
 import jsx from "acorn-jsx";
 import { init, parse } from "es-module-lexer";
 import brotli from "brotli-wasm";
 import * as esbuild from "esbuild-wasm";
-export { pako, acorn, jsx, init, parse, brotli, esbuild };
+export { pako, acorn, jsx, init, parse, brotli, esbuild, sha256, scrypt };
 `,
 );
 const { buildSync } = await import(pathToFileURL(join(root, "node_modules/esbuild/lib/main.js")).href);
 const b = buildSync({ entryPoints: [join(work, "browser.mjs")], bundle: true, platform: "browser", format: "esm", write: false, logLevel: "silent", metafile: true, absWorkingDir: work });
 const inputs = Object.keys(b.metafile.inputs);
 const used = (name) => inputs.some((i) => i.includes(`node_modules/${name}/`));
-const expect = { "pako/index.mjs": true, "acorn/index.mjs": true, "acorn-jsx/index.js": true, "es-module-lexer/index.mjs": true, "brotli-wasm/index.mjs": true, "esbuild-wasm/lib/browser.js": true };
+const expect = { "pako/index.mjs": true, "acorn/index.mjs": true, "acorn-jsx/index.js": true, "es-module-lexer/index.mjs": true, "brotli-wasm/index.mjs": true, "esbuild-wasm/lib/browser.js": true, "@noble/hashes/esm/sha2.js": true, "@noble/hashes/esm/_fast.js": true, "@noble/hashes/esm/crypto.js": true };
 let bad = 0;
 for (const f of Object.keys(expect)) if (!inputs.some((i) => i.endsWith("node_modules/" + f))) (bad++, console.log("browser bundle: missing", f));
-const nodeOnly = inputs.filter((i) => /lib\/main\.js|index\.node\.|node:/.test(i));
+const nodeOnly = inputs.filter((i) => /lib\/main\.js|index\.node\.|node:|cryptoNode/.test(i));
 if (nodeOnly.length) (bad++, console.log("browser bundle pulled in Node entries:", nodeOnly));
 console.log(`[browser bundle] ${(b.outputFiles[0].text.length / 1024) | 0} KB, ${inputs.length} inputs, errors ${b.errors.length}, problems ${bad}`);
 rmSync(work, { recursive: true, force: true });

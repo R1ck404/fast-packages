@@ -14,3 +14,4 @@ export function bail() {
   if (BAIL_TRACE.enabled) BAIL_TRACE.stack = new Error("bail").stack;
   throw BAIL;
 }
+// generated from bail.mts by tools/ts-build.mjs; edit that file

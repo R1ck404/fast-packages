@@ -597,3 +597,4 @@ function fastNextToken(p) {
 }
 
 export const _fastTokenizerInstalled = true;
+// generated from fasttok.mts by tools/ts-build.mjs; edit that file

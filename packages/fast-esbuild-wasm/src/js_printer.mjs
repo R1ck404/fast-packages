@@ -609,6 +609,39 @@ function isASCII(text) {
 }
 
 class printer {
+  ;                               
+  ;                    
+  ;                    
+  ;                          
+  ;                       
+  ;                         
+  ;                                
+  ;                            
+  ;                            
+  ;                                     
+  ;                  
+  ;                     
+  ;                                  
+  ;                              
+  ;                                    
+  ;                    
+  ;                             
+  ;                              
+  ;                                       
+  ;                         
+  ;                                  
+  ;                              
+  ;                              
+  ;                           
+  ;                         
+  ;                                  
+  ;                             
+  ;                                    
+  ;                               
+  ;                          
+  ;                      
+  ;                       
+  ;                                  
   constructor(symbols, renamer, importRecords, options, moduleType, exprComments, wasLazyExport) {
     this.inlineScriptOK = true; // !options.unsupportedFeatures.Has(compat.InlineScript)
     this.symbols = symbols; // ast.SymbolMap
@@ -5208,6 +5241,14 @@ class printer {
 // stack overflow for deeply-nested ASTs. See the comments for the similar
 // code in the JavaScript parser for details.
 class binaryExprVisitor {
+  ;              
+  ;                     
+  ;                     
+  ;                         
+  ;                         
+  ;                  
+  ;                     
+  ;                          
   constructor(e = null, level = LLowest, flags = 0) {
     // Inputs
     this.e = e; // *js_ast.EBinary
@@ -5465,6 +5506,28 @@ export function canEscapeIdentifier(name, unsupportedFeatures, asciiOnly) {
 }
 
 export class Options {
+  ;                                         
+  ;                    
+  ;                        
+  ;                         
+  ;                           
+  ;                             
+  ;                             
+  ;                        
+  ;                                 
+  ;                                   
+  ;                      
+  ;                         
+  ;                            
+  ;                                 
+  ;                                  
+  ;                             
+  ;                          
+  ;                             
+  ;                         
+  ;                                  
+  ;                              
+  ;                              
   constructor(
     requireOrImportMetaForSource = null, // func(uint32) RequireOrImportMeta
     tsEnums = null, // Map<Ref, Map<string, js_ast.TSEnumValue>>
@@ -5558,6 +5621,9 @@ export class Options {
 }
 
 export class RequireOrImportMeta {
+  ;                          
+  ;                          
+  ;                               
   constructor(wrapperRef = InvalidRef, exportsRef = InvalidRef, isWrapperAsync = false) {
     // CommonJS files will return the "require_*" wrapper function and an invalid
     // exports object reference. Lazily-initialized ESM files will return the
@@ -5569,6 +5635,10 @@ export class RequireOrImportMeta {
 }
 
 export class PrintResult {
+  ;                  
+  ;                                     
+  ;                                  
+  ;                           
   constructor(js = "", extractedLegalComments = [], jsonMetadataImports = [], sourceMapChunk = null) {
     this.js = js; // JS string (Go: []byte)
     this.extractedLegalComments = extractedLegalComments; // []string
@@ -5656,3 +5726,4 @@ export function print(tree, symbols, r, options) {
   }
   return new PrintResult(p.jsText(), p.extractedLegalComments, p.jsonMetadataImports, sourceMapChunk);
 }
+// generated from js_printer.mts by tools/ts-build.mjs; edit that file

@@ -185,6 +185,8 @@ const SKIP_TYPE_ARGS_OPTS_IN_EXPRESSION = Object.freeze(new skipTypeScriptTypeAr
 // BAIL on errors/warnings) it must silently drop everything: in Go, errors
 // logged by the temporary parser do not stop it and have no visible effect.
 class discardedDeferLog {
+                        
+                          
   constructor() {
     this.level = LevelInfo;
     this.errors = false;
@@ -2163,3 +2165,4 @@ export const tsMethods = {
     return new Expr(new EInlinedEnum(value, comment), value.loc);
   },
 };
+// generated from ts_parser.mts by tools/ts-build.mjs; edit that file

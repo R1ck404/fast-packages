@@ -31,3 +31,9 @@ run esb-bail node packages/fast-esbuild-wasm/test/bailreasons.mjs
 run esb-smoke node packages/fast-esbuild-wasm/test/smoke.mjs
 run esb-api node packages/fast-esbuild-wasm/test/api.mjs
 run esb-fuzz sh -c "cd packages/fast-esbuild-wasm && node test/fuzz.mjs --n 3000 --seed 999"
+run nh-files node packages/fast-noble-hashes/test/files.mjs
+run nh-diff node packages/fast-noble-hashes/test/diff.mjs
+run nh-diff-cjs node packages/fast-noble-hashes/test/diff.mjs --cjs
+run nh-diff-s2 node packages/fast-noble-hashes/test/diff.mjs --seed 777
+run nh-nowasm node packages/fast-noble-hashes/test/nowasm.mjs
+run nh-browser node packages/fast-noble-hashes/test/browser.mjs

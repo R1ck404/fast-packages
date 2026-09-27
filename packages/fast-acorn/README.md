@@ -26,7 +26,7 @@ Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#r
 
 ## How
 
-* `parser.mjs`: a parser mirroring acorn function by function (integer token
+* `parser.mts` (shipped as `parser.mjs`, like every `.mts` here): a parser mirroring acorn function by function (integer token
   types, flag tables, per-node-type constructors, exact key order) for
   `ecmaVersion >= 16` without `onToken`/`program`/`startLocation`-style
   options. Errors it can produce exactly ("Unexpected token") it throws

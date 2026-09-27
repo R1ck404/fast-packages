@@ -6,6 +6,7 @@
 // declaration order, all optional with Go zero-value defaults.
 import { InvalidRef, LocRef } from "./ast.mjs";
 import { RANGE_ZERO, platformIndependentPathDirBaseExt } from "./logger.mjs";
+                                          
 import { formatFloatG } from "./helpers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,9 @@ export function opCodeIsShortCircuit(op) {
 }
 
 export class OpTableEntry {
+  ;                 
+  ;                  
+  ;                      
   constructor(text, level, isKeyword) {
     this.text = text;
     this.level = level;
@@ -199,18 +203,24 @@ export const OpTable = [
 // Wrappers
 
 export class Expr {
+                    
+                      
   constructor(data, loc = 0) {
     this.data = data;
     this.loc = loc;
   }
 }
 export class Stmt {
+  ;                 
+  ;                   
   constructor(data, loc = 0) {
     this.data = data;
     this.loc = loc;
   }
 }
 export class Binding {
+  ;                 
+  ;                   
   constructor(data, loc = 0) {
     this.data = data;
     this.loc = loc;
@@ -221,6 +231,9 @@ export class Binding {
 // Value structs
 
 export class Decorator {
+  ;                  
+  ;                     
+  ;                                 
   constructor(value = null, atLoc = 0, omitNewlineAfter = false) {
     this.value = value; // Expr
     this.atLoc = atLoc;
@@ -246,6 +259,8 @@ export function propertyKindIsMethodDefinition(kind) {
 }
 
 export class ClassStaticBlock {
+  ;                     
+  ;                   
   constructor(block = new SBlock(), loc = 0) {
     this.block = block; // SBlock (value)
     this.loc = loc;
@@ -259,6 +274,15 @@ export const PropertyWasShorthand = 1 << 2;
 export const PropertyPreferQuotedKey = 1 << 3;
 
 export class Property {
+                                
+                   
+                          
+                                
+                            
+                      
+                                  
+                       
+                        
   constructor(
     classStaticBlock = null,
     key = null,
@@ -296,6 +320,14 @@ export class Property {
 }
 
 export class PropertyBinding {
+  ;                
+  ;                  
+  ;                              
+  ;                   
+  ;                               
+  ;                           
+  ;                         
+  ;                                
   constructor(
     key = null,
     value = null,
@@ -330,6 +362,10 @@ export class PropertyBinding {
 }
 
 export class Arg {
+  ;                    
+  ;                         
+  ;                         
+  ;                                      
   constructor(binding = null, defaultOrNil = null, decorators = [], isTypeScriptCtorField = false) {
     this.binding = binding; // Binding
     this.defaultOrNil = defaultOrNil; // Expr
@@ -342,6 +378,8 @@ export class Arg {
 }
 
 export class FnBody {
+  ;                     
+  ;                   
   constructor(block = new SBlock(), loc = 0) {
     this.block = block; // SBlock (value)
     this.loc = loc;
@@ -352,6 +390,17 @@ export class FnBody {
 }
 
 export class Fn {
+  ;                 
+  ;                   
+  ;                    
+  ;                            
+  ;                            
+  ;                        
+  ;                            
+  ;                           
+  ;                           
+  ;                                        
+  ;                                         
   constructor(
     name = null, // *LocRef
     args = [],
@@ -397,6 +446,15 @@ export class Fn {
 }
 
 export class Class {
+  ;                         
+  ;                 
+  ;                         
+  ;                         
+  ;                           
+  ;                       
+  ;                             
+  ;                                              
+  ;                                        
   constructor(
     decorators = [],
     name = null, // *LocRef
@@ -434,6 +492,9 @@ export class Class {
 }
 
 export class ArrayBinding {
+  ;                    
+  ;                              
+  ;                   
   constructor(binding = null, defaultValueOrNil = null, loc = 0) {
     this.binding = binding;
     this.defaultValueOrNil = defaultValueOrNil;
@@ -452,10 +513,13 @@ export const B_IDENTIFIER = 2;
 export const B_ARRAY = 3;
 export const B_OBJECT = 4;
 
-export class BMissing {}
+export class BMissing {
+                 }
 BMissing.prototype.k = B_MISSING;
 
 export class BIdentifier {
+                      
+                 
   constructor(ref = InvalidRef) {
     this.ref = ref;
   }
@@ -463,6 +527,11 @@ export class BIdentifier {
 BIdentifier.prototype.k = B_IDENTIFIER;
 
 export class BArray {
+                       
+                                  
+                             
+                                
+                 
   constructor(items = [], closeBracketLoc = 0, hasSpread = false, isSingleLine = false) {
     this.items = items; // []ArrayBinding
     this.closeBracketLoc = closeBracketLoc;
@@ -473,6 +542,10 @@ export class BArray {
 BArray.prototype.k = B_ARRAY;
 
 export class BObject {
+                            
+                                
+                                
+                 
   constructor(properties = [], closeBraceLoc = 0, isSingleLine = false) {
     this.properties = properties; // []PropertyBinding
     this.closeBraceLoc = closeBraceLoc;
@@ -526,6 +599,12 @@ export const E_IMPORT_STRING = 39;
 export const E_IMPORT_CALL = 40;
 
 export class EArray {
+                       
+                                   
+                                  
+                                
+                                   
+                 
   constructor(items = [], commaAfterSpread = 0, closeBracketLoc = 0, isSingleLine = false, isParenthesized = false) {
     this.items = items; // []Expr
     this.commaAfterSpread = commaAfterSpread;
@@ -537,6 +616,11 @@ export class EArray {
 EArray.prototype.k = E_ARRAY;
 
 export class EUnary {
+                     
+                     
+                                                 
+                                                                   
+                 
   constructor(value = null, op = UnOpPos, wasOriginallyTypeofIdentifier = false, wasOriginallyDeleteOfIdentifierOrPropertyAccess = false) {
     this.value = value;
     this.op = op;
@@ -547,6 +631,11 @@ export class EUnary {
 EUnary.prototype.k = E_UNARY;
 
 export class EBinary {
+                    
+                     
+                     
+                                   
+                 
   constructor(left = null, right = null, op = UnOpPos, isParenthesized = false) {
     this.left = left;
     this.right = right;
@@ -557,28 +646,37 @@ export class EBinary {
 EBinary.prototype.k = E_BINARY;
 
 export class EBoolean {
+                         
+                 
   constructor(value = false) {
     this.value = value;
   }
 }
 EBoolean.prototype.k = E_BOOLEAN;
 
-export class EMissing {}
+export class EMissing {
+                 }
 EMissing.prototype.k = E_MISSING;
 
-export class ESuper {}
+export class ESuper {
+                 }
 ESuper.prototype.k = E_SUPER;
 
-export class ENull {}
+export class ENull {
+                 }
 ENull.prototype.k = E_NULL;
 
-export class EUndefined {}
+export class EUndefined {
+                 }
 EUndefined.prototype.k = E_UNDEFINED;
 
-export class EThis {}
+export class EThis {
+                 }
 EThis.prototype.k = E_THIS;
 
 export class ENewTarget {
+                       
+                 
   constructor(range = RANGE_ZERO) {
     this.range = range;
   }
@@ -586,6 +684,8 @@ export class ENewTarget {
 ENewTarget.prototype.k = E_NEW_TARGET;
 
 export class EImportMeta {
+                           
+                 
   constructor(rangeLen = 0) {
     this.rangeLen = rangeLen;
   }
@@ -601,6 +701,12 @@ export const EThisShared = new EThis();
 export const EUndefinedShared = new EUndefined();
 
 export class ENew {
+                      
+                      
+                                
+                               
+                                          
+                 
   constructor(target = null, args = [], closeParenLoc = 0, isMultiLine = false, canBeUnwrappedIfUnused = false) {
     this.target = target;
     this.args = args;
@@ -622,6 +728,14 @@ export const OptionalChainStart = 1;
 export const OptionalChainContinue = 2;
 
 export class ECall {
+                      
+                      
+                                
+                                
+                       
+                               
+                                          
+                 
   constructor(
     target = null,
     args = [],
@@ -646,6 +760,14 @@ export class ECall {
 ECall.prototype.k = E_CALL;
 
 export class EDot {
+                      
+                       
+                          
+                                
+                                        
+                                              
+                                    
+                 
   constructor(
     target = null,
     name = "",
@@ -675,6 +797,14 @@ export class EDot {
 EDot.prototype.k = E_DOT;
 
 export class EIndex {
+                      
+                     
+                                  
+                                
+                                        
+                                              
+                                    
+                 
   constructor(
     target = null,
     index = null,
@@ -704,6 +834,14 @@ export class EIndex {
 EIndex.prototype.k = E_INDEX;
 
 export class EArrow {
+                      
+                       
+                           
+                              
+                              
+                                   
+                                           
+                 
   constructor(
     args = [],
     body = new FnBody(),
@@ -725,6 +863,9 @@ export class EArrow {
 EArrow.prototype.k = E_ARROW;
 
 export class EFunction {
+                 
+                                   
+                 
   constructor(fn = new Fn(), isParenthesized = false) {
     this.fn = fn; // Fn (value)
     this.isParenthesized = isParenthesized;
@@ -733,6 +874,8 @@ export class EFunction {
 EFunction.prototype.k = E_FUNCTION;
 
 export class EClass {
+                       
+                 
   constructor(class_ = new Class()) {
     this.class = class_; // Class (value)
   }
@@ -740,6 +883,11 @@ export class EClass {
 EClass.prototype.k = E_CLASS;
 
 export class EIdentifier {
+                      
+                                         
+                                        
+                                              
+                 
   constructor(ref = InvalidRef, mustKeepDueToWithStmt = false, canBeRemovedIfUnused = false, callCanBeUnwrappedIfUnused = false) {
     this.ref = ref;
     this.mustKeepDueToWithStmt = mustKeepDueToWithStmt;
@@ -750,6 +898,10 @@ export class EIdentifier {
 EIdentifier.prototype.k = E_IDENTIFIER;
 
 export class EImportIdentifier {
+                      
+                                   
+                                           
+                 
   constructor(ref = InvalidRef, preferQuotedKey = false, wasOriginallyIdentifier = false) {
     this.ref = ref;
     this.preferQuotedKey = preferQuotedKey;
@@ -759,6 +911,8 @@ export class EImportIdentifier {
 EImportIdentifier.prototype.k = E_IMPORT_IDENTIFIER;
 
 export class EPrivateIdentifier {
+                      
+                 
   constructor(ref = InvalidRef) {
     this.ref = ref;
   }
@@ -766,6 +920,9 @@ export class EPrivateIdentifier {
 EPrivateIdentifier.prototype.k = E_PRIVATE_IDENTIFIER;
 
 export class ENameOfSymbol {
+                      
+                                         
+                 
   constructor(ref = InvalidRef, hasPropertyKeyComment = false) {
     this.ref = ref;
     this.hasPropertyKeyComment = hasPropertyKeyComment;
@@ -774,6 +931,12 @@ export class ENameOfSymbol {
 ENameOfSymbol.prototype.k = E_NAME_OF_SYMBOL;
 
 export class EJSXElement {
+                        
+                            
+                                  
+                           
+                                   
+                 
   constructor(tagOrNil = null, properties = [], nullableChildren = [], closeLoc = 0, isTagSingleLine = false) {
     this.tagOrNil = tagOrNil;
     this.properties = properties;
@@ -785,6 +948,8 @@ export class EJSXElement {
 EJSXElement.prototype.k = E_JSX_ELEMENT;
 
 export class EJSXText {
+                      
+                 
   constructor(raw = "") {
     this.raw = raw;
   }
@@ -792,6 +957,8 @@ export class EJSXText {
 EJSXText.prototype.k = E_JSX_TEXT;
 
 export class ENumber {
+                        
+                 
   constructor(value = 0) {
     this.value = value;
   }
@@ -799,6 +966,8 @@ export class ENumber {
 ENumber.prototype.k = E_NUMBER;
 
 export class EBigInt {
+                        
+                 
   constructor(value = "") {
     this.value = value;
   }
@@ -806,6 +975,12 @@ export class EBigInt {
 EBigInt.prototype.k = E_BIG_INT;
 
 export class EObject {
+                            
+                                   
+                                
+                                
+                                   
+                 
   constructor(properties = [], commaAfterSpread = 0, closeBraceLoc = 0, isSingleLine = false, isParenthesized = false) {
     this.properties = properties;
     this.commaAfterSpread = commaAfterSpread;
@@ -817,6 +992,8 @@ export class EObject {
 EObject.prototype.k = E_OBJECT;
 
 export class ESpread {
+                     
+                 
   constructor(value = null) {
     this.value = value;
   }
@@ -824,6 +1001,12 @@ export class ESpread {
 ESpread.prototype.k = E_SPREAD;
 
 export class EString {
+                        
+                                 
+                                  
+                                         
+                                     
+                 
   constructor(value = "", legacyOctalLoc = 0, preferTemplate = false, hasPropertyKeyComment = false, containsUniqueKey = false) {
     this.value = value; // []uint16 as a JS string
     this.legacyOctalLoc = legacyOctalLoc;
@@ -835,6 +1018,10 @@ export class EString {
 EString.prototype.k = E_STRING;
 
 export class TemplatePart {
+                     
+                          
+                             
+                          
   constructor(value = null, tailRaw = "", tailCooked = "", tailLoc = 0) {
     this.value = value;
     this.tailRaw = tailRaw; // Only use when "TagOrNil" is not nil
@@ -847,6 +1034,15 @@ export class TemplatePart {
 }
 
 export class ETemplate {
+  ;                     
+  ;                       
+  ;                          
+  ;                    
+  ;                       
+  ;                              
+  ;                                       
+  ;                                               
+  ;              
   constructor(
     tagOrNil = null,
     headRaw = "",
@@ -870,6 +1066,8 @@ export class ETemplate {
 ETemplate.prototype.k = E_TEMPLATE;
 
 export class ERegExp {
+                        
+                 
   constructor(value = "") {
     this.value = value;
   }
@@ -877,6 +1075,9 @@ export class ERegExp {
 ERegExp.prototype.k = E_REG_EXP;
 
 export class EInlinedEnum {
+                     
+                          
+                 
   constructor(value = null, comment = "") {
     this.value = value;
     this.comment = comment;
@@ -888,6 +1089,9 @@ EInlinedEnum.prototype.k = E_INLINED_ENUM;
 export const CanBeRemovedIfUnusedFlag = 1;
 
 export class EAnnotation {
+                     
+                        
+                 
   constructor(value = null, flags = 0) {
     this.value = value;
     this.flags = flags;
@@ -896,6 +1100,8 @@ export class EAnnotation {
 EAnnotation.prototype.k = E_ANNOTATION;
 
 export class EAwait {
+                     
+                 
   constructor(value = null) {
     this.value = value;
   }
@@ -903,6 +1109,9 @@ export class EAwait {
 EAwait.prototype.k = E_AWAIT;
 
 export class EYield {
+                          
+                          
+                 
   constructor(valueOrNil = null, isStar = false) {
     this.valueOrNil = valueOrNil;
     this.isStar = isStar;
@@ -911,6 +1120,10 @@ export class EYield {
 EYield.prototype.k = E_YIELD;
 
 export class EIf {
+                    
+                   
+                  
+                 
   constructor(test = null, yes = null, no = null) {
     this.test = test;
     this.yes = yes;
@@ -920,6 +1133,9 @@ export class EIf {
 EIf.prototype.k = E_IF;
 
 export class ERequireString {
+                                    
+                                
+                 
   constructor(importRecordIndex = 0, closeParenLoc = 0) {
     this.importRecordIndex = importRecordIndex;
     this.closeParenLoc = closeParenLoc;
@@ -928,6 +1144,9 @@ export class ERequireString {
 ERequireString.prototype.k = E_REQUIRE_STRING;
 
 export class ERequireResolveString {
+                                    
+                                
+                 
   constructor(importRecordIndex = 0, closeParenLoc = 0) {
     this.importRecordIndex = importRecordIndex;
     this.closeParenLoc = closeParenLoc;
@@ -936,6 +1155,9 @@ export class ERequireResolveString {
 ERequireResolveString.prototype.k = E_REQUIRE_RESOLVE_STRING;
 
 export class EImportString {
+                                    
+                                
+                 
   constructor(importRecordIndex = 0, closeParenLoc = 0) {
     this.importRecordIndex = importRecordIndex;
     this.closeParenLoc = closeParenLoc;
@@ -944,6 +1166,11 @@ export class EImportString {
 EImportString.prototype.k = E_IMPORT_STRING;
 
 export class EImportCall {
+                    
+                            
+                                
+                        
+                 
   constructor(expr = null, optionsOrNil = null, closeParenLoc = 0, phase = 0) {
     this.expr = expr;
     this.optionsOrNil = optionsOrNil;
@@ -991,6 +1218,9 @@ export const S_BREAK = 32;
 export const S_CONTINUE = 33;
 
 export class SBlock {
+                       
+                                
+                 
   constructor(stmts = [], closeBraceLoc = 0) {
     this.stmts = stmts;
     this.closeBraceLoc = closeBraceLoc;
@@ -1001,10 +1231,13 @@ export class SBlock {
 }
 SBlock.prototype.k = S_BLOCK;
 
-export class SEmpty {}
+export class SEmpty {
+                 }
 SEmpty.prototype.k = S_EMPTY;
 
 export class STypeScript {
+                                   
+                 
   constructor(wasDeclareClass = false) {
     this.wasDeclareClass = wasDeclareClass;
   }
@@ -1012,6 +1245,9 @@ export class STypeScript {
 STypeScript.prototype.k = S_TYPESCRIPT;
 
 export class SComment {
+                       
+                                  
+                 
   constructor(text = "", isLegalComment = false) {
     this.text = text;
     this.isLegalComment = isLegalComment;
@@ -1019,10 +1255,14 @@ export class SComment {
 }
 SComment.prototype.k = S_COMMENT;
 
-export class SDebugger {}
+export class SDebugger {
+                 }
 SDebugger.prototype.k = S_DEBUGGER;
 
 export class SDirective {
+                        
+                                 
+                 
   constructor(value = "", legacyOctalLoc = 0) {
     this.value = value; // []uint16
     this.legacyOctalLoc = legacyOctalLoc;
@@ -1036,6 +1276,9 @@ export const STypeScriptShared = new STypeScript(false);
 export const STypeScriptSharedWasDeclareClass = new STypeScript(true);
 
 export class SExportClause {
+                       
+                                
+                 
   constructor(items = [], isSingleLine = false) {
     this.items = items; // []ClauseItem
     this.isSingleLine = isSingleLine;
@@ -1044,6 +1287,11 @@ export class SExportClause {
 SExportClause.prototype.k = S_EXPORT_CLAUSE;
 
 export class SExportFrom {
+                       
+                               
+                                    
+                                
+                 
   constructor(items = [], namespaceRef = InvalidRef, importRecordIndex = 0, isSingleLine = false) {
     this.items = items;
     this.namespaceRef = namespaceRef;
@@ -1054,6 +1302,9 @@ export class SExportFrom {
 SExportFrom.prototype.k = S_EXPORT_FROM;
 
 export class SExportDefault {
+                     
+                              
+                 
   constructor(value = null, defaultName = new LocRef()) {
     this.value = value; // Stmt (SExpr, SFunction or SClass)
     this.defaultName = defaultName; // ast.LocRef (value)
@@ -1062,6 +1313,8 @@ export class SExportDefault {
 SExportDefault.prototype.k = S_EXPORT_DEFAULT;
 
 export class ExportStarAlias {
+                               
+                      
   constructor(originalName = "", loc = 0) {
     this.originalName = originalName;
     this.loc = loc;
@@ -1069,6 +1322,10 @@ export class ExportStarAlias {
 }
 
 export class SExportStar {
+  ;                  
+  ;                            
+  ;                                 
+  ;              
   constructor(alias = null, namespaceRef = InvalidRef, importRecordIndex = 0) {
     this.alias = alias; // *ExportStarAlias
     this.namespaceRef = namespaceRef;
@@ -1078,6 +1335,8 @@ export class SExportStar {
 SExportStar.prototype.k = S_EXPORT_STAR;
 
 export class SExportEquals {
+                     
+                 
   constructor(value = null) {
     this.value = value;
   }
@@ -1085,6 +1344,8 @@ export class SExportEquals {
 SExportEquals.prototype.k = S_EXPORT_EQUALS;
 
 export class SLazyExport {
+                     
+                 
   constructor(value = null) {
     this.value = value;
   }
@@ -1092,6 +1353,9 @@ export class SLazyExport {
 SLazyExport.prototype.k = S_LAZY_EXPORT;
 
 export class SExpr {
+                     
+                                                           
+                 
   constructor(value = null, isFromClassOrFnThatCanBeRemovedIfUnused = false) {
     this.value = value;
     this.isFromClassOrFnThatCanBeRemovedIfUnused = isFromClassOrFnThatCanBeRemovedIfUnused;
@@ -1100,6 +1364,10 @@ export class SExpr {
 SExpr.prototype.k = S_EXPR;
 
 export class EnumValue {
+                          
+                       
+                      
+                      
   constructor(valueOrNil = null, name = "", ref = InvalidRef, loc = 0) {
     this.valueOrNil = valueOrNil;
     this.name = name; // []uint16
@@ -1112,6 +1380,11 @@ export class EnumValue {
 }
 
 export class SEnum {
+  ;                     
+  ;                    
+  ;                   
+  ;                         
+  ;              
   constructor(values = [], name = new LocRef(), arg = InvalidRef, isExport = false) {
     this.values = values;
     this.name = name;
@@ -1122,6 +1395,11 @@ export class SEnum {
 SEnum.prototype.k = S_ENUM;
 
 export class SNamespace {
+                       
+                       
+                      
+                            
+                 
   constructor(stmts = [], name = new LocRef(), arg = InvalidRef, isExport = false) {
     this.stmts = stmts;
     this.name = name;
@@ -1132,6 +1410,9 @@ export class SNamespace {
 SNamespace.prototype.k = S_NAMESPACE;
 
 export class SFunction {
+                 
+                            
+                 
   constructor(fn = new Fn(), isExport = false) {
     this.fn = fn; // Fn (value)
     this.isExport = isExport;
@@ -1140,6 +1421,9 @@ export class SFunction {
 SFunction.prototype.k = S_FUNCTION;
 
 export class SClass {
+                       
+                            
+                 
   constructor(class_ = new Class(), isExport = false) {
     this.class = class_; // Class (value)
     this.isExport = isExport;
@@ -1148,6 +1432,10 @@ export class SClass {
 SClass.prototype.k = S_CLASS;
 
 export class SLabel {
+                    
+                       
+                                    
+                 
   constructor(stmt = null, name = new LocRef(), isSingleLineStmt = false) {
     this.stmt = stmt;
     this.name = name;
@@ -1157,6 +1445,12 @@ export class SLabel {
 SLabel.prototype.k = S_LABEL;
 
 export class SIf {
+                    
+                   
+                       
+                                   
+                                  
+                 
   constructor(test = null, yes = null, noOrNil = null, isSingleLineYes = false, isSingleLineNo = false) {
     this.test = test;
     this.yes = yes;
@@ -1168,6 +1462,13 @@ export class SIf {
 SIf.prototype.k = S_IF;
 
 export class SFor {
+                         
+                         
+                           
+                    
+                                    
+                                     
+                 
   constructor(initOrNil = null, testOrNil = null, updateOrNil = null, body = null, isSingleLineBody = false, isLoweredForAwait = false) {
     this.initOrNil = initOrNil; // Stmt
     this.testOrNil = testOrNil; // Expr
@@ -1180,6 +1481,11 @@ export class SFor {
 SFor.prototype.k = S_FOR;
 
 export class SForIn {
+                    
+                     
+                    
+                                    
+                 
   constructor(init = null, value = null, body = null, isSingleLineBody = false) {
     this.init = init;
     this.value = value;
@@ -1190,6 +1496,12 @@ export class SForIn {
 SForIn.prototype.k = S_FOR_IN;
 
 export class SForOf {
+                    
+                     
+                    
+                       
+                                    
+                 
   constructor(init = null, value = null, body = null, await_ = RANGE_ZERO, isSingleLineBody = false) {
     this.init = init;
     this.value = value;
@@ -1201,6 +1513,9 @@ export class SForOf {
 SForOf.prototype.k = S_FOR_OF;
 
 export class SDoWhile {
+                    
+                    
+                 
   constructor(body = null, test = null) {
     this.body = body;
     this.test = test;
@@ -1209,6 +1524,10 @@ export class SDoWhile {
 SDoWhile.prototype.k = S_DO_WHILE;
 
 export class SWhile {
+                    
+                    
+                                    
+                 
   constructor(test = null, body = null, isSingleLineBody = false) {
     this.test = test;
     this.body = body;
@@ -1218,6 +1537,11 @@ export class SWhile {
 SWhile.prototype.k = S_WHILE;
 
 export class SWith {
+                     
+                    
+                          
+                                    
+                 
   constructor(value = null, body = null, bodyLoc = 0, isSingleLineBody = false) {
     this.value = value;
     this.body = body;
@@ -1228,6 +1552,10 @@ export class SWith {
 SWith.prototype.k = S_WITH;
 
 export class Catch {
+                            
+                        
+                      
+                           
   constructor(bindingOrNil = null, block = new SBlock(), loc = 0, blockLoc = 0) {
     this.bindingOrNil = bindingOrNil; // Binding
     this.block = block; // SBlock (value)
@@ -1237,6 +1565,8 @@ export class Catch {
 }
 
 export class Finally {
+  ;                     
+  ;                   
   constructor(block = new SBlock(), loc = 0) {
     this.block = block; // SBlock (value)
     this.loc = loc;
@@ -1244,6 +1574,11 @@ export class Finally {
 }
 
 export class STry {
+  ;                  
+  ;                    
+  ;                     
+  ;                        
+  ;              
   constructor(catch_ = null, finally_ = null, block = new SBlock(), blockLoc = 0) {
     this.catch = catch_; // *Catch
     this.finally = finally_; // *Finally
@@ -1254,6 +1589,9 @@ export class STry {
 STry.prototype.k = S_TRY;
 
 export class Case {
+                          
+                      
+                      
   constructor(valueOrNil = null, body = [], loc = 0) {
     this.valueOrNil = valueOrNil; // Expr; null means "default"
     this.body = body; // []Stmt
@@ -1265,6 +1603,11 @@ export class Case {
 }
 
 export class SSwitch {
+  ;                 
+  ;                    
+  ;                       
+  ;                             
+  ;              
   constructor(test = null, cases = [], bodyLoc = 0, closeBraceLoc = 0) {
     this.test = test;
     this.cases = cases;
@@ -1275,6 +1618,13 @@ export class SSwitch {
 SSwitch.prototype.k = S_SWITCH;
 
 export class SImport {
+                           
+                     
+                           
+                               
+                                    
+                                
+                 
   constructor(defaultName = null, items = null, starNameLoc = null, namespaceRef = InvalidRef, importRecordIndex = 0, isSingleLine = false) {
     this.defaultName = defaultName; // *ast.LocRef
     this.items = items; // *[]ClauseItem -> array or null
@@ -1287,6 +1637,8 @@ export class SImport {
 SImport.prototype.k = S_IMPORT;
 
 export class SReturn {
+                          
+                 
   constructor(valueOrNil = null) {
     this.valueOrNil = valueOrNil;
   }
@@ -1294,6 +1646,8 @@ export class SReturn {
 SReturn.prototype.k = S_RETURN;
 
 export class SThrow {
+                     
+                 
   constructor(value = null) {
     this.value = value;
   }
@@ -1312,6 +1666,11 @@ export function localKindIsUsing(kind) {
 }
 
 export class SLocal {
+  ;                    
+  ;                    
+  ;                         
+  ;                                  
+  ;              
   constructor(decls = [], kind = LocalVar, isExport = false, wasTSImportEquals = false) {
     this.decls = decls; // []Decl
     this.kind = kind;
@@ -1322,6 +1681,8 @@ export class SLocal {
 SLocal.prototype.k = S_LOCAL;
 
 export class SBreak {
+                     
+                 
   constructor(label = null) {
     this.label = label; // *ast.LocRef
   }
@@ -1329,6 +1690,8 @@ export class SBreak {
 SBreak.prototype.k = S_BREAK;
 
 export class SContinue {
+                     
+                 
   constructor(label = null) {
     this.label = label; // *ast.LocRef
   }
@@ -1336,6 +1699,10 @@ export class SContinue {
 SContinue.prototype.k = S_CONTINUE;
 
 export class ClauseItem {
+                        
+                               
+                           
+                       
   constructor(alias = "", originalName = "", aliasLoc = 0, name = new LocRef()) {
     this.alias = alias;
     this.originalName = originalName;
@@ -1348,6 +1715,8 @@ export class ClauseItem {
 }
 
 export class Decl {
+  ;                    
+  ;                       
   constructor(binding = null, valueOrNil = null) {
     this.binding = binding; // Binding
     this.valueOrNil = valueOrNil; // Expr
@@ -1378,6 +1747,8 @@ export function scopeKindStopsHoisting(kind) {
 }
 
 export class ScopeMember {
+  ;                   
+  ;                   
   constructor(ref = InvalidRef, loc = 0) {
     this.ref = ref;
     this.loc = loc;
@@ -1393,6 +1764,21 @@ export const ImplicitStrictModeTSAlwaysStrict = 4;
 export const ImplicitStrictModeJSXAutomaticRuntime = 5;
 
 export class Scope {
+                           
+                      
+                          
+                                 
+                          
+                           
+                               
+                        
+                                   
+                                      
+                                   
+                                           
+                             
+                       
+                               
   constructor(
     tsNamespace = null,
     parent = null,
@@ -1436,6 +1822,10 @@ export class Scope {
 }
 
 export class TSNamespaceScope {
+  ;                                      
+  ;                                           
+  ;                      
+  ;                            
   constructor(exportedMembers = new Map(), lazilyGeneratedProperyAccesses = null, argRef = InvalidRef, isEnumScope = false) {
     this.exportedMembers = exportedMembers; // TSNamespaceMembers = Map<string, TSNamespaceMember>
     this.lazilyGeneratedProperyAccesses = lazilyGeneratedProperyAccesses; // Map<string, Ref> | null
@@ -1445,6 +1835,9 @@ export class TSNamespaceScope {
 }
 
 export class TSNamespaceMember {
+  ;                 
+  ;                   
+  ;                            
   constructor(data = null, loc = 0, isEnumValue = false) {
     this.data = data; // TSNamespaceMemberData
     this.loc = loc;
@@ -1458,10 +1851,13 @@ export const TS_NAMESPACE_MEMBER_NAMESPACE = 2;
 export const TS_NAMESPACE_MEMBER_ENUM_NUMBER = 3;
 export const TS_NAMESPACE_MEMBER_ENUM_STRING = 4;
 
-export class TSNamespaceMemberProperty {}
+export class TSNamespaceMemberProperty {
+                 }
 TSNamespaceMemberProperty.prototype.k = TS_NAMESPACE_MEMBER_PROPERTY;
 
 export class TSNamespaceMemberNamespace {
+                                         
+                 
   constructor(exportedMembers = new Map()) {
     this.exportedMembers = exportedMembers;
   }
@@ -1469,6 +1865,8 @@ export class TSNamespaceMemberNamespace {
 TSNamespaceMemberNamespace.prototype.k = TS_NAMESPACE_MEMBER_NAMESPACE;
 
 export class TSNamespaceMemberEnumNumber {
+                        
+                 
   constructor(value = 0) {
     this.value = value;
   }
@@ -1476,6 +1874,8 @@ export class TSNamespaceMemberEnumNumber {
 TSNamespaceMemberEnumNumber.prototype.k = TS_NAMESPACE_MEMBER_ENUM_NUMBER;
 
 export class TSNamespaceMemberEnumString {
+                        
+                 
   constructor(value = "") {
     this.value = value; // []uint16
   }
@@ -1509,6 +1909,9 @@ export function moduleTypeIsESM(mt) {
 }
 
 export class ModuleTypeData {
+  ;                   
+  ;                    
+  ;                    
   constructor(source = null, range = RANGE_ZERO, type = ModuleUnknown) {
     this.source = source;
     this.range = range;
@@ -1519,6 +1922,38 @@ export class ModuleTypeData {
 export const NSExportPartIndex = 0;
 
 export class AST {
+                                         
+                       
+                         
+                            
+                           
+                        
+                                  
+                           
+                            
+                            
+                                               
+                       
+                           
+                            
+                             
+                               
+                            
+                            
+                                         
+                                
+                               
+                                      
+                                          
+                             
+                            
+                             
+                                       
+                                     
+                                 
+                                  
+                                 
+                              
   constructor() {
     this.moduleTypeData = new ModuleTypeData();
     this.parts = []; // []Part
@@ -1556,6 +1991,8 @@ export class AST {
 }
 
 export class TSEnumValue {
+  ;                   
+  ;                      
   constructor(string = null, number = 0) {
     this.string = string; // []uint16 or null ("Use this if it's not nil")
     this.number = number;
@@ -1572,6 +2009,9 @@ export const ConstValueNumber = 5;
 export const ConstValueString = 6;
 
 export class ConstValue {
+                         
+                         
+                       
   constructor(number = 0, string = "", kind = ConstValueNone) {
     this.number = number;
     this.string = string; // []uint16
@@ -1628,6 +2068,13 @@ export function constValueToExpr(loc, value) {
 }
 
 export class NamedImport {
+  ;                     
+  ;                                 
+  ;                        
+  ;                            
+  ;                                 
+  ;                            
+  ;                           
   constructor(
     alias = "",
     localPartsWithUses = [],
@@ -1659,6 +2106,8 @@ export class NamedImport {
 }
 
 export class NamedExport {
+  ;                   
+  ;                        
   constructor(ref = InvalidRef, aliasLoc = 0) {
     this.ref = ref;
     this.aliasLoc = aliasLoc;
@@ -1666,6 +2115,17 @@ export class NamedExport {
 }
 
 export class Part {
+  ;                    
+  ;                     
+  ;                                  
+  ;                              
+  ;                                 
+  ;                                     
+  ;                                               
+  ;                           
+  ;                                     
+  ;                                 
+  ;                       
   constructor() {
     this.stmts = []; // []Stmt
     this.scopes = []; // []*Scope
@@ -1698,6 +2158,8 @@ export class Part {
 }
 
 export class Dependency {
+  ;                           
+  ;                         
   constructor(sourceIndex = 0, partIndex = 0) {
     this.sourceIndex = sourceIndex;
     this.partIndex = partIndex;
@@ -1705,6 +2167,8 @@ export class Dependency {
 }
 
 export class DeclaredSymbol {
+  ;                   
+  ;                           
   constructor(ref = InvalidRef, isTopLevel = false) {
     this.ref = ref;
     this.isTopLevel = isTopLevel;
@@ -1712,12 +2176,15 @@ export class DeclaredSymbol {
 }
 
 export class SymbolUse {
+  ;                             
   constructor(countEstimate = 0) {
     this.countEstimate = countEstimate;
   }
 }
 
 export class SymbolCallUse {
+  ;                                 
+  ;                                                   
   constructor(callCountEstimate = 0, singleArgNonSpreadCallCountEstimate = 0) {
     this.callCountEstimate = callCountEstimate;
     this.singleArgNonSpreadCallCountEstimate = singleArgNonSpreadCallCountEstimate;
@@ -1763,3 +2230,4 @@ export function ensureValidIdentifier(base) {
   if (bytes.length === 0) return "_";
   return bytes;
 }
+// generated from js_ast.mts by tools/ts-build.mjs; edit that file

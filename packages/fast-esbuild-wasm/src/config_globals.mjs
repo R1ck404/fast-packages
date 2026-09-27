@@ -805,3 +805,4 @@ export const KNOWN_GLOBALS = [
   ["webkitURL"],
   ["window"],
 ];
+// generated from config_globals.mts by tools/ts-build.mjs; edit that file

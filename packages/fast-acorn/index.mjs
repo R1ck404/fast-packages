@@ -24,12 +24,16 @@ import { fastParse, fastParseExpressionAt, BodyFacade, exactErrors } from "./par
 import { bodyOverrideOf } from "./override.mjs";
 import { jsxOptionsOf, registerJsxClass } from "./jsx-detect.mjs";
 import { getOptions as fastGetOptions } from "./options.mjs";
+// (acorn's public types, as shipped in index.d.ts)
+                                                                                    
+                                                   
+                                                   
 
 // @r1ck404/fast-acorn-jsx hands every class it creates to this hook. Registration
 // is by identity, so it survives bundling and minification; only classes
 // made directly on this Parser take the native JSX path.
 Object.defineProperty(V.Parser, Symbol.for("@r1ck404/fast-acorn:registerJsxClass"), {
-  value: (Parser, cls, options) => {
+  value: (Parser         , cls          , options                     ) => {
     if (Parser === V.Parser) registerJsxClass(cls, options);
   },
 });
@@ -39,7 +43,7 @@ const getOptions = fastGetOptions;
 const origParse = V.Parser.parse;
 const origParseExpressionAt = V.Parser.parseExpressionAt;
 
-function eligible(o) {
+function eligible(o                     )          {
   return (
     o.ecmaVersion >= 16 &&
     !o.onToken &&
@@ -54,7 +58,7 @@ function eligible(o) {
 // acorn's Parser constructor: getOptions(options) (throws exactly like acorn
 // for invalid combinations), then String(input) -- done once here, so a
 // fallback re-parse does not convert a non-string input a second time
-function parseVia(cls, input, options, jsx, bodyOverride) {
+function parseVia(cls          , input         , options         , jsx                   , bodyOverride                     )          {
   const o = getOptions(options);
   const str = String(input);
   if (eligible(o)) {
@@ -74,7 +78,7 @@ function parseVia(cls, input, options, jsx, bodyOverride) {
 // made by acorn-jsx (see jsx-detect.mjs) or one that only overrides
 // parseFunctionBody in a way the fast parser can host (see override.mjs);
 // other subclasses created by Parser.extend(...) keep acorn's behaviour.
-V.Parser.parse = function parse(input, options) {
+V.Parser.parse = function parse(                input         , options         )          {
   if (this === V.Parser) return parseVia(this, input, options, null, null);
   const jsx = jsxOptionsOf(this);
   if (jsx !== null) return parseVia(this, input, options, jsx, null);
@@ -83,7 +87,7 @@ V.Parser.parse = function parse(input, options) {
   return origParse.call(this, input, options);
 };
 
-function parseExpressionAtVia(cls, input, pos, options, jsx, bodyOverride) {
+function parseExpressionAtVia(cls          , input         , pos        , options         , jsx                   , bodyOverride                     )             {
   const o = getOptions(options);
   const str = String(input);
   // acorn uses "startPos || 0"; only plain in-range integers are handled here
@@ -97,7 +101,7 @@ function parseExpressionAtVia(cls, input, pos, options, jsx, bodyOverride) {
   return origParseExpressionAt.call(cls, str, pos, options);
 }
 
-V.Parser.parseExpressionAt = function parseExpressionAt(input, pos, options) {
+V.Parser.parseExpressionAt = function parseExpressionAt(                input         , pos        , options         )             {
   if (this === V.Parser) return parseExpressionAtVia(this, input, pos, options, null, null);
   const jsx = jsxOptionsOf(this);
   if (jsx !== null) return parseExpressionAtVia(this, input, pos, options, jsx, null);
@@ -109,21 +113,21 @@ V.Parser.parseExpressionAt = function parseExpressionAt(input, pos, options) {
 // super.parseFunctionBody() from an override running on the fast parser's
 // facade reaches acorn's method: hand it to the fast parser
 const origParseFunctionBody = V.Parser.prototype.parseFunctionBody;
-V.Parser.prototype.parseFunctionBody = function (node, isArrowFunction, isMethod, forInit) {
+V.Parser.prototype.parseFunctionBody = function (           node     , isArrowFunction          , isMethod          , forInit          )       {
   if (this instanceof BodyFacade) return this.superParseFunctionBody(node, isArrowFunction, isMethod, forInit);
   return origParseFunctionBody.call(this, node, isArrowFunction, isMethod, forInit);
 };
 
-export function parse(input, options) {
-  return V.Parser.parse(input, options);
+export function parse(input        , options         )          {
+  return V.Parser.parse(input, options)           ;
 }
 
-export function parseExpressionAt(input, pos, options) {
-  return V.Parser.parseExpressionAt(input, pos, options);
+export function parseExpressionAt(input        , pos        , options         )             {
+  return V.Parser.parseExpressionAt(input, pos, options)              ;
 }
 
-export function tokenizer(input, options) {
-  return V.Parser.tokenizer(input, options);
+export function tokenizer(input        , options         )                                                                        {
+  return V.Parser.tokenizer(input, options)       ;
 }
 
 export const {
@@ -147,3 +151,4 @@ export const {
   tokTypes,
   version,
 } = V;
+// generated from index.mts by tools/ts-build.mjs; edit that file

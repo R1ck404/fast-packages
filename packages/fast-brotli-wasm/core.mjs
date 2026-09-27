@@ -9,6 +9,34 @@
 // console.error + RuntimeError "unreachable", like console_error_panic_hook),
 // results are fresh Uint8Arrays, and wrapper objects only own a `ptr`.
 
+/** exports of rust/src (pointers and sizes are byte offsets / counts) */
+                                    
+                             
+                                                                
+                
+                           
+                                   
+                  
+                                              
+                                                          
+                                           
+                                                 
+                                                                
+                           
+                                  
+                                                                                                       
+                   
+                           
+                                  
+                                                                             
+ 
+/** brotli-wasm's compress() options */
+                          
+                   
+ 
+/** what brotli-wasm copies in (passArray8ToWasm0: anything array-like) */
+                                      
+
 export const BrotliStreamResultCode = Object.freeze({
   ResultSuccess: 1,
   1: "ResultSuccess",
@@ -18,11 +46,11 @@ export const BrotliStreamResultCode = Object.freeze({
   3: "NeedsMoreOutput",
 });
 
-export function bind(W) {
+export function bind(W                   ) {
   const H = W.hdr() >>> 2;
   const decode = W.decompress_fast || W.decompress;
-  let mem = null;
-  let U8, U32;
+  let mem                     = null;
+  let U8            , U32             ;
   const views = () => {
     if (W.memory.buffer !== mem) {
       mem = W.memory.buffer;
@@ -34,7 +62,7 @@ export function bind(W) {
   const encoder = new TextEncoder();
 
   // passArray8ToWasm0
-  function pass(arg) {
+  function pass(arg       )                   {
     const len = arg.length;
     const p = W.alloc(len * 1);
     views();
@@ -42,7 +70,7 @@ export function bind(W) {
     return [p, len];
   }
   // the result in HDR (bytes or message); the wasm side keeps it until release()
-  function take() {
+  function take()             {
     views();
     const p = U32[H];
     const out = U8.slice(p, p + U32[H + 1]);
@@ -54,14 +82,14 @@ export function bind(W) {
   // in brotli-wasm only the first two panics reach console_error_panic_hook,
   // later ones abort without calling it.
   let panics = 0;
-  function panic(message) {
+  function panic(message        )        {
     if (++panics <= 2) {
       console.error(`panicked at '${message}', src/lib.rs:38:44\n\nStack:\n\n${new Error().stack}\n\n`);
     }
     throw new WebAssembly.RuntimeError("unreachable");
   }
 
-  function quality(raw_options) {
+  function quality(raw_options                     )         {
     if (raw_options === undefined) return 11;
     if (!(typeof raw_options === "object" && raw_options !== null)) throw "Options is not an object";
     const json = JSON.stringify(raw_options);
@@ -77,9 +105,9 @@ export function bind(W) {
     return U32[H + 2] | 0;
   }
 
-  function compress(buf, raw_options) {
+  function compress(buf       , raw_options          )             {
     const [p, len] = pass(buf);
-    let q;
+    let q        ;
     try {
       q = quality(raw_options);
     } catch (e) {
@@ -93,7 +121,7 @@ export function bind(W) {
     return out;
   }
 
-  function decompress(buf) {
+  function decompress(buf       )             {
     const [p, len] = pass(buf);
     const st = decode(p, len);
     W.free(p, len);
@@ -102,59 +130,61 @@ export function bind(W) {
     return out;
   }
 
-  const isLikeNone = (x) => x === undefined || x === null;
-  const state = new WeakMap(); // BrotliStreamResult -> [code, buf, input_offset]
+  const isLikeNone = (x         )                        => x === undefined || x === null;
+  const state = new WeakMap                                                  (); // BrotliStreamResult -> [code, buf, input_offset]
   let resultIds = 0;
 
   class BrotliStreamResult {
-    static __wrap(code, buf, input_offset) {
+                        
+    static __wrap(code        , buf            , input_offset        )                     {
       const obj = Object.create(BrotliStreamResult.prototype);
       obj.ptr = ++resultIds;
       state.set(obj, [code, buf, input_offset]);
       return obj;
     }
-    __destroy_into_raw() {
+    __destroy_into_raw()         {
       const ptr = this.ptr;
       this.ptr = 0;
       return ptr;
     }
-    free() {
+    free()       {
       this.__destroy_into_raw();
       state.delete(this);
     }
-    get code() {
+    get code()         {
       return state.get(this)[0] >>> 0;
     }
-    set code(arg0) {
+    set code(arg0        ) {
       // a BrotliStreamResultCode on the Rust side
       const v = arg0 >>> 0;
       if (v !== 1 && v !== 2 && v !== 3) throw new Error("invalid enum value passed");
       state.get(this)[0] = v;
     }
-    get buf() {
+    get buf()             {
       return state.get(this)[1].slice();
     }
-    set buf(arg0) {
+    set buf(arg0       ) {
       const a = new Uint8Array(arg0.length * 1);
       a.set(arg0);
       state.get(this)[1] = a;
     }
-    get input_offset() {
+    get input_offset()         {
       return state.get(this)[2] >>> 0;
     }
-    set input_offset(arg0) {
+    set input_offset(arg0        ) {
       state.get(this)[2] = arg0 >>> 0;
     }
   }
 
-  function streamResult(st) {
+  function streamResult(st        )                     {
     const out = take();
     if (st !== 0) throw new Error(utf8.decode(out));
     return BrotliStreamResult.__wrap(U32[H + 2], out, U32[H + 3]);
   }
 
   class CompressStream {
-    static __wrap(ptr) {
+    ;                   
+    static __wrap(ptr        )                 {
       const obj = Object.create(CompressStream.prototype);
       obj.ptr = ptr;
       return obj;
@@ -164,13 +194,13 @@ export function bind(W) {
       this.ptr = 0;
       return ptr;
     }
-    free() {
+    free()       {
       W.cs_free(this.__destroy_into_raw());
     }
-    constructor(quality) {
+    constructor(quality         ) {
       return CompressStream.__wrap(W.cs_new(!isLikeNone(quality), isLikeNone(quality) ? 0 : quality));
     }
-    compress(input_opt, output_size) {
+    compress(input_opt                          , output_size        )                     {
       let p = 0, len = 0;
       const has = !isLikeNone(input_opt);
       if (has) [p, len] = pass(input_opt);
@@ -184,7 +214,8 @@ export function bind(W) {
   }
 
   class DecompressStream {
-    static __wrap(ptr) {
+    ;                   
+    static __wrap(ptr        )                   {
       const obj = Object.create(DecompressStream.prototype);
       obj.ptr = ptr;
       return obj;
@@ -200,7 +231,7 @@ export function bind(W) {
     constructor() {
       return DecompressStream.__wrap(W.ds_new());
     }
-    decompress(input, output_size) {
+    decompress(input       , output_size        )                     {
       const [p, len] = pass(input);
       const st = W.ds_decompress(this.ptr, p, len, output_size);
       W.free(p, len);
@@ -213,3 +244,4 @@ export function bind(W) {
 
   return { compress, decompress, BrotliStreamResult, BrotliStreamResultCode, CompressStream, DecompressStream };
 }
+// generated from core.mts by tools/ts-build.mjs; edit that file

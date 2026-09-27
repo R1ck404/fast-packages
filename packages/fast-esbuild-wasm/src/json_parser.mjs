@@ -37,6 +37,12 @@ import {
 } from "./js_ast.mjs";
 
 class jsonParser {
+                   
+                      
+                       
+                     
+                       
+                                              
   constructor(log, source, tracker, lexer, options, suppressWarningsAboutWeirdCode) {
     this.log = log;
     this.source = source;
@@ -204,6 +210,10 @@ class jsonParser {
 }
 
 export class JSONOptions {
+  ;                                     
+  ;                      
+  ;                           
+  ;                            
   constructor(unsupportedJSFeatures = 0, flavor = FlavorJSON, errorSuffix = "", isForDefine = false) {
     this.unsupportedJSFeatures = unsupportedJSFeatures; // (must be 0: compat is not ported)
     this.flavor = flavor;
@@ -213,7 +223,7 @@ export class JSONOptions {
 }
 
 // Returns [result (Expr or null), ok]
-export function parseJSON(log, source, options) {
+export function parseJSON(log, source, options)                  {
   let errorSuffix = options.errorSuffix;
   if (errorSuffix === "") {
     errorSuffix = " in JSON";
@@ -237,3 +247,4 @@ export function parseJSON(log, source, options) {
     throw e;
   }
 }
+// generated from json_parser.mts by tools/ts-build.mjs; edit that file

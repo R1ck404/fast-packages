@@ -6,6 +6,56 @@
 import V from "./vendor/pako.esm.mjs";
 import wasmB64 from "./fastzlib.wasm.mjs";
 
+/** pako's options (both directions) */
+                          
+                 
+                  
+                      
+                    
+                    
+                     
+                                                 
+                             
+                
+                 
+                     
+ 
+                             
+                 
+                
+              
+                            
+                
+                   
+                 
+ 
+/** what pako accepts as input */
+                                                     
+
+/** exports of rust/src/lib.rs (pointers and sizes are byte offsets / counts) */
+                     
+                             
+                   
+                              
+                                      
+                                                                                                                                                              
+                                                                                                                                                                                                      
+                                                        
+                                          
+                                                        
+                                          
+                               
+                                                                                                             
+                                                                     
+                                          
+                                                                               
+                                
+                                          
+                               
+ 
+/** js_emit(kind, ptr, len, chunkSize): kind 0 = full chunk, 1 = partial, 2 = string */
+                                                                                        
+
 const VDeflate = V.Deflate;
 const VInflate = V.Inflate;
 export const constants = V.constants;
@@ -13,7 +63,7 @@ export const constants = V.constants;
 const Z_NO_FLUSH = 0, Z_SYNC_FLUSH = 2, Z_FULL_FLUSH = 3, Z_FINISH = 4;
 const Z_OK = 0, Z_STREAM_END = 1;
 
-const msg = {
+const msg                                  = {
   2: "need dictionary",
   1: "stream end",
   0: "",
@@ -48,11 +98,12 @@ const INF_MSG = [
 ];
 
 const toStr = Object.prototype.toString;
-const isAB = (x) => toStr.call(x) === "[object ArrayBuffer]";
+const isAB = (x         )                   => toStr.call(x) === "[object ArrayBuffer]";
 const hasOwn = Object.prototype.hasOwnProperty;
 
 // pako's utils.assign
-function assign(obj /*, ...sources */) {
+                                                                             
+function assign(obj      /*, ...sources */) {
   for (let i = 1; i < arguments.length; i++) {
     const source = arguments[i];
     if (!source) continue;
@@ -62,7 +113,7 @@ function assign(obj /*, ...sources */) {
   return obj;
 }
 
-function flattenChunks(chunks) {
+function flattenChunks(chunks              )             {
   let len = 0;
   for (let i = 0, l = chunks.length; i < l; i++) len += chunks[i].length;
   const result = new Uint8Array(len);
@@ -75,11 +126,11 @@ function flattenChunks(chunks) {
 }
 
 const encoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
-const string2buf = (s) => encoder.encode(s);
+const string2buf = (s        )             => encoder.encode(s);
 
 // ------------------------------------------------------------------ wasm
 
-function b64decode(s) {
+function b64decode(s        )                          {
   if (typeof Buffer === "function") return new Uint8Array(Buffer.from(s, "base64"));
   if (typeof Uint8Array.fromBase64 === "function") return Uint8Array.fromBase64(s);
   const bin = atob(s);
@@ -88,15 +139,15 @@ function b64decode(s) {
   return out;
 }
 
-let W = null; // wasm exports
-let emitHandler = null;
-function initWasm(module) {
+let W                   = null; // wasm exports
+let emitHandler                     = null;
+function initWasm(module                    )       {
   const inst = new WebAssembly.Instance(module, {
     env: { js_emit: (kind, ptr, len, chunkSize) => emitHandler(kind, ptr, len, chunkSize) },
   });
-  W = inst.exports;
+  W = inst.exports                        ;
 }
-let wasmModuleBytes = null;
+let wasmModuleBytes                                 = null;
 try {
   // (__FASTZLIB_BYTES: a build with function names, for wasm profiling)
   wasmModuleBytes = globalThis.__FASTZLIB_BYTES || b64decode(wasmB64);
@@ -109,8 +160,8 @@ try {
   }
 }
 
-let memBuf = null, m8 = null, m32 = null, mu32 = null, mf64 = null;
-function views() {
+let memBuf                     = null, m8                    = null, m32                    = null, mu32                     = null, mf64                      = null;
+function views()       {
   const b = W.memory.buffer;
   if (b !== memBuf) {
     memBuf = b;
@@ -121,7 +172,7 @@ function views() {
   }
 }
 let RESP = 0; // byte offset of the Res block
-function res() {
+function res()         {
   views();
   if (!RESP) RESP = W.fz_res();
   return RESP >> 2;
@@ -137,7 +188,7 @@ const isInt = Number.isInteger;
 // ------------------------------------------------------------------ deflate
 
 // Parameters for which the wasm path is exactly equivalent to pako.
-function fastDeflateOpts(opt) {
+function fastDeflateOpts(opt         )          {
   if (!W) return false;
   const { level, method, windowBits, memLevel, strategy, chunkSize, header, dictionary } = opt;
   if (!isInt(level) || !isInt(method) || !isInt(windowBits) || !isInt(memLevel) || !isInt(strategy) || !isInt(chunkSize)) return false;
@@ -153,7 +204,7 @@ function fastDeflateOpts(opt) {
   return true;
 }
 
-function latin1Bytes(s) {
+function latin1Bytes(s        )             {
   const out = new Uint8Array(s.length);
   let n = 0;
   for (; n < s.length; n++) {
@@ -164,7 +215,7 @@ function latin1Bytes(s) {
   return out.subarray(0, n);
 }
 
-function writeBytes(bytes) {
+function writeBytes(bytes            )         {
   const p = W.fz_alloc(bytes.length);
   views();
   m8.set(bytes, p);
@@ -175,18 +226,18 @@ function writeBytes(bytes) {
 // re-initialized by the next constructor: equivalent to a fresh state, but
 // avoids allocating and zeroing windows/hash tables for every stream.
 const POOL_MAX = 4, POOL_TRIM = 1 << 20;
-const freeDef = [], freeInf = [];
-function releaseDef(s) {
+const freeDef           = [], freeInf           = [];
+function releaseDef(s        )       {
   if (freeDef.length < POOL_MAX) { W.def_trim(s, POOL_TRIM); freeDef.push(s); } else W.def_destroy(s);
 }
-function releaseInf(s) {
+function releaseInf(s        )       {
   if (freeInf.length < POOL_MAX) { W.inf_trim(s, POOL_TRIM); freeInf.push(s); } else W.inf_destroy(s);
 }
 
 let defPool = 0;
 
 // set up a wasm deflate session per pako's Deflate constructor; throws like it
-function defSession(prev, opt, streaming) {
+function defSession(prev        , opt         , streaming         )         {
   const s = W.def_init(prev, opt.level, opt.method, opt.windowBits, opt.memLevel, opt.strategy, opt.chunkSize, streaming ? 1 : 0);
   if (!s) {
     const st = m32[res() + R_STATUS];
@@ -200,8 +251,8 @@ function defSession(prev, opt, streaming) {
       const extra = h.extra ? new Uint8Array(h.extra) : null;
       const name = h.name ? latin1Bytes(h.name) : null;
       const comment = h.comment ? latin1Bytes(h.comment) : null;
-      const allocs = [];
-      const put = (b) => {
+      const allocs                     = [];
+      const put = (b                   )                   => {
         if (!b) return [0, -1];
         const p = writeBytes(b);
         allocs.push([p, b.length]);
@@ -217,9 +268,9 @@ function defSession(prev, opt, streaming) {
       let dict = opt.dictionary;
       if (typeof dict === "string") dict = string2buf(dict);
       else if (isAB(dict)) dict = new Uint8Array(dict);
-      const p = writeBytes(dict);
-      const st = W.def_set_dict(s, p, dict.length);
-      W.fz_free(p, dict.length);
+      const p = writeBytes(dict              );
+      const st = W.def_set_dict(s, p, (dict              ).length);
+      W.fz_free(p, (dict              ).length);
       if (st !== Z_OK) throw new Error(msg[st]);
     }
   } catch (e) {
@@ -229,7 +280,7 @@ function defSession(prev, opt, streaming) {
   return s;
 }
 
-function deflateOnce(input, options) {
+function deflateOnce(input      , options          )                    {
   const opt = assign(
     { level: -1, method: 8, chunkSize: 16384, windowBits: 15, memLevel: 8, strategy: 0 },
     options || {},
@@ -237,7 +288,7 @@ function deflateOnce(input, options) {
   if (opt.raw && opt.windowBits > 0) opt.windowBits = -opt.windowBits;
   else if (opt.gzip && opt.windowBits > 0 && opt.windowBits < 16) opt.windowBits += 16;
 
-  let data;
+  let data            ;
   if (typeof input === "string") data = string2buf(input);
   else if (isAB(input)) data = new Uint8Array(input);
   else if (input instanceof Uint8Array) data = input;
@@ -262,19 +313,19 @@ function deflateOnce(input, options) {
   return out;
 }
 
-export function deflate(input, options) {
+export function deflate(input      , options          )             {
   const r = W ? deflateOnce(input, options) : null;
   if (r !== null) return r;
   return V.deflate(input, options);
 }
 
-export function deflateRaw(input, options) {
+export function deflateRaw(input      , options          )             {
   options = options || {};
   options.raw = true;
   return deflate(input, options);
 }
 
-export function gzip(input, options) {
+export function gzip(input      , options          )             {
   options = options || {};
   options.gzip = true;
   return deflate(input, options);
@@ -285,11 +336,11 @@ export function gzip(input, options) {
 const S = Symbol("fastpako");
 const S_OPT = Symbol("fastpako.options");
 const taTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
-const isTypedArray = (x) => taTag.call(x) !== undefined; // any TypedArray, not DataView
+const isTypedArray = (x         )          => taTag.call(x) !== undefined; // any TypedArray, not DataView
 // nothing has gone through the stream yet
-const untouched = (self) => self.strm.total_in === 0 && self.strm.total_out === 0;
+const untouched = (self     )          => self.strm.total_in === 0 && self.strm.total_out === 0;
 // continue this (still untouched) stream in the original implementation
-function toVendor(self, VClass, kind, s) {
+function toVendor(self     , VClass          , kind        , s        )      {
   if (kind === 0) releaseDef(s);
   else releaseInf(s);
   self[S] = null;
@@ -298,10 +349,10 @@ function toVendor(self, VClass, kind, s) {
   return self;
 }
 const registry = typeof FinalizationRegistry === "function"
-  ? new FinalizationRegistry(([kind, s]) => { if (W) (kind === 0 ? W.def_destroy : W.inf_destroy)(s); })
+  ? new FinalizationRegistry                  (([kind, s]) => { if (W) (kind === 0 ? W.def_destroy : W.inf_destroy)(s); })
   : null;
 
-function ZStream() {
+function ZStream(         )       {
   this.input = null;
   this.next_in = 0;
   this.avail_in = 0;
@@ -316,7 +367,7 @@ function ZStream() {
   this.adler = 0;
 }
 
-function syncStrm(strm, r, isInflate) {
+function syncStrm(strm     , r        , isInflate         )       {
   const m = m32[r + R_MSG];
   strm.msg = isInflate ? INF_MSG[m] : m ? msg[m] : strm.msg;
   strm.adler = m32[r + R_ADLER];
@@ -329,7 +380,7 @@ function syncStrm(strm, r, isInflate) {
   strm.total_out = mf64[(RESP >> 3) + (R_TOTAL_OUT >> 1)];
 }
 
-export function Deflate(options) {
+export function Deflate(           options          )       {
   this.options = assign(
     { level: -1, method: 8, chunkSize: 16384, windowBits: 15, memLevel: 8, strategy: 0 },
     options || {},
@@ -348,7 +399,7 @@ export function Deflate(options) {
   this.msg = "";
   this.ended = false;
   this.chunks = [];
-  this.strm = new ZStream();
+  this.strm = new (ZStream       )();
   this.strm.avail_out = 0;
   const s = defSession(freeDef.length ? freeDef.pop() : 0, opt, true);
   Object.defineProperty(this, S, { value: s, writable: true });
@@ -358,14 +409,14 @@ export function Deflate(options) {
   if (registry) registry.register(this, [0, s], this);
 }
 
-Deflate.prototype.push = function (data, flush_mode) {
+Deflate.prototype.push = function (           data                          , flush_mode                   )          {
   const s = this[S];
   if (!s) return VDeflate.prototype.push.call(this, data, flush_mode);
   if (this.ended) return false;
-  let fm;
+  let fm        ;
   if (flush_mode === ~~flush_mode) fm = flush_mode;
   else fm = flush_mode === true ? Z_FINISH : Z_NO_FLUSH;
-  let input;
+  let input     ;
   if (typeof data === "string") input = string2buf(data);
   else if (isAB(data)) input = new Uint8Array(data);
   else input = data;
@@ -377,24 +428,24 @@ Deflate.prototype.push = function (data, flush_mode) {
       if (untouched(this)) return toVendor(this, VDeflate, 0, s).push(data, flush_mode);
       // mid-stream: pako throws when zlib reads such input (strm.input is
       // read with .length, then .subarray): same errors, generated alike
-      const strm = { input };
+      const strm                 = { input };
       if (strm.input.length !== 0) strm.input.subarray();
     }
-    input = Uint8Array.from(input, (v) => v);
+    input = Uint8Array.from(input, (v        ) => v);
   }
   const strm = this.strm;
   strm.input = input;
   const chunkSize = this.options.chunkSize;
   const self = this;
   const prevEmit = emitHandler;
-  emitHandler = (kind, ptr, len) => {
+  emitHandler = (kind        , ptr        , len        ) => {
     views();
     const chunk = new Uint8Array(chunkSize);
     chunk.set(m8.subarray(ptr, ptr + len));
     strm.output = chunk;
     self.onData(kind === 0 ? chunk : chunk.subarray(0, len));
   };
-  let ret;
+  let ret        ;
   try {
     const inPtr = W.def_input(s, input.length);
     views();
@@ -418,11 +469,11 @@ Deflate.prototype.push = function (data, flush_mode) {
   return ret === 1;
 };
 
-Deflate.prototype.onData = function (chunk) {
+Deflate.prototype.onData = function (           chunk            )       {
   this.chunks.push(chunk);
 };
 
-Deflate.prototype.onEnd = function (status) {
+Deflate.prototype.onEnd = function (           status        )       {
   if (status === Z_OK) this.result = flattenChunks(this.chunks);
   this.chunks = [];
   this.err = status;
@@ -431,7 +482,7 @@ Deflate.prototype.onEnd = function (status) {
 
 // ------------------------------------------------------------------ inflate
 
-function normalizeInflateOpts(options) {
+function normalizeInflateOpts(options          )          {
   const opt = assign({ chunkSize: 1024 * 64, windowBits: 15, to: "" }, options || {});
   if (opt.raw && opt.windowBits >= 0 && opt.windowBits < 16) {
     opt.windowBits = -opt.windowBits;
@@ -444,7 +495,7 @@ function normalizeInflateOpts(options) {
   return opt;
 }
 
-function fastInflateOpts(opt) {
+function fastInflateOpts(opt         )          {
   if (!W) return false;
   if (!isInt(opt.windowBits) || !isInt(opt.chunkSize) || opt.chunkSize < 64 || opt.chunkSize > 1 << 30) return false;
   const d = opt.dictionary;
@@ -455,7 +506,7 @@ function fastInflateOpts(opt) {
 let infPool = 0;
 const decoder = typeof TextDecoder === "function" ? new TextDecoder() : null;
 
-function infSession(prev, opt, streaming) {
+function infSession(prev        , opt         , streaming         )         {
   const s = W.inf_init(prev, opt.windowBits, opt.chunkSize, streaming ? 1 : 0, opt.to === "string" ? 1 : 0);
   if (!s) {
     const st = m32[res() + R_STATUS];
@@ -468,9 +519,9 @@ function infSession(prev, opt, streaming) {
     if (typeof dict === "string") dict = string2buf(dict);
     else if (isAB(dict)) dict = new Uint8Array(dict);
     opt.dictionary = dict;
-    const p = writeBytes(dict);
-    const st = W.inf_set_dict(s, p, dict.length, opt.raw ? 1 : 0);
-    W.fz_free(p, dict.length);
+    const p = writeBytes(dict              );
+    const st = W.inf_set_dict(s, p, (dict              ).length, opt.raw ? 1 : 0);
+    W.fz_free(p, (dict              ).length);
     if (opt.raw && st !== Z_OK) {
       if (streaming) releaseInf(s);
       throw new Error(msg[st]);
@@ -481,9 +532,9 @@ function infSession(prev, opt, streaming) {
 
 const UNDEF = {};
 
-function inflateOnce(input, options) {
+function inflateOnce(input                          , options          )                                                 {
   const opt = normalizeInflateOpts(options);
-  let data;
+  let data            ;
   if (input instanceof Uint8Array) data = input;
   else if (isAB(input)) data = new Uint8Array(input);
   else return UNDEF;
@@ -494,7 +545,7 @@ function inflateOnce(input, options) {
   m8.set(data, inPtr);
   W.inf_push(s, data.length, Z_NO_FLUSH, isAB(input) ? 1 : 0);
   const r = res();
-  let out;
+  let out                                 ;
   if (m32[r + R_ENDED]) {
     const status = m32[r + R_END_STATUS];
     if (status !== Z_OK) {
@@ -520,15 +571,15 @@ function inflateOnce(input, options) {
   return out;
 }
 
-export function inflate(input, options) {
+export function inflate(input                          , options          )                                  {
   if (W) {
     const r = inflateOnce(input, options);
-    if (r !== UNDEF) return r;
+    if (r !== UNDEF) return r                                   ;
   }
   return V.inflate(input, options);
 }
 
-export function inflateRaw(input, options) {
+export function inflateRaw(input                          , options          )                                  {
   options = options || {};
   options.raw = true;
   return inflate(input, options);
@@ -538,7 +589,7 @@ export const ungzip = inflate;
 
 // ---- streaming Inflate class
 
-function GZheader() {
+function GZheader(         )       {
   this.text = 0;
   this.time = 0;
   this.xflags = 0;
@@ -551,7 +602,7 @@ function GZheader() {
   this.done = false;
 }
 
-export function Inflate(options) {
+export function Inflate(           options          )       {
   const opt = normalizeInflateOpts(options);
   if (!fastInflateOpts(opt)) {
     Object.defineProperty(this, S, { value: null, writable: true });
@@ -563,18 +614,18 @@ export function Inflate(options) {
   this.msg = "";
   this.ended = false;
   this.chunks = [];
-  this.strm = new ZStream();
+  this.strm = new (ZStream       )();
   this.strm.avail_out = 0;
   const s = infSession(freeInf.length ? freeInf.pop() : 0, opt, true);
   Object.defineProperty(this, S, { value: s, writable: true });
   Object.defineProperty(this, S_OPT, { value: options, writable: true });
   Object.defineProperty(this, "_hv", { value: 0, writable: true });
   this.strm.state = {};
-  this.header = new GZheader();
+  this.header = new (GZheader       )();
   if (registry) registry.register(this, [1, s], this);
 }
 
-function readHeader(self, s) {
+function readHeader(self     , s        )       {
   views();
   const h = W.inf_header(s) >> 2;
   const hd = self.header;
@@ -586,22 +637,22 @@ function readHeader(self, s) {
   hd.extra = el < 0 ? null : m8.slice(mu32[h + 4], mu32[h + 4] + el);
   hd.extra_len = mu32[h + 6];
   const nl = m32[h + 8];
-  hd.name = nl < 0 ? null : String.fromCharCode.apply(null, m8.subarray(mu32[h + 7], mu32[h + 7] + nl));
+  hd.name = nl < 0 ? null : String.fromCharCode.apply(null, m8.subarray(mu32[h + 7], mu32[h + 7] + nl)                       );
   const cl = m32[h + 10];
-  hd.comment = cl < 0 ? null : String.fromCharCode.apply(null, m8.subarray(mu32[h + 9], mu32[h + 9] + cl));
+  hd.comment = cl < 0 ? null : String.fromCharCode.apply(null, m8.subarray(mu32[h + 9], mu32[h + 9] + cl)                       );
   hd.hcrc = mu32[h + 11];
   hd.done = !!mu32[h + 12];
 }
 
-Inflate.prototype.push = function (data, flush_mode) {
+Inflate.prototype.push = function (           data                                              , flush_mode                   )          {
   const s = this[S];
   if (!s) return VInflate.prototype.push.call(this, data, flush_mode);
   if (this.ended) return false;
-  let fm;
+  let fm        ;
   if (flush_mode === ~~flush_mode) fm = flush_mode;
   else fm = flush_mode === true ? Z_FINISH : Z_NO_FLUSH;
   const ab = isAB(data);
-  let input = ab ? new Uint8Array(data) : data;
+  let input      = ab ? new Uint8Array(data) : data;
   if (!(input instanceof Uint8Array)) {
     // pako's JS inflate reads element values as they are: only byte
     // arrays convert exactly; anything else on an untouched stream is
@@ -610,14 +661,14 @@ Inflate.prototype.push = function (data, flush_mode) {
       if (untouched(this)) return toVendor(this, VInflate, 1, s).push(data, flush_mode);
       void input.length; // null / undefined throw here in pako too
     }
-    input = Uint8Array.from(input, (v) => v);
+    input = Uint8Array.from(input, (v        ) => v);
   }
   const strm = this.strm;
   strm.input = input;
   const chunkSize = this.options.chunkSize;
   const self = this;
   const prevEmit = emitHandler;
-  emitHandler = (kind, ptr, len) => {
+  emitHandler = (kind        , ptr        , len        ) => {
     views();
     if (kind === 2) {
       self.onData(decoder.decode(m8.subarray(ptr, ptr + len)));
@@ -628,7 +679,7 @@ Inflate.prototype.push = function (data, flush_mode) {
       self.onData(kind === 0 ? chunk : chunk.subarray(0, len));
     }
   };
-  let ret;
+  let ret        ;
   try {
     const inPtr = W.inf_input(s, input.length);
     views();
@@ -656,11 +707,11 @@ Inflate.prototype.push = function (data, flush_mode) {
   return ret === 1;
 };
 
-Inflate.prototype.onData = function (chunk) {
+Inflate.prototype.onData = function (           chunk                     )       {
   this.chunks.push(chunk);
 };
 
-Inflate.prototype.onEnd = function (status) {
+Inflate.prototype.onEnd = function (           status        )       {
   if (status === Z_OK) {
     if (this.options.to === "string") this.result = this.chunks.join("");
     else this.result = flattenChunks(this.chunks);
@@ -681,3 +732,4 @@ export default {
   ungzip,
   constants,
 };
+// generated from index.mts by tools/ts-build.mjs; edit that file

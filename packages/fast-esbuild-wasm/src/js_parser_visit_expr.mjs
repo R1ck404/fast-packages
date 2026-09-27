@@ -3871,3 +3871,4 @@ export const visitExprMethods = {
     p.fnOnlyDataVisit = oldFnOnlyData;
   },
 };
+// generated from js_parser_visit_expr.mts by tools/ts-build.mjs; edit that file

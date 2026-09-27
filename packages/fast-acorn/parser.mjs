@@ -97,7 +97,7 @@ const F_BEFORE = 1, F_STARTS = 2, F_LOOP = 4, F_ASSIGN = 8, F_PREFIX = 16, F_POS
 const TF = new Uint8Array(T_COUNT);
 const BINOP = new Int8Array(T_COUNT).fill(-1);
 const KW_NAME = new Array(T_COUNT).fill(undefined);
-function tdef(t, flags, binop) {
+function tdef(t, flags, binop ) {
   TF[t] = flags;
   if (binop != null) BINOP[t] = binop;
 }
@@ -119,7 +119,7 @@ tdef(T_STAR, F_BEFORE, 10); tdef(T_SLASH, F_BEFORE, 10); tdef(T_STARSTAR, F_BEFO
 tdef(T_COALESCE, F_BEFORE, 1);
 tdef(T_JSXNAME, 0); tdef(T_JSXTEXT, F_BEFORE); tdef(T_JSXTAGSTART, F_STARTS); tdef(T_JSXTAGEND, 0);
 const KEYWORDS = new Map();
-function kw(t, name, flags, binop) {
+function kw(t, name, flags, binop ) {
   tdef(t, flags, binop);
   KW_NAME[t] = name;
   KEYWORDS.set(name, t);
@@ -237,6 +237,15 @@ function ladd(l, name) {
 }
 
 class Scope {
+  ;                              
+  ;                     
+  ;                         
+  ;                  
+  ;                      
+  ;                    
+  ;                      
+  ;                
+  ;                     
   constructor(flags, parent, topCanAwait) {
     this.init(flags, parent, topCanAwait);
   }
@@ -261,6 +270,11 @@ class Scope {
 }
 
 class DestructuringErrors {
+  ;                        
+  ;                                
+  ;                              
+  ;                            
+  ;                          
   constructor() {
     this.shorthandAssign = -1;
     this.trailingComma = -1;
@@ -508,6 +522,8 @@ function finishNodeAt(p, node, type, pos, loc) {
 }
 
 export class BodyFacade {
+  ;                   
+  ;              
   constructor(p) {
     this.p = p;
     this.fnNode = null;
@@ -649,6 +665,73 @@ function linesBefore(input, lineStart) {
 }
 
 export class FastParser {
+  ;                               
+  ;                          
+  ;                     
+  ;                         
+  ;                               
+  ;                       
+  ;                       
+  ;                        
+  ;                
+  ;                    
+  ;                             
+  ;                 
+  ;                
+  ;                  
+  ;                    
+  ;                   
+  ;                        
+  ;                        
+  ;                   
+  ;                         
+  ;                     
+  ;                              
+  ;                  
+  ;                
+  ;                                 
+  ;                          
+  ;                   
+  ;                       
+  ;                         
+  ;                           
+  ;                          
+  ;                         
+  ;                            
+  ;                
+  ;                      
+  ;                      
+  ;                     
+  ;                     
+  ;                                
+  ;                            
+  ;                    
+  ;                       
+  ;                
+  ;                             
+  ;                                     
+  ;                           
+  ;                             
+  ;                   
+  ;                     
+  ;                    
+  ;                          
+  ;                                
+  ;                                    
+  ;                      
+  ;                       
+  ;                       
+  ;               
+  ;                  
+  ;                     
+  ;                
+  ;                   
+  ;                        
+  ;                 
+  ;                             
+  ;                  
+  ;                 
+  ;                     
   constructor(options, input, startPos, jsx, bodyOverride) {
     // options: already normalized by acorn's getOptions()
     // startPos: only for parseExpressionAt (acorn's Parser(options, input, startPos))
@@ -768,13 +851,13 @@ export class FastParser {
   }
 
   // acorn: this.raise(pos != null ? pos : this.start, "Unexpected token")
-  unexpected(pos) {
+  unexpected(pos ) {
     if (!this.exactErrors) bail();
     if (pos == null) pos = this.start;
     const loc = getLineInfo(this.input, pos);
     let message = "Unexpected token (" + loc.line + ":" + loc.column + ")";
     if (this.sourceFile) message += " in " + this.sourceFile;
-    const err = new SyntaxError(message);
+    const err = new SyntaxError(message)                                                             ;
     err.pos = pos;
     err.loc = loc;
     err.raisedAt = this.pos;
@@ -894,7 +977,7 @@ export class FastParser {
     if (!this.eat(T_SEMI) && !this.insertSemicolon()) this.unexpected();
   }
 
-  afterTrailingComma(tokType, notNext) {
+  afterTrailingComma(tokType, notNext ) {
     if (this.type === tokType) {
       if (this.onTrailingComma) this.onTrailingComma(this.lastTokStart, this.lastTokStartLoc);
       if (!notNext) this.next();
@@ -914,7 +997,7 @@ export class FastParser {
     if (parens > -1) bail();
   }
 
-  checkExpressionErrors(rde, andThrow) {
+  checkExpressionErrors(rde, andThrow ) {
     if (!rde) return false;
     const shorthandAssign = rde.shorthandAssign;
     const doubleProto = rde.doubleProto;
@@ -1046,7 +1129,7 @@ export class FastParser {
 
   // ------------------------------------------------------------ tokenizer
 
-  next(ignoreEscapeSequenceInKeyword) {
+  next(ignoreEscapeSequenceInKeyword ) {
     if (!ignoreEscapeSequenceInKeyword && this.type >= T_KW_FIRST && this.containsEsc) bail();
     this.lastTokEnd = this.end;
     this.lastTokStart = this.start;
@@ -1598,7 +1681,7 @@ export class FastParser {
     return this.finishToken(T_REGEXP, { pattern, flags, value });
   }
 
-  readInt(radix, len, maybeLegacyOctalNumericLiteral) {
+  readInt(radix, len , maybeLegacyOctalNumericLiteral ) {
     const input = this.input;
     const allowSeparators = len === undefined;
     const isLegacyOctalNumericLiteral = maybeLegacyOctalNumericLiteral && input.charCodeAt(this.pos) === 48;
@@ -1630,7 +1713,7 @@ export class FastParser {
   readRadixNumber(radix) {
     const start = this.pos;
     this.pos += 2;
-    let val = this.readInt(radix);
+    let val                  = this.readInt(radix);
     if (val == null) bail();
     if (this.input.charCodeAt(this.pos) === 110) {
       val = stringToBigInt(this.input.slice(start, this.pos));
@@ -2135,7 +2218,7 @@ export class FastParser {
     return new NProgram(this, s, sl, body, sourceType);
   }
 
-  isLet(context) {
+  isLet(context ) {
     if (!this.isContextual("let")) return false;
     const input = this.input;
     let next = this.skipWS(this.pos);
@@ -2207,7 +2290,7 @@ export class FastParser {
     return this.isUsingKeyword(false, isFor);
   }
 
-  parseStatement(context, topLevel, exports) {
+  parseStatement(context, topLevel , exports ) {
     let starttype = this.type, kind;
     const s = this.start, sl = this.startLoc;
     if (starttype === T_NAME && this.isLet(context)) {
@@ -2509,7 +2592,7 @@ export class FastParser {
     return new NTryStatement(this, s, sl, block, handler, finalizer);
   }
 
-  parseVarStatement(s, sl, kind, allowMissingInitializer) {
+  parseVarStatement(s, sl, kind, allowMissingInitializer ) {
     this.next();
     const decls = this.parseVar(false, kind, allowMissingInitializer);
     this.semicolon();
@@ -2554,7 +2637,7 @@ export class FastParser {
     return new NExpressionStatement(this, s, sl, expr);
   }
 
-  parseBlock(createNewLexicalScope = true, s = this.start, sl = this.startLoc, exitStrict) {
+  parseBlock(createNewLexicalScope = true, s = this.start, sl = this.startLoc, exitStrict ) {
     const base = this.sp;
     this.expect(T_BRACEL);
     if (createNewLexicalScope) this.enterScope(0);
@@ -2604,7 +2687,7 @@ export class FastParser {
     return new NForOfStatement(this, s, sl, awaitVal, init, right, body);
   }
 
-  parseVar(isFor, kind, allowMissingInitializer) {
+  parseVar(isFor, kind, allowMissingInitializer ) {
     const base = this.sp;
     for (;;) {
       const ds = this.start, dsl = this.startLoc;
@@ -2637,7 +2720,7 @@ export class FastParser {
   // acorn's function node as it is when parseFunctionBody runs (initFunction's
   // key order: id, expression, generator, async; then params)
   overrideFunctionNode(s, sl, id, generator, async, params) {
-    const node = new Node(this.nodeShim, s, sl);
+    const node      = new Node(this.nodeShim, s, sl);
     node.id = id;
     node.expression = false;
     node.generator = generator;
@@ -2654,7 +2737,7 @@ export class FastParser {
     f.fnNode = saved;
   }
 
-  parseFunction(s, sl, statement, allowExpressionBody, isAsync, forInit) {
+  parseFunction(s, sl, statement, allowExpressionBody , isAsync , forInit ) {
     // initFunction + parseFunction
     if (this.type === T_STAR && statement & FUNC_HANGING_STATEMENT) this.unexpected();
     const generator = this.eat(T_STAR);
@@ -3079,7 +3162,7 @@ export class FastParser {
 
   // ------------------------------------------------------------ lval
 
-  toAssignable(node, isBinding, rde) {
+  toAssignable(node, isBinding, rde ) {
     if (node) {
       switch (node.type) {
         case "Identifier":
@@ -3192,14 +3275,14 @@ export class FastParser {
     return listFrom(this, base);
   }
 
-  parseMaybeDefault(s, sl, left) {
+  parseMaybeDefault(s, sl, left ) {
     left = left || this.parseBindingAtom();
     if (!this.eat(T_EQ)) return left;
     const right = this.parseMaybeAssign();
     return new NAssignmentPattern(this, s, sl, left, right);
   }
 
-  checkLValSimple(expr, bindingType = BIND_NONE, checkClashes) {
+  checkLValSimple(expr, bindingType = BIND_NONE, checkClashes ) {
     const isBind = bindingType !== BIND_NONE;
     switch (expr.type) {
       case "Identifier":
@@ -3227,7 +3310,7 @@ export class FastParser {
     }
   }
 
-  checkLValPattern(expr, bindingType = BIND_NONE, checkClashes) {
+  checkLValPattern(expr, bindingType = BIND_NONE, checkClashes ) {
     switch (expr.type) {
       case "ObjectPattern":
         for (const prop of expr.properties) this.checkLValInnerPattern(prop, bindingType, checkClashes);
@@ -3285,7 +3368,7 @@ export class FastParser {
     return sawProto;
   }
 
-  parseExpression(forInit, rde) {
+  parseExpression(forInit , rde ) {
     const s = this.start, sl = this.startLoc;
     const expr = this.parseMaybeAssign(forInit, rde);
     if (this.type === T_COMMA) {
@@ -3300,7 +3383,7 @@ export class FastParser {
     return expr;
   }
 
-  parseMaybeAssign(forInit, rde, afterLeftParse) {
+  parseMaybeAssign(forInit , rde , afterLeftParse ) {
     if (this.type === T_NAME && this.isContextual("yield")) {
       if (this.inGenerator) return this.parseYield(forInit);
       else this.exprAllowed = false;
@@ -3531,7 +3614,7 @@ export class FastParser {
     return base;
   }
 
-  parseExprAtom(rde, forInit, forNew) {
+  parseExprAtom(rde , forInit , forNew ) {
     if (this.jsx) {
       // acorn-jsx's parseExprAtom(refShortHandDefaultPos) override: JSX
       // atoms, otherwise super.parseExprAtom(refShortHandDefaultPos) -- which
@@ -3975,7 +4058,7 @@ export class FastParser {
     );
   }
 
-  parseObj(isPattern, rde) {
+  parseObj(isPattern, rde ) {
     const s = this.start, sl = this.startLoc;
     let first = true;
     let sawProto = false;
@@ -4085,7 +4168,7 @@ export class FastParser {
     return key;
   }
 
-  parseMethod(isGenerator, isAsync, allowDirectSuper) {
+  parseMethod(isGenerator, isAsync , allowDirectSuper ) {
     const s = this.start, sl = this.startLoc;
     const oldYieldPos = this.yieldPos, oldAwaitPos = this.awaitPos, oldAwaitIdentPos = this.awaitIdentPos;
     const generator = isGenerator;
@@ -4178,7 +4261,7 @@ export class FastParser {
     for (let i = 0; i < params.length; i++) this.checkLValInnerPattern(params[i], BIND_VAR, nameHash);
   }
 
-  parseExprList(close, allowTrailingComma, allowEmpty, rde) {
+  parseExprList(close, allowTrailingComma, allowEmpty, rde ) {
     const base = this.sp;
     let first = true;
     while (!this.eat(close)) {
@@ -4210,7 +4293,7 @@ export class FastParser {
     if ((this.strict ? this.reservedWordsStrict : this.reservedWords).has(name)) bail();
   }
 
-  parseIdent(liberal) {
+  parseIdent(liberal ) {
     const s = this.start, sl = this.startLoc;
     let name;
     if (this.type === T_NAME) {
@@ -4349,7 +4432,7 @@ export function fastParseExpressionAt(input, pos, options, jsx, bodyOverride) {
   return expr;
 }
 
-export function fastParse(input, options, jsx, bodyOverride) {
+export function fastParse(input, options, jsx, bodyOverride ) {
   const p = new FastParser(options, input, 0, jsx, bodyOverride);
   const s = p.start, sl = p.startLoc;
   p.nextToken();
@@ -4357,3 +4440,4 @@ export function fastParse(input, options, jsx, bodyOverride) {
   flushComments(p, options);
   return program;
 }
+// generated from parser.mts by tools/ts-build.mjs; edit that file

@@ -18,7 +18,8 @@ import { registerSharedModuleScopeMembers } from "./renamer.mjs";
 const RUNTIME_SOURCE_INDEX = 0; // runtime.SourceIndex
 
 // Frozen so that an accidental push into a "nil slice" stand-in throws
-export const EMPTY_ARRAY = Object.freeze([]);
+// (typed as a plain array: it stands in for any empty slice)
+export const EMPTY_ARRAY = Object.freeze([])         ;
 
 // Byte-wise (UTF-8) string comparison like Go's sort.Strings
 export function compareStringsUTF8(a, b) {
@@ -203,6 +204,7 @@ function clonePartForLinker(part) {
 // helpers.BitSet (not in helpers.mjs; defined here for graph.mjs/linker.mjs)
 
 export class BitSet {
+  ;                    
   constructor(entries) {
     this.entries = entries; // Uint8Array
   }
@@ -237,6 +239,15 @@ export function newBitSet(bitCount) {
 // input.go
 
 export class InputFile {
+  ;                 
+  ;                           
+  ;                              
+  ;                                          
+  ;                                
+  ;                   
+  ;                      
+  ;                                              
+  ;                            
   constructor(
     repr = null,
     inputSourceMap = null,
@@ -275,6 +286,10 @@ export class InputFile {
 }
 
 export class OutputFile {
+  ;                                 
+  ;                       
+  ;                        
+  ;                             
   constructor(jsonMetadataChunk = "", absPath = "", contents = "", isExecutable = false) {
     this.jsonMetadataChunk = jsonMetadataChunk;
     this.absPath = absPath;
@@ -284,6 +299,8 @@ export class OutputFile {
 }
 
 export class SideEffects {
+  ;                 
+  ;                    
   constructor(data = null, kind = HasSideEffects) {
     this.data = data;
     this.kind = kind;
@@ -298,6 +315,9 @@ export const NoSideEffects_PureData = 3;
 export const NoSideEffects_PureData_FromPlugin = 4;
 
 export class JSRepr {
+                           
+                   
+                                 
   constructor(meta = new JSReprMeta(), ast = new AST(), cssSourceIndex = -1) {
     this.meta = meta;
     this.ast = ast;
@@ -327,6 +347,8 @@ export class JSRepr {
 }
 
 export class CSSRepr {
+  ;                
+  ;                             
   constructor(ast = null, jsSourceIndex = -1) {
     this.ast = ast;
     this.jsSourceIndex = jsSourceIndex;
@@ -337,6 +359,7 @@ export class CSSRepr {
 }
 
 export class CopyRepr {
+  ;                          
   constructor(urlForCode = "") {
     this.urlForCode = urlForCode;
   }
@@ -354,6 +377,22 @@ export const WrapCJS = 1;
 export const WrapESM = 2;
 
 export class JSReprMeta {
+                                        
+                             
+                               
+                                  
+                                   
+                                                
+                                            
+                                 
+                                   
+                                      
+                                               
+                       
+                                        
+                                                    
+                                                
+                                       
   constructor() {
     this.isProbablyTypeScriptType = null; // Map<Ref, boolean>
     this.importsToBind = null; // Map<Ref, ImportData>
@@ -397,6 +436,10 @@ export class JSReprMeta {
 
 // Treated as immutable once stored in a map (Go stores these by value)
 export class ImportData {
+  ;                        
+  ;                       
+  ;                   
+  ;                           
   constructor(reExports = EMPTY_ARRAY, nameLoc = 0, ref = InvalidRef, sourceIndex = 0) {
     this.reExports = reExports; // []Dependency
     this.nameLoc = nameLoc;
@@ -407,6 +450,10 @@ export class ImportData {
 
 // Treated as immutable once stored in a map (Go stores these by value)
 export class ExportData {
+  ;                                                 
+  ;                   
+  ;                       
+  ;                           
   constructor(potentiallyAmbiguousExportStarRefs = EMPTY_ARRAY, ref = InvalidRef, nameLoc = 0, sourceIndex = 0) {
     this.potentiallyAmbiguousExportStarRefs = potentiallyAmbiguousExportStarRefs; // []ImportData
     this.ref = ref;
@@ -424,6 +471,13 @@ const entryPointUserSpecified = 1;
 const entryPointDynamicImport = 2;
 
 export class LinkerFile {
+                         
+                                     
+                         
+                                         
+                                       
+                                 
+                          
   constructor() {
     this.entryBits = null; // BitSet
     this.lazyLineColumnTracker = null;
@@ -448,6 +502,9 @@ export class LinkerFile {
 }
 
 export class EntryPoint {
+  ;                          
+  ;                           
+  ;                                           
   constructor(outputPath = "", sourceIndex = 0, outputPathWasAutoGenerated = false) {
     this.outputPath = outputPath;
     this.sourceIndex = sourceIndex;
@@ -517,6 +574,13 @@ function cloneScope(s) {
 }
 
 export class LinkerGraph {
+  ;                  
+  ;                         
+  ;                    
+  ;                    
+  ;                        
+  ;                           
+  ;                                
   constructor(files, entryPoints, symbols, tsEnums, constValues, reachableFiles, stableSourceIndices) {
     this.files = files; // []LinkerFile
     this._entryPoints = entryPoints; // Go: unexported field "entryPoints" (renamed: the method has the same name)
@@ -777,3 +841,4 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
   return new LinkerGraph(files, entryPoints, symbols, tsEnums, constValues, reachableFiles, stableSourceIndices);
 }
 
+// generated from graph.mts by tools/ts-build.mjs; edit that file

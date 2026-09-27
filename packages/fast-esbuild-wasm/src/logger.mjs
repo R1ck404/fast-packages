@@ -24,6 +24,8 @@ export const RelPath = 0;
 export const AbsPath = 1;
 
 export class Range {
+                      
+                      
   constructor(loc = 0, len = 0) {
     this.loc = loc;
     this.len = len;
@@ -41,6 +43,8 @@ export function rangeEnd(r) {
 }
 
 export class Span {
+  ;                    
+  ;                    
   constructor(text = "", range = RANGE_ZERO) {
     this.text = text;
     this.range = range;
@@ -51,6 +55,11 @@ export class Span {
 export const PathDisabled = 1;
 
 export class Path {
+                       
+                            
+                                
+                                
+                        
   constructor(text = "", namespace = "", ignoredSuffix = "", importAttributes = null, flags = 0) {
     this.text = text;
     this.namespace = namespace;
@@ -67,6 +76,8 @@ export class Path {
 }
 
 export class PrettyPaths {
+  ;                   
+  ;                   
   constructor(abs = "", rel = "") {
     this.abs = abs;
     this.rel = rel;
@@ -77,6 +88,11 @@ export class PrettyPaths {
 }
 
 export class Source {
+  ;                                
+  ;                              
+  ;                        
+  ;                     
+  ;                     
   constructor(prettyPaths = new PrettyPaths(), identifierName = "", contents = "", keyPath = new Path(), index = 0) {
     this.prettyPaths = prettyPaths;
     this.identifierName = identifierName;
@@ -263,6 +279,7 @@ export function platformIndependentPathDirBaseExt(path) {
 // produce the exact messages). Other kinds are dropped since transform results
 // only report errors and warnings.
 export class Log {
+  ;                     
   constructor() {
     this.level = LevelInfo;
   }
@@ -292,14 +309,19 @@ export class Log {
 // Minimal stand-ins for logger.LineColumnTracker / MsgData: message data is
 // never materialised (errors and warnings bail), so these are inert.
 export class LineColumnTracker {
+  ;                   
   constructor(source) {
     this.source = source;
   }
+  // (callers pass the range and text Go uses for the note)
+                                       
   msgData() {
     return null;
   }
 }
 export class MsgData {
+  ;                    
+  ;                     
   constructor(text = "", location = null) {
     this.text = text;
     this.location = location;
@@ -379,3 +401,4 @@ export const MsgID_TSConfigJSON_InvalidTopLevelOption = 68;
 export const MsgID_TSConfigJSON_Missing = 69;
 export const MsgID_TSConfigJSON_LAST = 70;
 export const MsgID_END = 71;
+// generated from logger.mts by tools/ts-build.mjs; edit that file

@@ -1,0 +1,25 @@
+{
+  // Type-checks the TypeScript sources of every package (npm run typecheck).
+  // tools/ts-build.mjs turns them into the shipped JavaScript by blanking out
+  // the types, so only erasable syntax is allowed. Not strict yet: the big
+  // ports (fast-esbuild-wasm/src, fast-acorn/parser) type-check in loose
+  // mode; the glue modules carry full annotations.
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "allowJs": true,
+    "checkJs": false,
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false
+  },
+  "include": ["types/*.d.ts", "packages/**/*.mts", "packages/**/*.cts", "packages/**/*.ts"],
+  "exclude": ["**/node_modules", "packages/*/rust"]
+}

@@ -2219,7 +2219,7 @@ Object.assign(lowerUsingDeclarationContext.prototype, {
 //     a. If e.[[Kind]] is field, then
 //
 // Returns [int, bool]
-export function fieldOrAccessorOrder(kind, flags) {
+export function fieldOrAccessorOrder(kind        , flags        )                    {
   if (kind === PropertyAutoAccessor) {
     if ((flags & PropertyIsStatic) !== 0) {
       return [0, true];
@@ -3925,3 +3925,4 @@ Object.assign(lowerClassContext.prototype, {
     return [stmts, null];
   },
 });
+// generated from js_parser_lower.mts by tools/ts-build.mjs; edit that file

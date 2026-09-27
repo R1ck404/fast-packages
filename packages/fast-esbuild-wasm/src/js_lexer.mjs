@@ -306,6 +306,9 @@ function runeToUTF16(c) {
 
 // Minimal logger.Msg stand-in (only "kind" is looked at by Log.addMsg)
 class LexerMsg {
+  ;                 
+  ;                 
+  ;                  
   constructor(kind) {
     this.kind = kind;
     this.data = null;
@@ -317,6 +320,52 @@ class LexerMsg {
 // Lexer
 
 export class Lexer {
+  ;                                       
+  ;                                  
+  ;                          
+  ;                          
+  ;                
+  ;                   
+  ;                                     
+  ;                                      
+  ;                                     
+  ;                                          
+  ;                              
+  ;                                       
+  ;                                      
+  ;                                        
+  ;                           
+  ;                    
+  ;                                         
+  ;                      
+  ;                       
+  ;                     
+  ;                   
+  ;                                       
+  ;                                    
+  ;                                 
+  ;                              
+  ;                               
+  ;                                 
+  ;                                          
+  ;                                     
+  ;                       // (not number: step() changes it behind TypeScript's narrowing)
+  ;                            
+  ;                    
+  ;                     
+  ;                     
+  ;                                 
+  ;                                
+  ;                                     
+  ;                                         
+  ;                                                    
+  ;                              
+  ;                              
+  ;                        
+  ;                               
+  ;                              
+  ;                             
+  ;                            
   // Creates the zero value (js_lexer.Lexer{}). Use newLexer() & co. to lex.
   constructor() {
     this.legalCommentsBeforeToken = []; // []logger.Range
@@ -3494,3 +3543,4 @@ export const jsxEntity = new Map([
   ["hearts", 0x2665],
   ["diams", 0x2666],
 ]);
+// generated from js_lexer.mts by tools/ts-build.mjs; edit that file

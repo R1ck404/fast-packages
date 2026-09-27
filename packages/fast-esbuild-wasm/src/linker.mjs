@@ -240,6 +240,28 @@ function base64StdEncodeUTF8(text) {
 // Types
 
 class linkerContext {
+  ;                    
+  ;                
+  ;                  
+  ;                     
+  ;                              
+  ;                            
+  ;                            
+  ;                         
+  ;                                
+  ;                             
+  ;                             
+  ;                                           
+  ;                                        
+  ;                                       
+  ;                                
+  ;                                                
+  ;                                                               
+  ;                                                    
+  ;                                              
+  ;                                                                 
+  ;                                        
+  ;                                              
   constructor(options, log, uniqueKeyPrefix) {
     this.options = options;
     this.log = log;
@@ -278,6 +300,9 @@ class linkerContext {
 }
 
 class partRange {
+  ;                        
+  ;                           
+  ;                         
   constructor(sourceIndex, partIndexBegin, partIndexEnd) {
     this.sourceIndex = sourceIndex;
     this.partIndexBegin = partIndexBegin;
@@ -286,6 +311,19 @@ class partRange {
 }
 
 class chunkInfo {
+  ;                         
+  ;                                  
+  ;                      
+  ;                                
+  ;                      
+  ;                            
+  ;                                     
+  ;                                        
+  ;                               
+  ;                             
+  ;                           
+  ;                             
+  ;                             
   constructor() {
     this.uniqueKey = "";
     this.filesWithPartsInChunk = null; // Set<number> (Go: map[uint32]bool)
@@ -304,6 +342,14 @@ class chunkInfo {
 }
 
 class chunkReprJS {
+  ;                                  
+  ;                                  
+  ;                                 
+  ;                                   
+  ;                                    
+  ;                                    
+  ;                             
+  ;                            
   constructor() {
     this.filesInChunkInOrder = [];
     this.partsInChunkInOrder = [];
@@ -322,6 +368,8 @@ class chunkReprJS {
 // Only the "joiner" form exists in the port: output containing the unique key
 // prefix bails (see breakJoinerIntoPieces).
 class intermediateOutput {
+  ;                   
+  ;                   
   constructor(pieces, joiner) {
     this.pieces = pieces;
     this.joiner = joiner;
@@ -329,6 +377,9 @@ class intermediateOutput {
 }
 
 class stmtList {
+  ;                                  
+  ;                                  
+  ;                                   
   constructor() {
     // These statements come first, and can be inside the wrapper
     this.insideWrapperPrefix = [];
@@ -341,6 +392,12 @@ class stmtList {
 }
 
 class compileResultJS {
+  ;                  
+  ;                                   
+  ;                                
+  ;                           
+  ;                           
+  ;                            
   constructor() {
     // js_printer.PrintResult (embedded)
     this.js = "";
@@ -363,6 +420,10 @@ class compileResultJS {
 }
 
 class compileResultForSourceMap {
+  ;                           
+  ;                            
+  ;                        
+  ;                        
   constructor(sourceMapChunk, generatedOffset, sourceIndex, isNullEntry) {
     this.sourceMapChunk = sourceMapChunk; // sourcemap.Chunk
     this.generatedOffset = generatedOffset; // sourcemap.LineColumnOffset
@@ -373,6 +434,9 @@ class compileResultForSourceMap {
 
 // js_printer.RequireOrImportMeta (only read by the printer)
 class RequireOrImportMeta {
+  ;                          
+  ;                          
+  ;                               
   constructor(wrapperRef = InvalidRef, exportsRef = InvalidRef, isWrapperAsync = false) {
     this.wrapperRef = wrapperRef;
     this.exportsRef = exportsRef;
@@ -381,6 +445,8 @@ class RequireOrImportMeta {
 }
 
 class legalCommentEntry {
+  ;                        
+  ;                     
   constructor(sourceIndex, comments) {
     this.sourceIndex = sourceIndex;
     this.comments = comments;
@@ -1326,6 +1392,14 @@ const matchImportProbablyTypeScriptType = 5; // The import is missing but came f
 const matchImportAmbiguous = 6; // The import resolved to multiple symbols via "export * from"
 
 class matchImportResult {
+                        
+                       
+                               
+                              
+                          
+                                   
+                               
+                      
   constructor(
     kind = matchImportIgnore,
     alias = "",
@@ -1360,6 +1434,9 @@ class matchImportResult {
 }
 
 class importTracker {
+  ;                           
+  ;                       
+  ;                         
   constructor(sourceIndex = 0, nameLoc = 0, importRef = 0) {
     this.sourceIndex = sourceIndex;
     this.nameLoc = nameLoc; // Optional, goes with sourceIndex, ignore if zero
@@ -2142,6 +2219,9 @@ Object.assign(linkerContext.prototype, {
 // Tree shaking and chunks
 
 class chunkOrder {
+                           
+                        
+                          
   constructor(sourceIndex, distance, tieBreaker) {
     this.sourceIndex = sourceIndex;
     this.distance = distance;
@@ -3097,6 +3177,8 @@ function sharedStep5SnapshotsEqual(a, b) {
 const runtimePrintCache = new WeakMap(); // runtime Source -> Map<string, entry>
 
 class recordingRenamer {
+                 
+                               
   constructor(r) {
     this.r = r;
     this.names = new Map(); // ref -> name
@@ -4613,3 +4695,4 @@ Object.assign(linkerContext.prototype, {
     }
   },
 });
+// generated from linker.mts by tools/ts-build.mjs; edit that file
