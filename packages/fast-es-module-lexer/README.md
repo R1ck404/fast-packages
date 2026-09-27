@@ -9,11 +9,13 @@ results (object shapes, key order, values) and identical errors.
 "dependencies": { "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.0" }
 ```
 
-| vs es-module-lexer 1.7.0 | Node | Chromium |
+| input | times faster than es-module-lexer 1.7.0, in Node | in Chromium |
 |---|---|---|
 | small modules (70B-1.6KB) | 3-6.5x | 2.3-3.7x |
 | 0.5-1.2MB bundles | 6-18x | 5-7.4x |
 | batches of real package files | 5-7.6x | 3.5-4.5x |
+
+Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#results).
 
 ## How
 

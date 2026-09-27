@@ -15,12 +15,14 @@ Entry points like brotli-wasm's: `require()` in Node is synchronous (plus a
 the module (browser: fetches `fastbrotli.wasm` next to `pkg.web.mjs`; Node:
 reads it). Node >= 20.19.
 
-| vs brotli-wasm 3.0.1 | speedup |
+| operation | times faster than brotli-wasm 3.0.1 |
 |---|---|
 | `compress()` (quality 11, the default) 70B / 1.6KB / 8KB | 12.7 / 4.5 / 3.4x |
 | `compress()` quality 11, 51KB-1MB | 2.9-3x |
 | quality 1 / 5 / 9 | 2.8-3.4 / 2.4-3.2 / 1.8-4.2x |
 | `decompress` | 2.0-3.6x |
+
+Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#results).
 
 ## How
 

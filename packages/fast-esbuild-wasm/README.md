@@ -4,8 +4,11 @@ A faster drop-in replacement for [`esbuild-wasm@0.28.2`](https://www.npmjs.com/p
 `transform()` in the browser build runs a JavaScript port of esbuild's
 transform pipeline with **byte-identical output** (code and source maps),
 and falls back to the official Go wasm for everything the port does not
-cover. Small and medium files transform 5-35x faster than esbuild-wasm (often
-faster than native esbuild through its child-process API), 1MB files 3-4x.
+cover. In the browser, transforms are 3-7.5x faster than esbuild-wasm (5-7.5x
+on small and medium files, 3-4x on 1 MB files); small and medium files are
+often faster than native esbuild through its child-process API.
+
+Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#results).
 
 ```jsonc
 // package.json

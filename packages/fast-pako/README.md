@@ -15,7 +15,7 @@ errors and streaming callbacks.
 embedded (no fetch, synchronous init). Types: `@types/pako` works with the
 alias above. pako's `pako/lib/*` and `pako/dist/*` subpaths are not provided.
 
-| vs pako 2.1.0 | speedup |
+| operation | times faster than pako 2.1.0 |
 |---|---|
 | ungzip of npm tarballs | 5.0-5.9x |
 | inflate 1-9MB | 3.9-4.2x |
@@ -23,6 +23,8 @@ alias above. pako's `pako/lib/*` and `pako/dist/*` subpaths are not provided.
 | streaming `Inflate` | 3.7x |
 | inputs of a few hundred bytes | 4-7x |
 | deflate level 6 / 9 | ~2x (bounded by zlib's match search, which must stay identical) |
+
+Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#results).
 
 ## How
 

@@ -13,7 +13,7 @@ the same exports, **identical ASTs** (keys, key order, values, `Node` /
 }
 ```
 
-| vs acorn 8.18 | speedup |
+| operation | times faster than acorn 8.18 |
 |---|---|
 | `parse` 1.6KB .. 9MB | 2.5-3.1x |
 | `parse` with `locations` | 1.9-2.7x |
@@ -21,6 +21,8 @@ the same exports, **identical ASTs** (keys, key order, values, `Node` /
 | subclasses that only override `parseFunctionBody` | 2.2-2.6x |
 | `parseExpressionAt` | 3.1x |
 | `tokenizer()` | 1.5-1.6x |
+
+Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#results).
 
 ## How
 

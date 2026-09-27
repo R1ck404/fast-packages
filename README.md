@@ -13,7 +13,7 @@ original on large real-world corpora. Nothing here is wired into Nodepod yet.
 | [`@r1ck404/fast-pako`](packages/fast-pako) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-pako.svg)](https://www.npmjs.com/package/@r1ck404/fast-pako) | pako 2.1.0 | ungzip 5-6x, inflate 4x, deflate L1 3x | pako's zlib ported to Rust/wasm, same bytes |
 | [`@r1ck404/fast-acorn`](packages/fast-acorn) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-acorn.svg)](https://www.npmjs.com/package/@r1ck404/fast-acorn) | acorn 8.18.0 | parse 2.5-3.1x, JSX and `parseFunctionBody` subclasses 2.2-2.6x | a parser mirroring acorn function by function |
 | [`@r1ck404/fast-acorn-jsx`](packages/fast-acorn-jsx) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-acorn-jsx.svg)](https://www.npmjs.com/package/@r1ck404/fast-acorn-jsx) | acorn-jsx 5.3.2 | (enables the JSX fast path in minified bundles) | acorn-jsx + a registration hook |
-| [`@r1ck404/fast-esbuild-wasm`](packages/fast-esbuild-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-esbuild-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-esbuild-wasm) | esbuild-wasm 0.28.2 | transform 5-35x small/medium, 3-4x on 1MB | JavaScript port of esbuild's transform pipeline in esbuild's own glue |
+| [`@r1ck404/fast-esbuild-wasm`](packages/fast-esbuild-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-esbuild-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-esbuild-wasm) | esbuild-wasm 0.28.2 | transform 3-7.5x in the browser | JavaScript port of esbuild's transform pipeline in esbuild's own glue |
 | [`@r1ck404/fast-es-module-lexer`](packages/fast-es-module-lexer) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-es-module-lexer.svg)](https://www.npmjs.com/package/@r1ck404/fast-es-module-lexer) | es-module-lexer 1.7.0 | 3-18x (Node), 2.3-7.4x (Chromium) | SIMD Rust/wasm port of lexer.c |
 | [`@r1ck404/fast-brotli-wasm`](packages/fast-brotli-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-brotli-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-brotli-wasm) | brotli-wasm 3.0.1 | compress q11 3-12.7x, decompress 2-3.6x | same Rust crates, rewritten encoder hot paths, new decoder |
 
@@ -59,84 +59,119 @@ browser build, or `@r1ck404/fast-esbuild-wasm/node.mjs` in-thread); pako's
 
 ## Results
 
-Ryzen 7 7800X3D, Node 24.16 / Chromium 149. `node bench/interleave.mjs <suite>
-3 <orig> prev fast`: implementations alternate in fresh processes, best of 3
-rounds per case. **before** = the packages at the start of the second
-optimisation round (`prev`), **now** = current; both as speedup over the
-original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
+How to read the tables: each row is one call on one input. The two time
+columns are how long that call takes with the original package and with the
+fast package (lower is better); **speedup** is original time ÷ fast time, so
+`3.0x` means three times as fast.
 
-**@r1ck404/fast-pako vs pako 2.1.0**
+Measured on a Ryzen 7 7800X3D with Node 24.16 and Chromium 149. The two
+implementations alternate in fresh processes and each row keeps the best of 3
+rounds. Raw data: `results/` (those files also list `prev`, an earlier
+unpublished version of these packages, for comparison).
 
-| case | pako | before | now |
-|---|---|---|---|
-| ungzip npm tarballs (9 packages, 150KB-4.6MB .tgz) | 4.2-101 ms | 3.0-3.5x | **5.0-5.9x** |
-| inflate 1-9MB (js, json, wasm) | 2.5-29 ms | 2.9-3.7x | **3.9-4.2x** |
-| inflateRaw of a 128KB level-1 group (Nodepod content packing) | 410 us | 3.6x | **4.4x** |
-| deflateRaw level 1, 128KB group / 1-9MB | 1.4 / 6.7-91 ms | 2.3 / 2.6-3.2x | **2.6 / 3.0-3.7x** |
-| `Inflate` stream, 16KB pushes (typescript.tgz) | 101 ms | 2.8x | **3.7x** |
-| inflateRaw / ungzip of 300B | 11.8 / 9.7 us | 2.1 / 1.7x | **5.6 / 4.3x** |
-| deflate level 6 / level 9 | | 1.9-2.3x / 1.7-2.0x | unchanged |
+### fast-pako vs pako 2.1.0
 
-**@r1ck404/fast-acorn (+ @r1ck404/fast-acorn-jsx) vs acorn 8.18 (+ acorn-jsx 5.3.2)**
-
-| case | acorn | before | now |
-|---|---|---|---|
-| parse 1.6KB .. 9MB | 41 us .. 343 ms | 2.4-3.1x | 2.5-3.1x |
-| parse + locations | 52 us .. 50 ms | 1.8-2.5x | 1.9-2.7x |
-| Nodepod `topLevelParser()` subclass (skips function bodies) | 23 us .. 17 ms | 0.93-0.98x | **2.2-2.6x** |
-| acorn-jsx parse + locations (rollup `parseAst` for jsx/tsx) | 2.9-4.6 ms | 0.87-0.92x | **2.4-2.6x** |
-| rollup `parseAst` fallback flow (acorn fails on JSX -> acorn-jsx) | 7.9 ms | 0.79x | **2.4x** |
-| `tokenizer()` | 0.96-12.8 ms | 1.0x | **1.5-1.6x** |
-| `parseExpressionAt` x8 (with locations) | 29 us | 1.7x | **3.1x** |
-| any other `Parser.extend()` plugin | | 0.9x | 1.0x |
-
-**@r1ck404/fast-es-module-lexer vs es-module-lexer 1.7.0**
-
-| case | Node: orig | before | now | Chromium: orig | before | now |
-|---|---|---|---|---|---|---|
-| tiny module 70B / 1.6KB | 0.5 / 4.7 us | 1.7 / 2.3x | **3.0 / 6.5x** | 0.5 / 4.9 us | 1.4 / 2.0x | **2.3 / 3.7x** |
-| 51KB (non-ASCII) | 154 us | 1.7x | **5.9x** | 181 us | 1.7x | **4.4x** |
-| 0.5-1.2MB bundles | 2.0-3.8 ms | 2.1-3.7x | **6.3-18.4x** | 2.3-4.2 ms | 2.0-3.6x | **4.9-7.4x** |
-| typescript.js 9MB | 35 ms | 3.0x | **7.4x** | | | |
-| batches of real package files (34-753 files) | 2.0-15.5 ms | 1.8-2.9x | **5.1-7.6x** | 2.1-16.2 ms | 1.7-2.8x | **3.5-4.5x** |
-
-**@r1ck404/fast-brotli-wasm vs brotli-wasm 3.0.1** (`compress()` defaults to
-quality 11, which is what Nodepod's zlib polyfill uses)
-
-| case | brotli-wasm | before | now |
-|---|---|---|---|
-| compress q11 70B / 1.6KB / 8KB | 2.3 / 4.3 / 11.5 ms | 9.8 / 3.4 / 2.2x | **12.7 / 4.5 / 3.4x** |
-| compress q11 51KB / 536KB | 57 / 699 ms | 1.9 / 1.8x | **3.0 / 2.9x** |
-| compress q5 / q9 (51KB-1MB) | | 2.2-2.5x / 1.8-3.7x | 2.4-3.2x / 1.8-4.2x |
-| compress q1 | | 2.8-3.4x | unchanged |
-| decompress | 7 us .. 2.5 ms | 2.0-3.6x | unchanged |
-| `CompressStream` q5 / `DecompressStream` 1MB | 31 / 2.3 ms | 2.2 / 1.2x | 2.4 / 1.5x |
-
-**@r1ck404/fast-esbuild-wasm vs esbuild-wasm 0.28.2**
-
-| case | esbuild-wasm | before | now | (native esbuild) |
+| call | input | pako | fast-pako | speedup |
 |---|---|---|---|---|
-| Node: esm->cjs 1.6KB file | 15.5 ms | 108x | **157x** | 0.62 ms |
-| Node: esm->cjs 51KB file | 15.7 ms | 5.1x | 5.6x | 3.83 ms |
-| Node: batch of 17 zod files -> cjs | 268 ms | 18.5x | **23.3x** | 21.2 ms |
-| Node: ts 9KB / 25KB / 141KB file | 15.6-31 ms | 26x / 11x / 4.0x | **34x / 14x / 5.2x** | 0.9 / 1.6 / 5.5 ms |
-| Node: tsx / vite tsx + sourcemap, component x20 | 15.6 ms | 29x / 28x | **36x / 34x** | 0.85 / 0.96 ms |
-| Node: vite-style ts + sourcemap + tsconfigRaw (141KB) | 31 ms | 3.2x | **4.1x** | 7.0 ms |
-| Node: 0.5-1.2MB files | 63-137 ms | 2.1-2.4x | **2.5-3.0x** | 16-33 ms |
-| Node: build() bundle with plugin (Go path, microtask delivery) | 1.16 s | 8.8x | 8.7x | 12.9 ms |
-| Chromium: esm->cjs 1.6KB / 51KB | 1.5 / 11.5 ms | 5.0 / 4.6x | **7.5 / 5.5x** | |
-| Chromium: batch of 17 zod files (sequential / concurrent) | 58 / 57 ms | 4.6 / 5.2x | **5.9 / 6.2x** | |
-| Chromium: ts 9-141KB | 2.0-19.8 ms | 3.2-5.0x | 3.8-4.1x | |
-| Chromium: vite ts/tsx + sourcemap | 2.5-25.6 ms | 3.3-5.0x | 3.2-6.3x | |
-| Chromium: 1-1.2MB files | 66-130 ms | 2.5-3.3x | **3.1-3.8x** | |
-| Chromium: initialize() + first transform | 153 ms | 2.0x | 2.0x | |
+| `ungzip` | typescript 5.9.3 npm tarball (4.4 MB) | 100.7 ms | 17.5 ms | **5.8x** |
+| `ungzip` | react-dom npm tarball (1.4 MB) | 33.4 ms | 5.7 ms | **5.8x** |
+| `ungzip` | three npm tarball (4.6 MB) | 97.5 ms | 18.4 ms | **5.3x** |
+| `ungzip` | 300 B | 9.7 µs | 2.3 µs | **4.3x** |
+| `inflate` | 1 MB of JavaScript | 3.23 ms | 0.79 ms | **4.1x** |
+| `inflate` | 9 MB of JavaScript | 28.8 ms | 6.8 ms | **4.2x** |
+| `Inflate` stream, 16 KB pushes | typescript tarball | 101.1 ms | 27.4 ms | **3.7x** |
+| `deflateRaw`, level 1 | 1 MB of JavaScript | 9.9 ms | 3.3 ms | **3.0x** |
+| `deflate`, level 6 (default) | 1 KB of text | 71.6 µs | 11.7 µs | **6.1x** |
+| `deflate`, level 6 (default) | 1 MB of JavaScript | 33.1 ms | 16.6 ms | **2.0x** |
+| `deflate`, level 9 | 1 MB of JavaScript | 143.1 ms | 71.5 ms | **2.0x** |
+| `gzip` | 300 B | 41.9 µs | 6.3 µs | **6.7x** |
 
-The Node rows use `@r1ck404/fast-esbuild-wasm/node.mjs` (in-thread, `worker:
-false`); esbuild-wasm there pays the OS timer granularity (15.6 ms on
-Windows) per request, so the Chromium numbers are the fairer comparison for
-small inputs. For small and medium files the JS engine is faster than calling
-native esbuild through its child-process API; in steady state (warm JIT, no GC
-in the window) it transforms three.module.js in ~20 ms, about native speed.
+### fast-acorn (+ fast-acorn-jsx) vs acorn 8.18 (+ acorn-jsx 5.3.2)
+
+| call | input | acorn | fast-acorn | speedup |
+|---|---|---|---|---|
+| `parse` | 1.6 KB module | 41.3 µs | 14.3 µs | **2.9x** |
+| `parse` | 51 KB module | 2.30 ms | 0.74 ms | **3.1x** |
+| `parse` | react-dom (536 KB) | 17.1 ms | 5.9 ms | **2.9x** |
+| `parse` | three.module (1.2 MB) | 18.0 ms | 6.1 ms | **3.0x** |
+| `parse` | typescript.js (9 MB) | 342.6 ms | 138.5 ms | **2.5x** |
+| `parse` with `locations` | 51 KB module | 2.86 ms | 1.06 ms | **2.7x** |
+| `parse` with `locations` | three.module (1.2 MB) | 22.1 ms | 9.6 ms | **2.3x** |
+| acorn-jsx `parse` with `locations` | 40 JSX files (95 KB) | 4.55 ms | 1.79 ms | **2.5x** |
+| subclass overriding `parseFunctionBody` ¹ | rollup (948 KB) | 17.0 ms | 6.5 ms | **2.6x** |
+| `parseExpressionAt` | 8 template expressions | 28.6 µs | 9.2 µs | **3.1x** |
+| `tokenizer()` | 51 KB module | 964 µs | 608 µs | **1.6x** |
+| any other `Parser.extend()` plugin | | | | 1.0x (runs acorn) |
+
+¹ Nodepod's `topLevelParser`, which skips function bodies.
+
+### fast-es-module-lexer vs es-module-lexer 1.7.0
+
+| input | es-module-lexer | fast-es-module-lexer | speedup in Node | speedup in Chromium |
+|---|---|---|---|---|
+| 1.6 KB module | 4.7 µs | 0.7 µs | **6.5x** | **3.7x** |
+| 51 KB module with non-ASCII text | 153.7 µs | 26.0 µs | **5.9x** | **4.4x** |
+| react-dom (536 KB) | 2.13 ms | 0.12 ms | **18.4x** | **7.4x** |
+| three.module (1.2 MB) | 2.15 ms | 0.19 ms | **11.2x** | **5.5x** |
+| typescript.js (9 MB) | 35.2 ms | 4.7 ms | **7.4x** | |
+| 644 lodash-es modules | 2.51 ms | 0.33 ms | **7.6x** | **4.2x** |
+| 753 three/src modules | 15.5 ms | 2.2 ms | **7.0x** | **4.2x** |
+
+(Times are Node's.)
+
+### fast-brotli-wasm vs brotli-wasm 3.0.1
+
+`compress()` without options uses quality 11, which is what Nodepod's zlib
+polyfill calls.
+
+| call | input | brotli-wasm | fast-brotli-wasm | speedup |
+|---|---|---|---|---|
+| `compress`, quality 11 (default) | 70 B | 2.30 ms | 0.18 ms | **12.7x** |
+| `compress`, quality 11 (default) | 1.6 KB | 4.31 ms | 0.97 ms | **4.5x** |
+| `compress`, quality 11 (default) | 8 KB of JSON | 11.5 ms | 3.3 ms | **3.4x** |
+| `compress`, quality 11 (default) | 51 KB | 57.4 ms | 19.4 ms | **3.0x** |
+| `compress`, quality 11 (default) | 536 KB | 698.6 ms | 241.5 ms | **2.9x** |
+| `compress`, quality 5 | 1 MB | 31.3 ms | 13.0 ms | **2.4x** |
+| `compress`, quality 1 | 1 MB | 16.5 ms | 5.8 ms | **2.8x** |
+| `decompress` | 51 KB | 115.8 µs | 56.4 µs | **2.1x** |
+| `decompress` | 1 MB | 2.25 ms | 0.97 ms | **2.3x** |
+| `CompressStream`, quality 5 | 1 MB | 31.1 ms | 13.2 ms | **2.4x** |
+| `DecompressStream` | 1 MB | 2.31 ms | 1.59 ms | **1.5x** |
+
+### fast-esbuild-wasm vs esbuild-wasm 0.28.2
+
+In the browser (headless Chromium, the browser build in its default worker
+mode, the way Nodepod runs it):
+
+| `transform()` | input | esbuild-wasm | fast-esbuild-wasm | speedup |
+|---|---|---|---|---|
+| ESM → CommonJS | 1.6 KB | 1.5 ms | 0.2 ms | **7.5x** |
+| ESM → CommonJS | 51 KB | 11.5 ms | 2.1 ms | **5.5x** |
+| ESM → CommonJS | 17 files at once | 56.9 ms | 9.2 ms | **6.2x** |
+| ESM → CommonJS | rollup (948 KB) | 129.9 ms | 34.4 ms | **3.8x** |
+| ESM → CommonJS | three.module (1.2 MB) | 66.0 ms | 21.4 ms | **3.1x** |
+| TypeScript → ESM | 25 KB | 4.1 ms | 1.0 ms | **4.1x** |
+| TypeScript → ESM | 141 KB | 19.1 ms | 5.0 ms | **3.8x** |
+| TSX + source map | 20 small components | 2.5 ms | 0.4 ms | **6.3x** |
+| `initialize()` + first `transform()` | | 152.8 ms | 77.6 ms | **2.0x** |
+
+In Node (`@r1ck404/fast-esbuild-wasm/node.mjs`, in-thread), with native
+esbuild for reference:
+
+| `transform()` | input | esbuild-wasm | fast-esbuild-wasm | speedup | native esbuild |
+|---|---|---|---|---|---|
+| ESM → CommonJS | 51 KB | 15.7 ms | 2.8 ms | **5.6x** | 3.8 ms |
+| ESM → CommonJS | 17 files | 268.0 ms | 11.5 ms | **23x** | 21.2 ms |
+| ESM → CommonJS | three.module (1.2 MB) | 77.0 ms | 25.7 ms | **3.0x** | 19.1 ms |
+| TypeScript → ESM | 141 KB | 31.1 ms | 6.0 ms | **5.2x** | 5.5 ms |
+| TS + source map + tsconfig (Vite-style) | 141 KB | 31.3 ms | 7.6 ms | **4.1x** | 7.0 ms |
+| TSX | 20 small components | 15.6 ms | 0.43 ms | **36x** | 0.85 ms |
+
+In Node, esbuild-wasm waits for the OS timer (15.6 ms on Windows) on every
+call, which inflates the speedups for small inputs; the browser table is the
+fairer comparison there. Against native esbuild called through its API, the
+JavaScript engine is faster on small and medium files and about 1.3x slower
+on 1 MB files.
 
 ## Verification
 
@@ -230,8 +265,9 @@ Benchmarks:
 
 `interleave.mjs` alternates implementations in fresh processes and keeps the
 best run per case, which makes the comparison robust to CPU frequency changes
-and background load. The `prev` implementation in each suite loads a snapshot
-from `.scratch/prev/` (not in git) for before/after comparisons.
+and background load. For comparing your own changes, each suite also accepts
+`prev`, which loads an older copy of the packages from `.scratch/prev/` (not
+part of the repository; copy the packages there before you start).
 
 ## Dead ends (kept for the record)
 
