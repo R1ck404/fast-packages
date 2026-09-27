@@ -3,7 +3,7 @@
 // with Nodepod's module-transformer options and Vite-style ts/tsx options.
 // usage: node verify/verify-esbuild.mjs [nJs] [nTs]
 import * as O from "esbuild-wasm";
-import { join } from "node:path";
+import { join, delimiter } from "node:path";
 import { pathToFileURL } from "node:url";
 import { allFiles, sample, readText, rnd, rint, pick, Tally, root, walk, here } from "./corpus.mjs";
 
@@ -61,8 +61,10 @@ async function cmp(what, src, opts) {
 }
 
 const jsFiles = sample(allFiles((n) => /\.(m|c)?js$/.test(n)), NJ, 1 << 20);
-const sandbox = join(root, "..");
-const tsAll = walk(sandbox, (n) => (/\.(m|c)?tsx?$/.test(n) && !n.endsWith(".d.ts"))).filter((f) => !f.includes(".git"));
+// TS/TSX sources: TS_DIRS (path-delimited), default the directory containing
+// this repo (other projects checked out next to it)
+const tsDirs = process.env.TS_DIRS ? process.env.TS_DIRS.split(delimiter) : [join(root, "..")];
+const tsAll = tsDirs.flatMap((d) => walk(d, (n) => (/\.(m|c)?tsx?$/.test(n) && !n.endsWith(".d.ts")))).filter((f) => !f.includes(".git"));
 const tsFiles = sample(tsAll, NT, 512 << 10);
 console.log("js:", jsFiles.length, "ts:", tsFiles.length);
 const t0 = Date.now();

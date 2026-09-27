@@ -1,17 +1,19 @@
-// Build a JSX corpus: .tsx/.jsx files found under the sandbox, TypeScript
-// stripped by native esbuild with jsx: "preserve" (JSX kept as written).
-// Output: .scratch/verify/jsx-corpus/<hash>.jsx (deduplicated by content).
+// Build a JSX corpus: .tsx/.jsx files found in the given directories (default:
+// the directory containing this repo, i.e. other projects checked out next to
+// it), TypeScript stripped by native esbuild with jsx: "preserve" (JSX kept as
+// written). Output: verify/jsx-corpus/<hash>.jsx (deduplicated by content).
+// usage: node verify/make-jsx-corpus.mjs [max files] [dir ...]
 import { transformSync } from "esbuild";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { walk, here, rnd } from "./corpus.mjs";
 
-const sandbox = join(here, "../..");
+const sourceDirs = process.argv.length > 3 ? process.argv.slice(3) : [join(here, "../..")];
 const out = join(here, "jsx-corpus");
 mkdirSync(out, { recursive: true });
 const max = Number(process.argv[2] || 6000);
-const files = walk(sandbox, (n) => n.endsWith(".tsx") || n.endsWith(".jsx")).filter((f) => !f.includes(".git"));
+const files = sourceDirs.flatMap((d) => walk(d, (n) => n.endsWith(".tsx") || n.endsWith(".jsx"))).filter((f) => !f.includes(".git"));
 console.log("candidates:", files.length);
 // shuffle deterministically
 for (let i = files.length - 1; i > 0; i--) {
