@@ -1,10 +1,10 @@
 // Focused inflate microbenchmark on the built wasm (min of runs, in MB/s of output).
-// usage: node bench/inflmicro.mjs [wasmPath]
+// usage: node packages/fast-pako/tools/inflmicro.mjs [wasmPath]
 import { readFileSync } from "node:fs";
 import pako from "pako";
-import { loadJs, utf8, jsonText, read, tarballs } from "./corpus.mjs";
+import { loadJs, utf8, jsonText, read, tarballs } from "../../../bench/corpus.mjs";
 
-const wasmPath = process.argv[2] || new URL("../fast-pako/fastzlib.wasm", import.meta.url);
+const wasmPath = process.argv[2] || new URL("../fastzlib.wasm", import.meta.url);
 const inst = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(wasmPath)), { env: { js_emit() {} } });
 const W = inst.exports;
 

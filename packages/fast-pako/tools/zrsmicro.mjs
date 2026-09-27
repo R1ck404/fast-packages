@@ -1,7 +1,7 @@
 // zlib-rs compiled to wasm: same cases as inflmicro.mjs (single-call inflate) — reference ceiling
 import { readFileSync } from "node:fs";
 import pako from "pako";
-import { loadJs, utf8, jsonText, read, tarballs } from "./corpus.mjs";
+import { loadJs, utf8, jsonText, read, tarballs } from "../../../bench/corpus.mjs";
 const W = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("./zlibrs.wasm.tmp", import.meta.url))), { env: {} }).exports;
 const js = utf8(loadJs().find((f) => f.name.includes("react-dom-client.dev")).code);
 const cases = [

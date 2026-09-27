@@ -1,5 +1,5 @@
 // Build the wasm core and embed it (base64) into fastzlib.wasm.mjs.
-// usage: node fast-pako/build.mjs [--no-opt]
+// usage: node packages/fast-pako/build.mjs [--no-opt]
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";

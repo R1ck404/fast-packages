@@ -1,4 +1,4 @@
-// fastzlib: wasm core of fast-pako. Exposes zlib-level state machines that
+// fastzlib: wasm core of @r1ck404/fast-pako. Exposes zlib-level state machines that
 // are exact ports of pako's, plus the pako `push()` loops (chunking,
 // multi-member handling, to:'string' segmentation) so results, chunk
 // boundaries and error behaviour match pako 2.1.0 exactly.

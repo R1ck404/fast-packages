@@ -1,5 +1,5 @@
-// Real-data differential test: fast-pako vs pako 2.1.0.
-//   node fast-pako/test/corpus.mjs [--mb=N] [--dir=<extra dir>]...
+// Real-data differential test: @r1ck404/fast-pako vs pako 2.1.0.
+//   node packages/fast-pako/test/corpus.mjs [--mb=N] [--dir=<extra dir>]...
 // * every corpus/*.tgz: ungzip one-shot, inflate/to:string variants and
 //   streaming Inflate with several push sizes (compared chunk by chunk);
 // * files from node_modules (+ Nodepod's pnpm store if present, + --dir):
@@ -14,9 +14,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const fast = (await import(process.env.FASTPAKO_IMPL ? pathToFileURL(resolve(process.env.FASTPAKO_IMPL)).href : "../index.mjs")).default;
 const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, "../..");
+const root = join(here, "../../.."); // repo root
 const MB = Number((process.argv.find((a) => a.startsWith("--mb=")) || "--mb=80").slice(5));
-const dirs = [join(root, "node_modules"), "C:/Users/rickh/Documents/sandbox/Nodepod/node_modules/.pnpm", ...process.argv.filter((a) => a.startsWith("--dir=")).map((a) => a.slice(6))];
+const dirs = [join(root, "node_modules"), join(root, "../Nodepod/node_modules/.pnpm"), ...process.argv.filter((a) => a.startsWith("--dir=")).map((a) => a.slice(6))];
 
 let checks = 0, failures = 0;
 const fail = (m) => { failures++; if (failures <= 20) console.log("FAIL:", m); };

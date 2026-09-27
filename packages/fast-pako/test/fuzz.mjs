@@ -1,5 +1,5 @@
-// Differential fuzz tests: fast-pako vs pako 2.1.0 (node_modules).
-//   node fast-pako/test/fuzz.mjs [--quick] [--seed=N]
+// Differential fuzz tests: @r1ck404/fast-pako vs pako 2.1.0 (node_modules).
+//   node packages/fast-pako/test/fuzz.mjs [--quick] [--seed=N]
 // Complements equiv.mjs with
 //  * crafted deflate streams hitting every decoder corner (invalid fixed
 //    symbols, incomplete/empty distance codes, 15-bit codes, bad sets),
@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 // FASTPAKO_IMPL=<path to an index.mjs> tests another build (e.g. a snapshot)
 const fast = (await import(process.env.FASTPAKO_IMPL ? pathToFileURL(resolve(process.env.FASTPAKO_IMPL)).href : "../index.mjs")).default;
-import { loadJs, utf8, randomBytes, read } from "../../bench/corpus.mjs";
+import { loadJs, utf8, randomBytes, read } from "../../../bench/corpus.mjs";
 
 const QUICK = process.argv.includes("--quick");
 const seedArg = process.argv.find((a) => a.startsWith("--seed="));

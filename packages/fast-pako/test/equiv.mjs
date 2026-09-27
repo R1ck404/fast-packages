@@ -1,8 +1,8 @@
-// Equivalence tests: fast-pako must behave exactly like pako 2.1.0.
-// node fast-pako/test/equiv.mjs [--quick]
+// Equivalence tests: @r1ck404/fast-pako must behave exactly like pako 2.1.0.
+// node packages/fast-pako/test/equiv.mjs [--quick]
 import pako from "pako";
 import fast from "../index.mjs";
-import { loadJs, utf8, randomBytes, read } from "../../bench/corpus.mjs";
+import { loadJs, utf8, randomBytes, read } from "../../../bench/corpus.mjs";
 
 const QUICK = process.argv.includes("--quick");
 let failures = 0, checks = 0;

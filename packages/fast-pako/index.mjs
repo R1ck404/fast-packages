@@ -1,4 +1,4 @@
-// fast-pako: drop-in replacement for pako 2.1.0 (same API, same bytes, same
+// @r1ck404/fast-pako: drop-in replacement for pako 2.1.0 (same API, same bytes, same
 // errors). The hot paths run in a Rust→wasm port of pako's zlib code; anything
 // unusual (exotic option values, non-byte inputs, missing wasm) is handed to
 // the vendored original, so behaviour is identical in every case.
@@ -98,6 +98,7 @@ function initWasm(module) {
 }
 let wasmModuleBytes = null;
 try {
+  // (__FASTZLIB_BYTES: a build with function names, for wasm profiling)
   wasmModuleBytes = globalThis.__FASTZLIB_BYTES || b64decode(wasmB64);
   initWasm(new WebAssembly.Module(wasmModuleBytes));
 } catch (e) {
