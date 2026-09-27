@@ -1,0 +1,38 @@
+{
+  "name": "@r1ck404/fast-acorn-jsx",
+  "version": "5.3.2",
+  "description": "acorn-jsx 5.3.2, unchanged except that @r1ck404/fast-acorn parses its classes with a native JSX mode (2.4-2.6x faster, identical ASTs); works with any acorn",
+  "keywords": [
+    "acorn",
+    "jsx",
+    "acorn-jsx",
+    "parser",
+    "drop-in"
+  ],
+  "license": "MIT",
+  "author": "R1ck404 (https://github.com/R1ck404)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R1ck404/fast-packages.git",
+    "directory": "packages/fast-acorn-jsx"
+  },
+  "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-acorn-jsx#readme",
+  "upstream": "acorn-jsx@5.3.2",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "xhtml.js",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "acorn": "^6.0.0 || ^7.0.0 || ^8.0.0"
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "acorn-jsx": "5.3.2"
+  }
+}
