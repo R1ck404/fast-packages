@@ -18,3 +18,5 @@ packages/fast-pako/fastzlib.wasm
 # verify/: generated JSX corpus and run outputs
 verify/jsx-corpus/
 verify/out/
+.mutate-backup.json
+packages/fast-noble-hashes/fasthashes.wasm
