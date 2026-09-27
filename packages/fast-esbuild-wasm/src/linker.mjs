@@ -903,7 +903,7 @@ Object.assign(linkerContext.prototype, {
           sharedStep5Memos.set(repr.ast.namedExports, snapshot);
         } else if (!sharedStep5SnapshotsEqual(memo, snapshot)) {
           // (Test hook: the memo must match a fresh computation)
-          throw new globalThis.Error("fast-esbuild: step 5 memo mismatch");
+          throw new globalThis.Error("@r1ck404/fast-esbuild-wasm: step 5 memo mismatch");
         }
       }
     }
@@ -3176,7 +3176,7 @@ function printRuntimeCached(c, file, partRange, tree, r, o) {
     if (globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__) {
       const fresh = printJS(tree, c.graph.symbols, r, o);
       if (fresh.js !== cached.js || JSON.stringify(fresh.sourceMapChunk) !== JSON.stringify(cached.sourceMapChunk)) {
-        throw new globalThis.Error("fast-esbuild: runtime print cache mismatch");
+        throw new globalThis.Error("@r1ck404/fast-esbuild-wasm: runtime print cache mismatch");
       }
     }
     return cached;

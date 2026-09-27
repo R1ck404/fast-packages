@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname, normalize } from "node:path";
 import { chromium } from "playwright-core";
-import { root } from "./corpus.mjs";
+import { root } from "../../../bench/corpus.mjs";
 
 const mime = { ".js": "text/javascript", ".wasm": "application/wasm", ".html": "text/html" };
 const server = createServer((req, res) => {

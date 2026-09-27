@@ -1,9 +1,11 @@
-# fast-esbuild-wasm: porting conventions (Go → JavaScript)
+# @r1ck404/fast-esbuild-wasm: porting conventions (Go → JavaScript)
 
 We are porting esbuild 0.28.2's *transform* pipeline (lexer, parser, printer,
 renamer, part of the linker) from Go to plain JavaScript ES modules (`.mjs`).
-The Go source lives at `/tmp/esbuild-src` (Windows path
-`C:\Users\Eigenaar\AppData\Local\Temp\esbuild-src`). The goal is **byte-identical
+The Go source is a checkout of esbuild v0.28.2; the tools look for it in
+`<os tmpdir>/esbuild-src` (`git clone --depth 1 --branch v0.28.2
+https://github.com/evanw/esbuild "$TMPDIR/esbuild-src"`) or take its path as an
+argument. The goal is **byte-identical
 output** to esbuild for the supported option subset, and much higher speed than
 esbuild-wasm. Anything we do not support must **bail** (see below) so the
 caller can fall back to the real esbuild-wasm.
@@ -13,7 +15,7 @@ simplify esbuild's logic, do not reorder conditions, do not merge functions.
 Keep Go comments that explain *why* (they help reviewers compare), drop
 the rest. Keep the same function order as the Go file where practical.
 
-All ported modules live in `fast-esbuild-wasm/src/`. Shared foundations that
+All ported modules live in `src/`. Shared foundations that
 already exist (read them before starting):
 
 - `bail.mjs`       — `BAIL`, `LexerPanic`, `bail()`
@@ -176,7 +178,7 @@ breaks the file, and literal BOMs/NBSPs are invisible. So **never write
 `\u` escapes in source text**: use numeric code points instead
 (`c === 0x2028`, `String.fromCharCode(0xfeff)`, `"\\u"` built at runtime is
 fine). After writing a file, run `node tools/check.mjs src/file.mjs` from the
-`fast-esbuild-wasm` directory: it syntax-checks the module (`node --check`)
+package directory: it syntax-checks the module (`node --check`)
 and rejects non-ASCII characters. The port must be pure ASCII. Add
 `--import` to also resolve imports (only works once the modules you import
 exist).

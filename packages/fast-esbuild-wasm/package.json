@@ -1,0 +1,59 @@
+{
+  "name": "@r1ck404/fast-esbuild-wasm",
+  "version": "0.28.2",
+  "description": "Faster drop-in replacement for esbuild-wasm 0.28.2: transform() runs a JavaScript port of esbuild's pipeline with byte-identical output, falling back to the official Go wasm for everything else",
+  "keywords": [
+    "esbuild",
+    "esbuild-wasm",
+    "transform",
+    "typescript",
+    "jsx",
+    "bundler",
+    "wasm",
+    "drop-in"
+  ],
+  "license": "MIT",
+  "author": "R1ck404 (https://github.com/R1ck404)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R1ck404/nodepod-fast-packages.git",
+    "directory": "packages/fast-esbuild-wasm"
+  },
+  "homepage": "https://github.com/R1ck404/nodepod-fast-packages/tree/main/packages/fast-esbuild-wasm#readme",
+  "upstream": "esbuild-wasm@0.28.2",
+  "main": "lib/main.js",
+  "browser": "lib/browser.js",
+  "types": "lib/main.d.ts",
+  "directories": {
+    "bin": "bin"
+  },
+  "files": [
+    "lib/main.js",
+    "lib/main.d.ts",
+    "lib/browser.js",
+    "lib/browser.min.js",
+    "lib/browser.d.ts",
+    "esm/browser.js",
+    "esm/browser.min.js",
+    "esm/browser.d.ts",
+    "bin/esbuild",
+    "esbuild.wasm",
+    "wasm_exec.js",
+    "wasm_exec_node.js",
+    "node.mjs",
+    "LICENSE.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepack": "node build.mjs",
+    "test": "node test/smoke.mjs && node test/api.mjs",
+    "test:full": "node test/diff.mjs && node test/bailreasons.mjs && node test/smoke.mjs && node test/api.mjs && node test/fuzz.mjs --n 3000"
+  },
+  "devDependencies": {
+    "esbuild-wasm": "0.28.2",
+    "esbuild": "0.28.2"
+  }
+}

@@ -85,7 +85,7 @@ function computeReservedNamesForScope(scope, symbols, names) {
         const symbol = symbols.get(member.ref);
         if (symbol.kind === SymbolUnbound || (symbol.flags & MustNotBeRenamed) !== 0) fresh.push(symbol.originalName);
       }
-      if (fresh.join("\0") !== memo.join("\0")) throw new globalThis.Error("fast-esbuild: reserved names memo mismatch");
+      if (fresh.join("\0") !== memo.join("\0")) throw new globalThis.Error("@r1ck404/fast-esbuild-wasm: reserved names memo mismatch");
     }
     for (let i = 0; i < memo.length; i++) names.set(memo[i], 1);
   } else {

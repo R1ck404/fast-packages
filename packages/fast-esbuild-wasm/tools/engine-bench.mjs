@@ -1,5 +1,5 @@
 // Times the JS engine directly (no glue) on corpus files, for profiling.
-// usage: node test/engine-bench.mjs [--opts cjs|js|esm|ts] [--filter regex] [--n N]
+// usage: node tools/engine-bench.mjs [--opts cjs|js|esm|ts] [--filter regex] [--n N]
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const get = (k, d) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
 const optsName = get("--opts", "cjs");
 const filter = new RegExp(get("--filter", "."));
 const N = Number(get("--n", 0));
-const nm = join(here, "../../node_modules");
+const nm = join(here, "../../../node_modules");
 
 const flagsByName = {
   js: ["--log-level=silent", "--log-limit=0", "--loader=js"],

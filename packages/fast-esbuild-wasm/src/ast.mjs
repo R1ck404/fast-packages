@@ -202,7 +202,7 @@ export const InvalidRef = -1;
 export const REF_INNER_BITS = 24;
 export const REF_INNER_MASK = 0xffffff;
 export function makeRef(sourceIndex, innerIndex) {
-  if (innerIndex > REF_INNER_MASK) throw new globalThis.Error("fast-esbuild: too many symbols");
+  if (innerIndex > REF_INNER_MASK) throw new globalThis.Error("@r1ck404/fast-esbuild-wasm: too many symbols");
   return (sourceIndex << REF_INNER_BITS) | innerIndex;
 }
 export function refSource(ref) {

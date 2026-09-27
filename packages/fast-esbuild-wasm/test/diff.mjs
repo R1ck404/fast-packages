@@ -1,4 +1,4 @@
-// Differential test: fast-esbuild-wasm's JS transform vs real esbuild 0.28.2
+// Differential test: @r1ck404/fast-esbuild-wasm's JS transform vs real esbuild 0.28.2
 // (the native package; same Go code as esbuild-wasm) over a corpus of real
 // files and option sets.
 //
@@ -177,7 +177,7 @@ let files;
 if (singleFile) files = [resolve(singleFile)];
 else {
   const dirs = getAll("--dir");
-  if (dirs.length === 0) dirs.push(join(here, "../../node_modules"), join(here, "../../../../src"));
+  if (dirs.length === 0) dirs.push(join(here, "../../../node_modules"), join(here, "../../../../Nodepod/src"));
   const seen = new Set();
   files = [];
   for (const d of dirs) for (const f of walk(resolve(d), seen)) files.push(f);

@@ -19,7 +19,7 @@ const limit = Number(get("--limit", Infinity));
 const onlyOpts = get("--opts", null)?.split(",");
 const nExamples = Number(get("--examples", 2));
 const dirs = args.flatMap((a, i) => (a === "--dir" ? [args[i + 1]] : []));
-if (dirs.length === 0) dirs.push(join(here, "../../node_modules"), join(here, "../../../../src"));
+if (dirs.length === 0) dirs.push(join(here, "../../../node_modules"), join(here, "../../../../Nodepod/src"));
 
 const importMetaDefine = {
   "import.meta.url": "import_meta.url",

@@ -4,7 +4,7 @@ import { Log, Source, Path, PrettyPaths } from "../src/logger.mjs";
 import { processDefines, ModeConvertFormat, FormatCommonJS, PlatformNeutral } from "../src/config.mjs";
 import { newLexer, TEndOfFile } from "../src/js_lexer.mjs";
 const { fastTransform } = await import("../src/transform.mjs");
-const file = process.argv[2] || "../node_modules/three/build/three.module.js";
+const file = process.argv[2] || new URL("../../../node_modules/three/build/three.module.js", import.meta.url);
 const code = readFileSync(file, "utf8");
 const src = new Source(new PrettyPaths("<stdin>", "<stdin>"), "stdin", code, new Path("<stdin>"), 1);
 const o = new Options();

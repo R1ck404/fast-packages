@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 const require = createRequire(import.meta.url);
 globalThis.self ??= globalThis;
-const fast = await import("../index.mjs");
+const fast = await import("../node.mjs");
 await fast.initialize({});
 const ref = require("esbuild-wasm/lib/browser.js");
 await ref.initialize({ wasmModule: new WebAssembly.Module(readFileSync(require.resolve("esbuild-wasm/esbuild.wasm"))), worker: false });
@@ -49,5 +49,19 @@ for (const [input, opts] of cases) {
   if (same) ok++;
   else console.log("DIFF", JSON.stringify(input).slice(0, 40), opts, "\n  ref:", JSON.stringify(a).slice(0, 300), "\n  fast:", JSON.stringify(b).slice(0, 300));
 }
-console.log(`${ok}/${cases.length} identical`, { fast: fast.fastStats.fast, bail: fast.fastStats.bail, error: fast.fastStats.error });
+const stats = fast.default[Symbol.for("@r1ck404/fast-esbuild-wasm:stats")];
+console.log(`${ok}/${cases.length} identical`, { fast: stats.fast, bail: stats.bail, error: stats.error });
+
+// the public surface is esbuild-wasm's: same export names in every build
+const keys = (m) => Object.keys(m).sort().join(",");
+const surfaces = [
+  ["lib/browser.js", keys(require("../lib/browser.js")), keys(ref)],
+  ["lib/browser.min.js", keys(require("../lib/browser.min.js")), keys(require("esbuild-wasm/lib/browser.min.js"))],
+  ["esm/browser.js", keys(await import("../esm/browser.js")), keys(await import("esbuild-wasm/esm/browser.js"))],
+  ["esm/browser.min.js", keys(await import("../esm/browser.min.js")), keys(await import("esbuild-wasm/esm/browser.min.js"))],
+];
+let surfaceBad = 0;
+for (const [name, a, b] of surfaces) if (a !== b) (surfaceBad++, console.log("EXPORTS DIFFER", name, a, "vs", b));
+console.log(`export surface: ${surfaces.length - surfaceBad}/${surfaces.length} identical`);
+if (surfaceBad) process.exitCode = 1;
 process.exit(0);

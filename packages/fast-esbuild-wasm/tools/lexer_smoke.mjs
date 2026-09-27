@@ -436,7 +436,7 @@ function decodeAll(lexer) {
 // acorn differential
 
 async function loadAcorn() {
-  const p = resolve(root, "../node_modules/acorn/dist/acorn.mjs");
+  const p = resolve(root, "../../node_modules/acorn/dist/acorn.mjs");
   if (!existsSync(p)) return null;
   return await import(pathToFileURL(p).href);
 }
@@ -511,7 +511,7 @@ function acornDiff(acorn, file, contents, tsParse) {
 // ---------------------------------------------------------------------------
 
 const files = [];
-const nm = resolve(root, "../node_modules");
+const nm = resolve(root, "../../node_modules");
 for (const f of [
   "zod/v4/classic/schemas.js",
   "three/build/three.module.js",
@@ -521,7 +521,7 @@ for (const f of [
   const p = join(nm, f);
   if (existsSync(p)) files.push({ path: p, ts: false });
 }
-const tsDir = resolve(root, "../../../src");
+const tsDir = resolve(root, "../../../Nodepod/src");
 if (existsSync(tsDir)) {
   for (const f of readdirSync(tsDir)) if (f.endsWith(".ts")) files.push({ path: join(tsDir, f), ts: true });
 }

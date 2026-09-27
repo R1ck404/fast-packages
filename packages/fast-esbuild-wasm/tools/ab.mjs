@@ -1,5 +1,5 @@
 // A/B timing of two engine source trees in alternating fresh processes.
-// usage: node test/ab.mjs <dirA> <dirB> [rounds] [--opts cjs|js|ts] [--filter re]
+// usage: node tools/ab.mjs <dirA> <dirB> [rounds] [--opts cjs|js|ts] [--filter re]
 // Each dir must contain transform.mjs (e.g. a copy of src/). Reports the
 // minimum time per input over all rounds and the B/A ratio.
 import { spawnSync } from "node:child_process";
@@ -8,7 +8,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const nm = join(here, "../../node_modules");
+const nm = join(here, "../../../node_modules");
 const argv = process.argv.slice(2);
 const get = (k, d) => (argv.includes(k) ? argv[argv.indexOf(k) + 1] : d);
 const optsName = get("--opts", "cjs");

@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join, extname } from "node:path";
 const { fastTransform } = await import("../src/transform.mjs");
 const flags = ["--log-level=silent", "--log-limit=0", "--target=esnext", "--format=cjs", "--platform=neutral", "--loader=js"];
@@ -15,8 +16,8 @@ const files = [];
       if (st.size > 20000 && st.size < 5e6) files.push(p);
     }
   }
-})(join(process.cwd(), "../node_modules"));
-const warm = readFileSync(join(process.cwd(), "../node_modules/zod/v4/classic/schemas.js"), "utf8");
+})(join(fileURLToPath(new URL("../../../node_modules", import.meta.url))));
+const warm = readFileSync(fileURLToPath(new URL("../../../node_modules/zod/v4/classic/schemas.js", import.meta.url)), "utf8");
 for (let i = 0; i < 30; i++) fastTransform(flags, warm);
 const rows = [];
 for (const f of files) {
