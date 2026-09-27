@@ -1,4 +1,4 @@
-# fast-* drop-ins: faster pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm
+# fast-* drop-ins: faster pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm, @noble/hashes
 
 [![CI](https://github.com/R1ck404/fast-packages/actions/workflows/ci.yml/badge.svg)](https://github.com/R1ck404/fast-packages/actions/workflows/ci.yml)
 
@@ -16,6 +16,7 @@ original on large real-world corpora. Nothing here is wired into Nodepod yet.
 | [`@r1ck404/fast-esbuild-wasm`](packages/fast-esbuild-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-esbuild-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-esbuild-wasm) | esbuild-wasm 0.28.2 | transform 3-7.5x in the browser | JavaScript port of esbuild's transform pipeline in esbuild's own glue |
 | [`@r1ck404/fast-es-module-lexer`](packages/fast-es-module-lexer) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-es-module-lexer.svg)](https://www.npmjs.com/package/@r1ck404/fast-es-module-lexer) | es-module-lexer 1.7.0 | 3-18x (Node), 2.3-7.4x (Chromium) | SIMD Rust/wasm port of lexer.c |
 | [`@r1ck404/fast-brotli-wasm`](packages/fast-brotli-wasm) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-brotli-wasm.svg)](https://www.npmjs.com/package/@r1ck404/fast-brotli-wasm) | brotli-wasm 3.0.1 | compress q11 3-12.7x, decompress 2-3.6x | same Rust crates, rewritten encoder hot paths, new decoder |
+| [`@r1ck404/fast-noble-hashes`](packages/fast-noble-hashes) | [![npm](https://img.shields.io/npm/v/@r1ck404/fast-noble-hashes.svg)](https://www.npmjs.com/package/@r1ck404/fast-noble-hashes) | @noble/hashes 1.8.0 | sha512 5x, md5 6.9x, sha1 2.4x, sha256 1.6x, pbkdf2 3.3-5.7x, scrypt 3.1x | noble's modules, with SHA-2/SHA-1/MD5, PBKDF2 and scrypt in Rust/wasm |
 
 ## Naming and versions
 
@@ -42,7 +43,8 @@ other dependencies) gets the fast version:
   "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@5.3.2",
   "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@0.28.2",
   "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.0",
-  "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.1"
+  "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.1",
+  "@noble/hashes": "npm:@r1ck404/fast-noble-hashes@1.8.0"
 }
 ```
 
@@ -50,6 +52,8 @@ other dependencies) gets the fast version:
 dependencies. A bundler alias, e.g. Vite `resolve.alias`, works as well.)
 Alias `acorn-jsx` together with `acorn`: in a minified bundle the genuine
 acorn-jsx is no longer recognisable, `@r1ck404/fast-acorn-jsx` is.
+`@r1ck404/fast-noble-hashes` must be installed as `@noble/hashes` (its
+`utils.js`, like noble's, imports `@noble/hashes/crypto` by name).
 
 Entry points mirror the originals' (ESM and CommonJS, browser fields, types).
 Differences are listed in each package's README; the notable ones: in Node,
@@ -138,6 +142,36 @@ polyfill calls.
 | `CompressStream`, quality 5 | 1 MB | 31.1 ms | 13.2 ms | **2.4x** |
 | `DecompressStream` | 1 MB | 2.31 ms | 1.59 ms | **1.5x** |
 
+### fast-noble-hashes vs @noble/hashes 1.8.0
+
+Nodepod's crypto polyfill uses the one-shot hashers for lockfile integrity
+and `pbkdf2Sync`, and `create()`/`update()`/`digest()` for `createHash`.
+The Chromium column is the same call in headless Chromium.
+
+| call | input | noble | fast-noble-hashes | speedup | speedup in Chromium |
+|---|---|---|---|---|---|
+| `sha512` | typescript 5.9.3 npm tarball (4.4 MB), lockfile integrity | 46.55 ms | 9.53 ms | **4.9x** | **5.8x** |
+| `sha512` | react-dom npm tarball (1.4 MB) | 11.54 ms | 2.28 ms | **5.1x** | **5.6x** |
+| `sha512` | 1 KB | 14.4 µs | 2.8 µs | **5.2x** | **5.0x** |
+| `sha384` | 1 MB | 10.54 ms | 2.24 ms | **4.7x** | |
+| `sha256` | 1 MB | 5.52 ms | 3.53 ms | **1.6x** | **2.3x** |
+| `sha256` | 1 KB | 6.7 µs | 3.7 µs | **1.8x** | **2.3x** |
+| `sha256` | 56-character string | 2.0 µs | 0.5 µs | **4.2x** | **4.2x** |
+| `sha1` | 1 MB | 4.12 ms | 1.72 ms | **2.4x** | **4.1x** |
+| `md5` | 1 MB | 9.98 ms | 1.45 ms | **6.9x** | **6.1x** |
+| `md5` | 56-character string | 2.2 µs | 0.3 µs | **7.2x** | **5.6x** |
+| `sha256.create().update(s).digest()` | 56-character string | 1.9 µs | 1.3 µs | **1.4x** | **2.3x** |
+| `md5.create().update(s).digest()` | 56-character string | 2.2 µs | 1.1 µs | **2.1x** | **2.6x** |
+| `sha256.create()`, 16 KB updates | 1 MB | 5.60 ms | 3.46 ms | **1.6x** | **2.2x** |
+| `sha256.create()`, 100 B updates | 64 KB | 496.1 µs | 424.3 µs | **1.2-1.6x** ¹ | |
+| `hmac(sha256, key, s)` | 56-character string | 5.2 µs | 3.7 µs | **1.4x** | **1.6x** |
+| `pbkdf2(sha256)`, c=10000 | | 15.48 ms | 4.68 ms | **3.3x** | **4.2x** |
+| `pbkdf2(sha512)`, c=10000 | | 39.28 ms | 6.92 ms | **5.7x** | **6.7x** |
+| `scrypt`, N=2^14, r=8, p=1 | | 55.30 ms | 17.89 ms | **3.1x** | **2.9x** |
+
+¹ Varies between runs (1.2x in this one, 1.6x-1.8x in others). The `create()`
+path cannot beat noble's constructor, which costs ~270 ns in Node.
+
 ### fast-esbuild-wasm vs esbuild-wasm 0.28.2
 
 In the browser (headless Chromium, the browser build in its default worker
@@ -216,6 +250,15 @@ Package suites (last full run, 0 failures / mismatches / false accepts):
   `decode-equiv.mjs` 285,127 (native-brotli streams with random parameters,
   generated streams covering every format feature, 189k fuzzed streams, errors
   included); `stream-equiv.mjs` 500; `api.mjs` 321.
+* **fast-noble-hashes**: `test/diff.mjs` 108,052 each for ESM and CommonJS,
+  107,838 with a second seed (digests and every instance field after every
+  call against noble and node:crypto, errors, HMAC, HKDF, PBKDF2 and scrypt
+  sync/async with progress callbacks, subclasses, tampered instances, UTF-8
+  edges around the wasm buffer, wasm memory left clean), 108,052 again with
+  WebAssembly disabled (the fallback is noble's code); `files.mjs` 236 (the
+  shipped files are noble's plus `tools/patches.mjs`); `browser.mjs` 597 each
+  in Chromium, Firefox and WebKit, main thread and module worker;
+  `tools/mutate.mjs`: all 29 deliberate bugs are caught.
 
 Independent checks (`verify/`, written separately from the package suites,
 calling every package the way Nodepod does), 0 failures: pako 37,896
@@ -224,7 +267,10 @@ corrupt/truncated streams, tarballs); acorn 54,816 (Nodepod's exact
 `topLevelParser` code, acorn-jsx and fast-acorn-jsx on a 3,243-file real-world
 JSX corpus, tokenizer, parseExpressionAt, onComment, edits); es-module-lexer
 40,041; brotli 7,906 (q11 and random qualities in random order, corrupt and
-truncated streams, stream classes); esbuild 8,114 through the public
+truncated streams, stream classes); noble-hashes 17,312 (lockfile SRI of npm
+tarballs, one-shot and streamed digests and HMACs of 3,000 real files fed as
+Buffers and strings, Nodepod's own pbkdf2 loop, scryptSync with Nodepod's
+defaults, against noble and node:crypto); esbuild 8,114 through the public
 `transform()` API vs esbuild-wasm; every browser build in headless Chromium
 3,669; Nodepod's `topLevelParser` minified the way it ships: recognised (2.2x)
 and identical on 1,501 files; `verify/pack-smoke.mjs`: the packed tarballs
@@ -241,11 +287,29 @@ bundle for the browser.
 
 ## Development
 
+The hand-written code is TypeScript: `X.mts` (`.ts`, `.cts`) next to the
+`X.mjs` (`.js`, `.cjs`) the package ships, which `tools/ts-build.mjs`
+generates by replacing the types with whitespace (ts-blank-space). The
+JavaScript is the source minus its types, same code, comments, lines and
+columns, so the TypeScript costs nothing at run time. Only erasable syntax is
+allowed (`erasableSyntaxOnly`): no enums, namespaces or parameter
+properties, and `declare` for class fields that are only assigned (a plain
+`x: T;` field would create a property). The generated files are committed
+and marked `linguist-generated`; `npm test` fails when one is stale.
+Rust, tests, tools and benchmarks stay as they are (`.rs`, `.mjs`: CI runs
+Node 20, which cannot run TypeScript). Type checking is loose for now
+(`strict: false`): the glue modules have full annotations, the big ports
+(fast-esbuild-wasm/src, fast-acorn/parser) type-check with `any` in places.
+
+    npm run build:ts        # .mts/.ts/.cts -> .mjs/.js/.cjs (also runs in npm test as --check)
+    npm run build:ts:watch  # the same on every save
+    npm run typecheck       # tsc over every package
+
     npm install             # links the workspaces; builds @r1ck404/fast-esbuild-wasm (lib/, esm/)
-    npm test                # quick tests of every package
+    npm test                # generated files current, types, quick tests of every package
     npm run test:full       # all package suites (long)
     npm run verify          # independent checks + pack/install smoke test (long)
-    npm run build:wasm      # rebuild the wasm of pako, es-module-lexer, brotli-wasm
+    npm run build:wasm      # rebuild the wasm of pako, es-module-lexer, brotli-wasm, noble-hashes
                             # (Rust with the wasm32-unknown-unknown target)
 
 The larger corpora are optional: Nodepod's pnpm store (a `Nodepod` checkout
@@ -262,6 +326,15 @@ Benchmarks:
     node bench/interleave.mjs es-module-lexer 3 orig fast
     node bench/interleave.mjs es-module-lexer-browser 3 orig fast  # BROWSER=firefox|webkit
     node bench/interleave.mjs brotli 3 orig fast
+    node bench/interleave.mjs noble-hashes 3 orig fast
+    node bench/interleave.mjs noble-hashes-browser 3 orig fast     # headless Chromium
+
+Where Nodepod itself spends CPU time on real projects (a Nodepod checkout next
+to this repo; results in `results/nodepod-profile-*.md`):
+
+    node bench/tools/nodepod-prof-build.mjs            # profiling build of Nodepod (modules tagged with file names)
+    node bench/nodepod-profile.mjs "run-vite8$" --runs 2   # examples from Nodepod's perf-bench/examples-spec.json
+    node bench/tools/nodepod-hotspots.mjs .scratch/nodepod-profiles/<run>   # inside Nodepod's runtime
 
 `interleave.mjs` alternates implementations in fresh processes and keeps the
 best run per case, which makes the comparison robust to CPU frequency changes
@@ -296,6 +369,13 @@ part of the repository; copy the packages there before you start).
   direct `Parser.prototype` patches (costs more than a small parse). `locations`
   costs are dominated by GC of the Position/SourceLocation objects the AST
   must contain.
+* noble-hashes: a precomputed W+K message schedule for SHA-256 (~30% slower
+  than keeping the schedule in locals); `Maj` reusing the previous round's
+  `a ^ b` (+5% SHA-256, nothing for SHA-512); `wasm-opt -O3` (no change,
+  kept for size). SHA-256 stays ~1.5x: scalar SHA-256 in wasm vs a JIT that
+  already does 32-bit rotates well. The `create()` path is floored by noble's
+  constructor (~270 ns in Node, mostly the ArrayBuffer behind its buffer);
+  pooling those buffers would be faster but let instances share memory.
 
 ## License
 
