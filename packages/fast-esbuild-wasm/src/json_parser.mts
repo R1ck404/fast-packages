@@ -1,0 +1,249 @@
+// Port of internal/js_parser/json_parser.go (ParseJSON). Used for the
+// "tsconfig.json" flavor of JSON (see tsconfig.mjs). Any error or warning
+// (syntax errors, duplicate keys, ...) throws BAIL from the log.
+import { LEXER_PANIC } from "./bail.mjs";
+import { LineColumnTracker, MsgID_JS_DuplicateObjectKey, Warning } from "./logger.mjs";
+import { isInsideNodeModules } from "./helpers.mjs";
+import {
+  newLexerJSON,
+  JSON as FlavorJSON,
+  TComma,
+  TFalse,
+  TTrue,
+  TNull,
+  TStringLiteral,
+  TNumericLiteral,
+  TMinus,
+  TOpenBracket,
+  TCloseBracket,
+  TOpenBrace,
+  TCloseBrace,
+  TColon,
+  TBigIntegerLiteral,
+  TEndOfFile,
+} from "./js_lexer.mjs";
+import {
+  Expr,
+  EBoolean,
+  ENullShared,
+  EString,
+  ENumber,
+  EArray,
+  EObject,
+  EBigInt,
+  Property,
+  PropertyField,
+  PropertyIsComputed,
+} from "./js_ast.mjs";
+
+class jsonParser {
+  declare log: any;
+  declare source: any;
+  declare tracker: any;
+  declare lexer: any;
+  declare options: any;
+  declare suppressWarningsAboutWeirdCode: any;
+  constructor(log, source, tracker, lexer, options, suppressWarningsAboutWeirdCode) {
+    this.log = log;
+    this.source = source;
+    this.tracker = tracker;
+    this.lexer = lexer;
+    this.options = options;
+    this.suppressWarningsAboutWeirdCode = suppressWarningsAboutWeirdCode;
+  }
+
+  parseMaybeTrailingComma(closeToken) {
+    const p = this;
+    const commaRange = p.lexer.range();
+    p.lexer.expect(TComma);
+
+    if (p.lexer.token === closeToken) {
+      if (p.options.flavor === FlavorJSON) {
+        p.log.addError(p.tracker, commaRange, "JSON does not support trailing commas");
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  parseExpr() {
+    const p = this;
+    const loc = p.lexer.loc();
+
+    switch (p.lexer.token) {
+      case TFalse:
+        p.lexer.next();
+        return new Expr(new EBoolean(false), loc);
+
+      case TTrue:
+        p.lexer.next();
+        return new Expr(new EBoolean(true), loc);
+
+      case TNull:
+        p.lexer.next();
+        return new Expr(ENullShared, loc);
+
+      case TStringLiteral: {
+        const value = p.lexer.stringLiteral();
+        p.lexer.next();
+        return new Expr(new EString(value), loc);
+      }
+
+      case TNumericLiteral: {
+        const value = p.lexer.number;
+        p.lexer.next();
+        return new Expr(new ENumber(value), loc);
+      }
+
+      case TMinus: {
+        p.lexer.next();
+        const value = p.lexer.number;
+        p.lexer.expect(TNumericLiteral);
+        return new Expr(new ENumber(-value), loc);
+      }
+
+      case TOpenBracket: {
+        p.lexer.next();
+        let isSingleLine = !p.lexer.hasNewlineBefore;
+        const items = [];
+
+        while (p.lexer.token !== TCloseBracket) {
+          if (items.length > 0) {
+            if (p.lexer.hasNewlineBefore) {
+              isSingleLine = false;
+            }
+            if (!p.parseMaybeTrailingComma(TCloseBracket)) {
+              break;
+            }
+            if (p.lexer.hasNewlineBefore) {
+              isSingleLine = false;
+            }
+          }
+
+          const item = p.parseExpr();
+          items.push(item);
+        }
+
+        if (p.lexer.hasNewlineBefore) {
+          isSingleLine = false;
+        }
+        const closeBracketLoc = p.lexer.loc();
+        p.lexer.expect(TCloseBracket);
+        return new Expr(new EArray(items, 0, closeBracketLoc, isSingleLine), loc);
+      }
+
+      case TOpenBrace: {
+        p.lexer.next();
+        let isSingleLine = !p.lexer.hasNewlineBefore;
+        const properties = [];
+        const duplicates = new Map(); // map[string]logger.Range
+
+        while (p.lexer.token !== TCloseBrace) {
+          if (properties.length > 0) {
+            if (p.lexer.hasNewlineBefore) {
+              isSingleLine = false;
+            }
+            if (!p.parseMaybeTrailingComma(TCloseBrace)) {
+              break;
+            }
+            if (p.lexer.hasNewlineBefore) {
+              isSingleLine = false;
+            }
+          }
+
+          const keyString = p.lexer.stringLiteral();
+          const keyRange = p.lexer.range();
+          const key = new Expr(new EString(keyString), keyRange.loc);
+          p.lexer.expect(TStringLiteral);
+
+          // Warn about duplicate keys
+          if (!p.suppressWarningsAboutWeirdCode) {
+            const keyText = keyString; // helpers.UTF16ToString
+            const prevRange = duplicates.get(keyText);
+            if (prevRange !== undefined) {
+              p.log.addIDWithNotes(MsgID_JS_DuplicateObjectKey, Warning, p.tracker, keyRange);
+            } else {
+              duplicates.set(keyText, keyRange);
+            }
+          }
+
+          p.lexer.expect(TColon);
+          const value = p.parseExpr();
+
+          const property = new Property(null, key, value, null, [], keyRange.loc, 0, PropertyField, 0);
+
+          // The key "__proto__" must not be a string literal in JavaScript because
+          // that actually modifies the prototype of the object. This can be
+          // avoided by using a computed property key instead of a string literal.
+          // (UnsupportedJSFeatures is always empty here, so "ObjectExtensions"
+          // is supported)
+          if (keyString === "__proto__") {
+            property.flags |= PropertyIsComputed;
+          }
+
+          properties.push(property);
+        }
+
+        if (p.lexer.hasNewlineBefore) {
+          isSingleLine = false;
+        }
+        const closeBraceLoc = p.lexer.loc();
+        p.lexer.expect(TCloseBrace);
+        return new Expr(new EObject(properties, 0, closeBraceLoc, isSingleLine), loc);
+      }
+
+      case TBigIntegerLiteral: {
+        if (!p.options.isForDefine) {
+          p.lexer.unexpected();
+        }
+        const value = p.lexer.identifier;
+        p.lexer.next();
+        return new Expr(new EBigInt(value), loc);
+      }
+
+      default:
+        p.lexer.unexpected();
+        return null;
+    }
+  }
+}
+
+export class JSONOptions {
+  declare unsupportedJSFeatures: number;
+  declare flavor: number;
+  declare errorSuffix: string;
+  declare isForDefine: boolean;
+  constructor(unsupportedJSFeatures = 0, flavor = FlavorJSON, errorSuffix = "", isForDefine = false) {
+    this.unsupportedJSFeatures = unsupportedJSFeatures; // (must be 0: compat is not ported)
+    this.flavor = flavor;
+    this.errorSuffix = errorSuffix;
+    this.isForDefine = isForDefine;
+  }
+}
+
+// Returns [result (Expr or null), ok]
+export function parseJSON(log, source, options): [Expr, boolean] {
+  let errorSuffix = options.errorSuffix;
+  if (errorSuffix === "") {
+    errorSuffix = " in JSON";
+  }
+
+  try {
+    const p = new jsonParser(
+      log,
+      source,
+      new LineColumnTracker(source),
+      newLexerJSON(log, source, options.flavor, errorSuffix),
+      options,
+      isInsideNodeModules(source.keyPath.text),
+    );
+
+    const result = p.parseExpr();
+    p.lexer.expect(TEndOfFile);
+    return [result, true];
+  } catch (e) {
+    if (e === LEXER_PANIC) return [null, false];
+    throw e;
+  }
+}

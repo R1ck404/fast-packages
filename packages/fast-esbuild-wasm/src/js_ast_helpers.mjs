@@ -455,6 +455,7 @@ function checkNoUnsupportedFeatures(unsupportedFeatures) {
 }
 
 export class HelperContext {
+  ;                      
   constructor(isUnbound = null) {
     this.isUnbound = isUnbound; // func(ast.Ref) bool
   }
@@ -895,7 +896,7 @@ export function canChangeStrictToLoose(a, b) {
 // Returns true if the result of the "typeof" operator on this expression is
 // statically determined and this expression has no side effects (i.e. can be
 // removed without consequence).
-export function typeofWithoutSideEffects(data) {
+export function typeofWithoutSideEffects(data)                    {
   if (data === null) return ["", false];
   switch (data.k) {
     case E_ANNOTATION:
@@ -4080,3 +4081,4 @@ export function forEachIdentifierBinding(binding, callback) {
       bail(); // panic("Internal error")
   }
 }
+// generated from js_ast_helpers.mts by tools/ts-build.mjs; edit that file

@@ -32,7 +32,7 @@ Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#r
   lazy evaluation, block decisions and bit output, so the bytes are the same),
   with a libdeflate-style fast inflate loop, a table-free folding crc32, SIMD
   adler32 and precomputed codes for level-1 block emission.
-* `index.mjs`: pako's JS layer (options, chunking, `onData`/`onEnd`, string
+* `index.mts` (shipped as `index.mjs`): pako's JS layer (options, chunking, `onData`/`onEnd`, string
   output, errors) emulated around the wasm; streaming sessions are pooled.
 * Exotic inputs (non-byte arrays, unusual option values) go to the vendored
   pako (`vendor/pako.esm.mjs`), so behaviour stays identical.

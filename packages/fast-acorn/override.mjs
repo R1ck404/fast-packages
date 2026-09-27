@@ -304,8 +304,11 @@ function recognise(C) {
   return { fn };
 }
 
+/** a subclass's parseFunctionBody, run by the fast parser on its facade */
+;                                                                                                                           
+
 // the method to run on the facade, or null
-export function bodyOverrideOf(C) {
+export function bodyOverrideOf(C          )                      {
   let rec = analysed.get(C);
   if (rec === undefined) {
     try {
@@ -321,3 +324,4 @@ export function bodyOverrideOf(C) {
   if (proto.parseFunctionBody !== rec.fn || Object.getOwnPropertyNames(proto).length !== 2 || Object.getOwnPropertyNames(C).length !== 3) return null;
   return rec.fn;
 }
+// generated from override.mts by tools/ts-build.mjs; edit that file

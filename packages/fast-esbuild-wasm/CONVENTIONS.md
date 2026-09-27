@@ -15,6 +15,13 @@ simplify esbuild's logic, do not reorder conditions, do not merge functions.
 Keep Go comments that explain *why* (they help reviewers compare), drop
 the rest. Keep the same function order as the Go file where practical.
 
+The modules are now TypeScript: each `src/X.mjs` named in this document is
+generated from `src/X.mts` by the repository's `tools/ts-build.mjs`
+(types replaced by whitespace; imports keep the `.mjs` names). Edit the
+`.mts`, then run `npm run build:ts` at the root. Type annotations only:
+`declare` for class fields (a plain `x: T;` field would add a property),
+no enums/namespaces/parameter properties, `import type` for types.
+
 All ported modules live in `src/`. Shared foundations that
 already exist (read them before starting):
 

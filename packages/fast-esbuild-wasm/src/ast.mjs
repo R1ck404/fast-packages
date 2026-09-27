@@ -1,5 +1,6 @@
 // Port of internal/ast/ast.go. See CONVENTIONS.md for representations.
 import { Path, RANGE_ZERO } from "./logger.mjs";
+                                          
 import { utf16EqualsString } from "./helpers.mjs";
 
 // ImportKind
@@ -63,6 +64,16 @@ export const WasLoadedWithEmptyLoader = 1 << 13;
 export const ContainsUniqueKey = 1 << 14;
 
 export class ImportRecord {
+                            
+                           
+                     
+                       
+                                  
+                              
+                                  
+                        
+                        
+                       
   constructor(
     assertOrWith = null,
     globPattern = null,
@@ -110,6 +121,13 @@ export function assertOrWithKeywordString(kw) {
 }
 
 export class ImportAssertOrWith {
+  ;                      
+  ;                          
+  ;                                 
+  ;                                  
+  ;                                 
+  ;                                  
+  ;                       
   constructor(
     entries = [],
     keywordLoc = 0,
@@ -130,6 +148,11 @@ export class ImportAssertOrWith {
 }
 
 export class AssertOrWithEntry {
+  ;                   
+  ;                     
+  ;                      
+  ;                        
+  ;                                
   constructor(key = "", value = "", keyLoc = 0, valueLoc = 0, preferQuotedKey = false) {
     this.key = key; // []uint16
     this.value = value; // []uint16
@@ -213,6 +236,8 @@ export function refInner(ref) {
 }
 
 export class LocRef {
+  ;                   
+  ;                   
   constructor(loc = 0, ref = InvalidRef) {
     this.loc = loc;
     this.ref = ref;
@@ -245,6 +270,15 @@ export const SlotMangledProp = 3;
 export const SlotMustNotBeRenamed = 4;
 
 export class Symbol {
+                              
+                               
+                       
+                                   
+                             
+                                  
+                        
+                       
+                                   
   constructor(
     namespaceAlias = null,
     originalName = "",
@@ -307,6 +341,8 @@ export function slotCountsUnionMax(a, b) {
 }
 
 export class NamespaceAlias {
+  ;                     
+  ;                            
   constructor(alias = "", namespaceRef = InvalidRef) {
     this.alias = alias;
     this.namespaceRef = namespaceRef;
@@ -314,6 +350,8 @@ export class NamespaceAlias {
 }
 
 export class SymbolMap {
+  ;                               
+  ;                          
   constructor(sourceCount = 0) {
     this.symbolsForSource = new Array(sourceCount).fill(null);
     // JS-only: source index -> true once a shared (frozen) symbol of that
@@ -365,3 +403,4 @@ export function mergeSymbols(symbols, old, new_) {
 }
 
 // CharFreq / NameMinifier are minify-only and intentionally not ported.
+// generated from ast.mts by tools/ts-build.mjs; edit that file

@@ -2,7 +2,7 @@
   "name": "fast-packages",
   "private": true,
   "type": "module",
-  "description": "Faster drop-in replacements for the packages Nodepod uses, published as @r1ck404/fast-<original name>: pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm. Workspace with shared tests, benchmarks and verification.",
+  "description": "Faster drop-in replacements for the packages Nodepod uses, published as @r1ck404/fast-<original name>: pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm, @noble/hashes. Workspace with shared tests, benchmarks and verification.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -13,9 +13,12 @@
   ],
   "scripts": {
     "prepare": "node packages/fast-esbuild-wasm/build.mjs",
+    "build:ts": "node tools/ts-build.mjs",
+    "build:ts:watch": "node tools/ts-build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json",
     "build": "npm run build -w @r1ck404/fast-esbuild-wasm -w @r1ck404/fast-acorn-jsx",
-    "build:wasm": "npm run build -w @r1ck404/fast-pako -w @r1ck404/fast-es-module-lexer -w @r1ck404/fast-brotli-wasm",
-    "test": "npm test --workspaces --if-present",
+    "build:wasm": "npm run build -w @r1ck404/fast-pako -w @r1ck404/fast-es-module-lexer -w @r1ck404/fast-brotli-wasm -w @r1ck404/fast-noble-hashes",
+    "test": "node tools/ts-build.mjs --check && tsc -p tsconfig.json && npm test --workspaces --if-present",
     "test:full": "sh verify/suites.sh",
     "verify": "sh verify/all.sh"
   },
@@ -27,7 +30,9 @@
     "esbuild": "0.28.2",
     "esbuild-wasm": "0.28.2",
     "pako": "2.1.0",
+    "@noble/hashes": "1.8.0",
     "@babel/parser": "^7.29.8",
+    "@types/node": "24.19.0",
     "binaryen": "^132.0.0",
     "fflate": "^0.8.3",
     "lodash-es": "^4.18.1",
@@ -38,6 +43,7 @@
     "react-dom": "^19.2.7",
     "rollup": "^4.62.2",
     "three": "^0.186.1",
+    "ts-blank-space": "0.9.0",
     "typescript": "^5.9.3",
     "vue": "^3.5.43",
     "zod": "^4.4.3"

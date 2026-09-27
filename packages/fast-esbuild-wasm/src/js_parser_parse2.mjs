@@ -4697,3 +4697,4 @@ export const parse2Methods = {
     return ref;
   },
 };
+// generated from js_parser_parse2.mts by tools/ts-build.mjs; edit that file

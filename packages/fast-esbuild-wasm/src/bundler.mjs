@@ -173,6 +173,9 @@ function makePrettyPaths(path) {
 // Scan phase
 
 class scannerFile {
+  ;                                 
+  ;                       
+  ;                      
   constructor(inputFile) {
     this.jsonMetadataChunk = "";
     this.pluginData = null;
@@ -181,6 +184,10 @@ class scannerFile {
 }
 
 class tlaCheck {
+  ;                      
+  ;                     
+  ;                    
+  ;                                 
   constructor() {
     this.parent = -1; // Index32
     this.depth = -1; // Index32
@@ -190,6 +197,9 @@ class tlaCheck {
 }
 
 class parseResult {
+  ;                 
+  ;                          
+  ;                   
   constructor(file = null, ok = false) {
     this.file = file; // scannerFile
     this.tlaCheck = new tlaCheck();
@@ -432,6 +442,7 @@ function sourceMapCommentIsIgnoredInTransform(text) {
 // graph.cloneLinkerGraph clones (eagerly or copy-on-write) whatever the
 // linker mutates for files with InputFile.astIsShared set.
 class runtimeCache {
+  ;                   
   constructor() {
     this.astMap = null; // Map<string, {source, ast}>
   }
@@ -522,6 +533,10 @@ function applyOptionDefaults(options) {
 }
 
 class Bundle {
+  ;                            
+  ;                  
+  ;                        
+  ;                    
   constructor(uniqueKeyPrefix, files, entryPoints, options) {
     // The unique key prefix is a random string that is unique to every bundling
     // operation. It is used as a prefix for the unique keys assigned to every
@@ -616,6 +631,8 @@ class Bundle {
 // and must be ready by the time printing happens. This is beneficial because
 // it is somewhat expensive to produce.
 class DataForSourceMap {
+  ;                             
+  ;                           
   constructor() {
     // This data is for the printer. It maps from offsets in the file (which
     // are stored at every AST node) to line and UTF-16 column offsets
@@ -674,6 +691,10 @@ function findReachableFiles(files, entryPoints) {
 }
 
 class scanner {
+  ;                
+  ;                            
+  ;                      
+  ;                    
   constructor(log, options, uniqueKeyPrefix) {
     this.log = log;
     this.uniqueKeyPrefix = uniqueKeyPrefix;
@@ -956,3 +977,4 @@ export function transformBundle(configOptions, log) {
     throw e;
   }
 }
+// generated from bundler.mts by tools/ts-build.mjs; edit that file

@@ -4,17 +4,22 @@
 // WebAssembly.Module) and resolves to the wasm exports; the named exports
 // work once it has resolved. (Node: see index.node.mjs / index.node.cjs.)
 import { bind, BrotliStreamResultCode as Codes } from "./core.mjs";
+                                                    
 
-export let compress;
-export let decompress;
-export let BrotliStreamResult;
-export let CompressStream;
-export let DecompressStream;
+                                   
+/** what init() accepts, as in wasm-bindgen's web target */
+                                                                                         
+
+export let compress                 ;
+export let decompress                   ;
+export let BrotliStreamResult                           ;
+export let CompressStream                       ;
+export let DecompressStream                         ;
 export const BrotliStreamResultCode = Codes;
 
-let wasm;
+let wasm                   ;
 
-async function load(input) {
+async function load(input                                              )                                {
   if (typeof Response === "function" && input instanceof Response) {
     if (typeof WebAssembly.instantiateStreaming === "function") {
       try {
@@ -24,18 +29,19 @@ async function load(input) {
     return (await WebAssembly.instantiate(await input.arrayBuffer(), {})).instance;
   }
   if (input instanceof WebAssembly.Module) return await WebAssembly.instantiate(input, {});
-  return (await WebAssembly.instantiate(input, {})).instance;
+  return (await WebAssembly.instantiate(input                , {})).instance;
 }
 
-export default async function init(input) {
+export default async function init(input                                 )                             {
   if (typeof input === "undefined") input = new URL("./fastbrotli.wasm", import.meta.url);
   if (typeof input === "string" || (typeof Request === "function" && input instanceof Request) || (typeof URL === "function" && input instanceof URL)) {
     input = fetch(input);
   }
-  const instance = await load(await input);
-  wasm = instance.exports;
+  const instance = await load((await input)                                                );
+  wasm = instance.exports                                ;
   const api = bind(wasm);
   ({ compress, decompress, BrotliStreamResult, CompressStream, DecompressStream } = api);
-  init.__wbindgen_wasm_module = undefined;
+  (init       ).__wbindgen_wasm_module = undefined;
   return wasm;
 }
+// generated from pkg.web.mts by tools/ts-build.mjs; edit that file

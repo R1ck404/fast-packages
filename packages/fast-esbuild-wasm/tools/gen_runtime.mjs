@@ -1,5 +1,5 @@
 // usage: node tools/gen_runtime.mjs [path/to/esbuild-src]
-// Generates src/runtime.mjs from internal/runtime/runtime.go by extracting the
+// Generates src/runtime.mts from internal/runtime/runtime.go by extracting the
 // Go raw string literals of Source() verbatim (Go drops '\r' from raw strings).
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const esbuildSrc = process.argv[2] || join(tmpdir(), "esbuild-src");
 const goFile = join(esbuildSrc, "internal", "runtime", "runtime.go");
-const outFile = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "runtime.mjs");
+const outFile = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "runtime.mts"); // (then run tools/ts-build.mjs at the repository root)
 
 const go = readFileSync(goFile, "utf8");
 const start = go.indexOf("func Source(unsupportedJSFeatures compat.JSFeature) logger.Source {");

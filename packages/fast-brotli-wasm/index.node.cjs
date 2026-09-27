@@ -8,3 +8,4 @@ const wasm = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(join(_
 const api = bind(wasm);
 for (const k of Object.keys(api)) module.exports[k] = api[k];
 module.exports.default = Promise.resolve(module.exports);
+// generated from index.node.cts by tools/ts-build.mjs; edit that file

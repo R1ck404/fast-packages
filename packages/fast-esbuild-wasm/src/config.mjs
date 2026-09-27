@@ -5,6 +5,9 @@ import { stringArraysEqual } from "./helpers.mjs";
 import { KNOWN_GLOBALS } from "./config_globals.mjs";
 
 export class DefineExpr {
+                        
+                     
+                                      
   constructor(constant = null, parts = null, injectedDefineIndex = -1) {
     this.constant = constant; // js_ast.E or null
     this.parts = parts; // []string or null
@@ -13,6 +16,14 @@ export class DefineExpr {
 }
 
 export class JSXOptions {
+  ;                           
+  ;                            
+  ;                      
+  ;                         
+  ;                                 
+  ;                            
+  ;                            
+  ;                            
   constructor(
     factory = new DefineExpr(),
     fragment = new DefineExpr(),
@@ -75,6 +86,12 @@ export const TSTargetBelowES2022 = 1;
 export const TSTargetAtOrAboveES2022 = 2;
 
 export class TSConfig {
+                                         
+                                         
+                                       
+                         
+                                          
+                                       
   constructor(
     experimentalDecorators = Unspecified,
     importsNotUsedAsValues = TSImportsNotUsedAsValues_None,
@@ -105,6 +122,9 @@ export class TSConfig {
 }
 
 export class TSOptions {
+  ;                        
+  ;                      
+  ;                                    
   constructor(config = new TSConfig(), parse = false, noAmbiguousLessThan = false) {
     this.config = config;
     this.parse = parse;
@@ -113,6 +133,10 @@ export class TSOptions {
 }
 
 export class TSAlwaysStrict {
+  ;                    
+  ;                   
+  ;                  
+  ;                      
   constructor(name = "", source = null, range = null, value = false) {
     this.name = name;
     this.source = source;
@@ -216,6 +240,10 @@ export function formatString(f) {
 }
 
 export class StdinInfo {
+  ;                        
+  ;                          
+  ;                             
+  ;                      
   constructor(contents = "", sourceFile = "", absResolveDir = "", loader = LoaderNone) {
     this.contents = contents;
     this.sourceFile = sourceFile;
@@ -239,6 +267,47 @@ export function shouldCallRuntimeRequire(mode, outputFormat) {
 
 // The subset of config.Options that the transform pipeline reads.
 export class Options {
+  ;                           
+  ;                    
+  ;                           
+  ;                        
+  ;                         
+  ;                                 
+  ;                         
+  ;                             
+  ;                         
+  ;                           
+  ;                              
+  ;                            
+  ;                        
+  ;                        
+  ;                          
+  ;                  
+  ;                       
+  ;                         
+  ;                                     
+  ;                                             
+  ;                                                 
+  ;                     
+  ;                    
+  ;                                 
+  ;                                  
+  ;                             
+  ;                              
+  ;                              
+  ;                             
+  ;                          
+  ;                          
+  ;                                     
+  ;                            
+  ;                             
+  ;                             
+  ;                        
+  ;                            
+  ;                         
+  ;                                      
+  ;                                    
+  ;                                       
   constructor() {
     this.moduleTypeData = null; // js_ast.ModuleTypeData
     this.defines = null; // ProcessedDefines
@@ -285,6 +354,9 @@ export class Options {
 }
 
 export class InjectedDefine {
+  ;                 
+  ;                    
+  ;                   
   constructor(data = null, name = "", source = null) {
     this.data = data;
     this.name = name;
@@ -293,6 +365,10 @@ export class InjectedDefine {
 }
 
 export class InjectedFile {
+  ;                      
+  ;                          
+  ;                   
+  ;                             
   constructor(exports_ = [], defineName = "", source = null, isCopyLoader = false) {
     this.exports = exports_;
     this.defineName = defineName;
@@ -305,6 +381,9 @@ export class InjectedFile {
 // globals.go
 
 export class DefineData {
+  ;                     
+  ;                       
+  ;                     
   constructor(keyParts = null, defineExpr = null, flags = 0) {
     this.keyParts = keyParts; // []string
     this.defineExpr = defineExpr; // *DefineExpr
@@ -323,6 +402,8 @@ function mergeDefineData(old, new_) {
 }
 
 export class ProcessedDefines {
+  ;                                        
+  ;                                 
   constructor(identifierDefines = new Map(), dotDefines = new Map()) {
     this.identifierDefines = identifierDefines; // Map<string, DefineData>
     this.dotDefines = dotDefines; // Map<string, DefineData[]>
@@ -390,3 +471,4 @@ export function processDefines(userDefines) {
   if (!hasUserDefines && processedGlobals === null) processedGlobals = result;
   return result;
 }
+// generated from config.mts by tools/ts-build.mjs; edit that file

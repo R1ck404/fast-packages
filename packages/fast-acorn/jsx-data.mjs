@@ -286,3 +286,4 @@ export const XHTMLEntities = {
   hearts: '\u2665',
   diams: '\u2666'
 };
+// generated from jsx-data.mts by tools/ts-build.mjs; edit that file

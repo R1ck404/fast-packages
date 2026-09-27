@@ -261,6 +261,8 @@ export function caseBodyCouldHaveFallThrough(stmts) {
 export const bloomFilterSize = 251;
 
 export class duplicateCaseChecker {
+                       
+                           
   constructor() {
     this.cases = []; // []duplicateCaseValue
     this.bloomFilter = new Uint8Array((bloomFilterSize + 7) >> 3);
@@ -498,6 +500,8 @@ export function jumpStmtsLookTheSame(left, right) {
 // ".length" and "x[n:]" via ".slice(n)". The underlying arrays (including the
 // ones stored in "p.scopesInOrderForEnum") are never mutated.
 export class scopeOrderSlice {
+  ;                  
+  ;                  
   constructor(array, start) {
     this.array = array; // []scopeOrder
     this.start = start;
@@ -2570,3 +2574,4 @@ export const visitStmtMethods = {
     return new Stmt(new SExpr(p.callRuntime(loc, "__name", [expr, new Expr(new EString(name), loc)]), true), loc);
   },
 };
+// generated from js_parser_visit_stmt.mts by tools/ts-build.mjs; edit that file

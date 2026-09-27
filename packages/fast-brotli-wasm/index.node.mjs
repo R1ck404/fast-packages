@@ -2,4 +2,5 @@
 // export is a promise for the initialized module (brotli-wasm's own "import"
 // entry is its web build, which cannot fetch its wasm in Node).
 import api from "./index.node.cjs";
-export default api.default;
+export default (api       ).default;
+// generated from index.node.mts by tools/ts-build.mjs; edit that file

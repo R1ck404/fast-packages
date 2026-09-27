@@ -196,8 +196,14 @@ function intact(C, rec) {
   return tt.jsxTagStart.updateContext === rec.hooks[0] && tt.jsxTagEnd.updateContext === rec.hooks[1] && tt.jsxName.updateContext === null && tt.jsxText.updateContext === null;
 }
 
+/** acorn-jsx options as the fast parser's JSX mode takes them */
+;                            
+                           
+                                  
+ 
+
 // options for the fast parser's JSX mode, or null
-export function jsxOptionsOf(C) {
+export function jsxOptionsOf(C          )                    {
   let rec = registry.get(C);
   if (rec === undefined) {
     rec = recognised.get(C);
@@ -216,7 +222,7 @@ export function jsxOptionsOf(C) {
 
 // called (through index.mjs's hook) for every class @r1ck404/fast-acorn-jsx creates
 // on this package's Parser
-export function registerJsxClass(C, options) {
+export function registerJsxClass(C     , options                     )       {
   const methods = methodsOf(C.prototype);
   const gd = Object.getOwnPropertyDescriptor(C, "acornJsx");
   if (methods === null || !gd) return;
@@ -230,3 +236,4 @@ export function registerJsxClass(C, options) {
     hooks,
   });
 }
+// generated from jsx-detect.mts by tools/ts-build.mjs; edit that file

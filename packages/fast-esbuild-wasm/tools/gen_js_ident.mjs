@@ -1,5 +1,5 @@
 // usage: node tools/gen_js_ident.mjs [path/to/esbuild-src]
-// Regenerates src/js_ident.mjs from internal/js_ast/unicode.go (the Unicode
+// Regenerates src/js_ident.mts from internal/js_ast/unicode.go (the Unicode
 // identifier tables) plus the hand-ported code of internal/js_ast/js_ident.go
 // kept in this script. The tables are stored as base-36 deltas:
 // lo0, hi0-lo0, lo1-hi0, hi1-lo1, ... (all Go ranges have Stride 1, which the
@@ -75,7 +75,10 @@ ${tableText}
 // A decoded table: a bitmap for the BMP plus sorted astral ranges. Tables are
 // decoded lazily on the first non-ASCII query.
 class IdentTable {
-  constructor(enc) {
+  declare enc: string;
+  declare bmp: Uint32Array | null;
+  declare astral: Int32Array | null;
+  constructor(enc: string) {
     this.enc = enc;
     this.bmp = null; // Uint32Array bitmap of 0x10000 bits
     this.astral = null; // Int32Array [lo0, hi0, lo1, hi1, ...] for ranges above 0xFFFF
@@ -298,7 +301,7 @@ export function isWhitespace(codePoint) {
 }
 `;
 
-const target = resolve(here, "../src/js_ident.mjs");
+const target = resolve(here, "../src/js_ident.mts"); // (then run tools/ts-build.mjs at the repository root)
 writeFileSync(target, out);
 console.log("wrote " + target);
 for (const name of expected) console.log(`  ${name}: ${tables[name].count} ranges, ${tables[name].enc.length} chars`);

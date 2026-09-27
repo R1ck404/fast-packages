@@ -17,22 +17,39 @@
 
 import * as V from "./vendor/lexer.js";
 import wasmBase64, { copy8 as copyBase64 } from "./lexer.wasm.mjs";
+                                                                         
+
+/** exports of rust/src/lib.rs */
+                        
+                             
+                                                                                                                                  
+                
+                                          
+                         
+                              
+                               
+                                             
+ 
+/** copy8(string, from, to, base, mask, useCharCodeAt): the JS-string builtins copy loop */
+                                                                                                    
+                                                                                                                                                          
 
 export const ImportType = V.ImportType;
 
-const b64 = (str) =>
+const b64 = (str        )                          =>
   typeof Buffer !== "undefined" ? Buffer.from(str, "base64") : Uint8Array.from(atob(str), (x) => x.charCodeAt(0));
 const wasmBytes = () => b64(wasmBase64);
 
-let W = null;
-let memBuf = null;
-let U8, I32;
+let W                      = null;
+let memBuf                     = null;
+let U8            , I32            ;
 let H = 0; // header index into I32
 let srcPtr = 0; // source buffer in wasm memory
 let cap = -1; // capacity of the source buffer in bytes
-let srcView = null; // Uint8Array over the source buffer
-let NB = null; // Node: Buffer over wasm memory
-let C8 = null; // V8: copy8(string, from, to, base, 255, cca) (wasm JS-string builtins)
+let srcView                    = null; // Uint8Array over the source buffer
+// (latin1Write / ucs2Write: undocumented, in every Node version)
+let NB                                                                                                                                                     = null; // Node: Buffer over wasm memory
+let C8               = null; // V8: copy8(string, from, to, base, 255, cca) (wasm JS-string builtins)
 // how sources get into wasm memory: 0 Node Buffer, 1 V8 builtins, 2 encodeInto
 let mode = 2;
 
@@ -56,27 +73,27 @@ const NodeBuffer =
 // only fetched once a few hundred KB went through. Until then a regexp that
 // cannot match a one-byte string (V8 answers that in O(1) as well; on a
 // two-byte string it stops at the first char above 0xff).
-let isOneByte = null;
+let isOneByte                                  = null;
 let nodeChars = 0;
-let v8IsOneByte = null;
-function loadIsOneByte() {
+let v8IsOneByte                                  = null;
+function loadIsOneByte()       {
   if (v8IsOneByte === null) {
     v8IsOneByte = NON_LATIN1_TEST;
     try {
-      const v8 = typeof process.getBuiltinModule === "function" ? process.getBuiltinModule("node:v8") : null;
+      const v8      = typeof process.getBuiltinModule === "function" ? process.getBuiltinModule("node:v8") : null;
       if (v8 && typeof v8.isStringOneByteRepresentation === "function") v8IsOneByte = v8.isStringOneByteRepresentation;
     } catch {}
   }
   isOneByte = v8IsOneByte;
 }
 const NON_LATIN1 = /[^\x00-\xff]/;
-const NON_LATIN1_TEST = (s) => !NON_LATIN1.test(s);
+const NON_LATIN1_TEST = (s        )          => !NON_LATIN1.test(s);
 
 // V8 (Chromium, Deno): a wasm loop over the JS-string builtins copies a
 // string 1.5-4x faster than TextEncoder.encodeInto (a scalar UTF-8 encoder in
 // Blink). Firefox and Safari have a fast encodeInto and slow charCodeAt
 // builtins, so they keep encodeInto.
-function isV8() {
+function isV8()          {
   try {
     JSON.parse("null").x;
   } catch (e) {
@@ -84,12 +101,13 @@ function isV8() {
   }
   return false;
 }
-function copyModule() {
+function copyModule()               {
   try {
-    const m = new WebAssembly.Module(b64(copyBase64), { builtins: ["js-string"] });
+    // (js-string builtins: the options argument is newer than lib.dom's types)
+    const m = new (WebAssembly.Module       )(b64(copyBase64), { builtins: ["js-string"] })                      ;
     // without builtin support the import would have to come from JS (slow)
     if (WebAssembly.Module.imports(m).some((i) => i.module !== "env")) return null;
-    return new WebAssembly.Instance(m, { env: { memory: W.memory } }).exports.copy8;
+    return new WebAssembly.Instance(m, { env: { memory: W.memory } }).exports.copy8         ;
   } catch {
     return null;
   }
@@ -102,26 +120,26 @@ let c8cca = 0;
 let c8chars = 0;
 let c8fixed = false; // (tests)
 
-function setup(instance) {
+function setup(instance                      )       {
   if (W) return;
-  W = instance.exports;
+  W = instance.exports                           ;
   H = W.hdr() >> 2;
   if (NodeBuffer !== null) mode = 0;
   else if (isV8() && (C8 = copyModule()) !== null) mode = 1;
   refresh();
 }
 
-function refresh() {
+function refresh()       {
   __stats.mode = ["node", "v8", "encode"][mode];
   memBuf = W.memory.buffer;
   U8 = new Uint8Array(memBuf);
   I32 = new Int32Array(memBuf);
-  if (mode === 0) NB = NodeBuffer.from(memBuf);
+  if (mode === 0) NB = NodeBuffer.from(memBuf)             ;
   if (cap >= 0) srcView = new Uint8Array(memBuf, srcPtr, cap);
 }
 
 /** test hook (not exported by index.mjs): force how sources are copied ("node" | "node-re" | "v8" | "v8-into" | "encode") */
-export function __mode(m) {
+export function __mode(m                                                  )       {
   initSync();
   if (m === "node" && NodeBuffer !== null) (mode = 0), loadIsOneByte();
   else if (m === "node-re" && NodeBuffer !== null) (mode = 0), (isOneByte = NON_LATIN1_TEST);
@@ -132,7 +150,7 @@ export function __mode(m) {
 }
 
 /** make room for n bytes of source */
-function grow(n) {
+function grow(n        )       {
   srcPtr = W.buf(n);
   if (I32.length === 0) refresh();
   cap = I32[H + 6];
@@ -142,13 +160,13 @@ function grow(n) {
 /**
  * Wait for init to resolve before calling `parse`.
  */
-export const init = WebAssembly.compile(wasmBytes())
-  .then(WebAssembly.instantiate)
+export const init                = WebAssembly.compile(wasmBytes())
+  .then(WebAssembly.instantiate                                                            )
   .then((instance) => {
     setup(instance);
   });
 
-export const initSync = () => {
+export const initSync = ()       => {
   if (W) return;
   setup(new WebAssembly.Instance(new WebAssembly.Module(wasmBytes())));
 };
@@ -158,14 +176,14 @@ const encoder = new TextEncoder();
 /** counters for tests (not exported by index.mjs) */
 export const __stats = { fallback: 0, mode: "" };
 
-function original(source, name) {
+function original(source     , name        )              {
   __stats.fallback++;
   V.initSync();
   return V.parse(source, name);
 }
 
 // es-module-lexer decodes quoted names with `(0, eval)(literal)`
-function decode(str) {
+function decode(str        )                     {
   try {
     return (0, eval)(str);
   } catch (e) {}
@@ -174,7 +192,7 @@ function decode(str) {
 // `decode(str)` without eval when str is a quoted literal with no escapes
 // (export names; the lexer tells for import specifiers): then eval returns
 // exactly its body
-function literal(str) {
+function literal(str        )                     {
   const len = str.length;
   if (len >= 2) {
     const q = str.charCodeAt(0);
@@ -200,6 +218,7 @@ function literal(str) {
  * @param name Optional sourcename
  * @returns Tuple contaning imports list and exports list.
  */
+                                                                  
 export function parse(source, name = "@") {
   if (!W) return init.then(() => parse(source));
   if (typeof source !== "string") return original(source, name);
@@ -259,12 +278,12 @@ export function parse(source, name = "@") {
   const ni = I[H + 4];
   const ne = I[H + 5];
   let o = I[H + 6] >> 2;
-  const imports = [];
-  const exports = [];
+  const imports                    = [];
+  const exports                    = [];
   for (let k = 0; k < ni; k++, o += 8) {
     const s = I[o], e = I[o + 1], ss = I[o + 2], se = I[o + 3], d = I[o + 4], a = I[o + 5], t = I[o + 6], f = I[o + 7];
     // (static: s..e is the body of the literal; dynamic: the literal)
-    let n;
+    let n                    ;
     if (f === 1) n = d === -1 ? source.slice(s, e) : source.slice(s + 1, e - 1);
     else if (f !== 0) n = decode(d === -1 ? source.slice(s - 1, e + 1) : source.slice(s, e));
     imports.push({ n, t, s, e, ss, se, d, a });
@@ -274,7 +293,7 @@ export function parse(source, name = "@") {
     let n = source.slice(s, e);
     let c = source.charCodeAt(s);
     if ((c === 34 || c === 39) && s < e) n = literal(n);
-    let ln;
+    let ln                    ;
     if (ls >= 0) {
       ln = source.slice(ls, le);
       c = source.charCodeAt(ls);
@@ -284,3 +303,4 @@ export function parse(source, name = "@") {
   }
   return [imports, exports, !!I[H + 2], !!I[H + 3]];
 }
+// generated from lexer.mts by tools/ts-build.mjs; edit that file

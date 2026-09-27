@@ -36,7 +36,7 @@ Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#r
 * A new one-shot decoder (`rust/src/fastdec`: straight into the output buffer,
   64-bit bit reader, fused tables); the reference decoder handles streams and
   errors.
-* A plain C ABI (`rust/src/lib.rs`) and a small JS glue (`core.mjs`) that
+* A plain C ABI (`rust/src/lib.rs`) and a small JS glue (`core.mts`, shipped as `core.mjs`) that
   reproduces wasm-bindgen's behaviour (copies, error types, option parsing
   through serde including its panics).
 

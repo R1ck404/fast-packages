@@ -2649,3 +2649,4 @@ export function fnBodyContainsUseStrict(body) {
   }
   return [0, false];
 }
+// generated from js_parser_visit_stmt2.mts by tools/ts-build.mjs; edit that file

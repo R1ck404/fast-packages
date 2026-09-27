@@ -18,6 +18,12 @@
 import { quoteForJSON } from "./helpers.mjs";
 
 export class Mapping {
+                                
+                                  
+                              
+                               
+                                 
+                               
   constructor(generatedLine = 0, generatedColumn = 0, sourceIndex = 0, originalLine = 0, originalColumn = 0, originalName = -1) {
     this.generatedLine = generatedLine; // 0-based
     this.generatedColumn = generatedColumn; // 0-based count of UTF-16 code units
@@ -30,6 +36,10 @@ export class Mapping {
 }
 
 export class SourceMap {
+  ;                      
+  ;                             
+  ;                       
+  ;                    
   constructor(sources = [], sourcesContent = [], mappings = [], names = []) {
     this.sources = sources; // []string
     this.sourcesContent = sourcesContent; // []SourceContent
@@ -69,6 +79,8 @@ export class SourceMap {
 }
 
 export class SourceContent {
+  ;                      
+  ;                  
   constructor(quoted = "", value = null) {
     // This stores both the unquoted and the quoted values. We try to use the
     // already-quoted value if possible so we don't need to re-quote it
@@ -175,6 +187,8 @@ export function decodeVLQ(encoded, start) {
 }
 
 export class LineColumnOffset {
+  ;                     
+  ;                       
   constructor(lines = 0, columns = 0) {
     this.lines = lines;
     this.columns = columns;
@@ -226,6 +240,9 @@ export class LineColumnOffset {
 }
 
 export class SourceMapPieces {
+  ;                      
+  ;                        
+  ;                      
   constructor(prefix = "", mappings = "", suffix = "") {
     this.prefix = prefix;
     this.mappings = mappings;
@@ -338,6 +355,8 @@ export class SourceMapPieces {
 }
 
 export class SourceMapShift {
+  ;                                
+  ;                               
   constructor(before = new LineColumnOffset(), after = new LineColumnOffset()) {
     this.before = before;
     this.after = after;
@@ -349,6 +368,13 @@ export class SourceMapShift {
 // in parallel for different parts of a file, we need to fix up the first
 // segment of each chunk to be relative to the end of the previous chunk.
 export class SourceMapState {
+  ;                             
+  ;                               
+  ;                           
+  ;                            
+  ;                              
+  ;                            
+  ;                                
   constructor(
     generatedLine = 0,
     generatedColumn = 0,
@@ -713,6 +739,8 @@ export function quoteForJSONLong(text, asciiOnly) {
 }
 
 export class MappingsBuffer {
+  ;                    
+  ;                               
   constructor(data = "", firstNameOffset = -1) {
     this.data = data; // string (Go: []byte)
     this.firstNameOffset = firstNameOffset; // ast.Index32 (-1 = invalid)
@@ -720,6 +748,11 @@ export class MappingsBuffer {
 }
 
 export class Chunk {
+  ;                              
+  ;                        
+  ;                                
+  ;                                    
+  ;                             
   constructor(buffer = new MappingsBuffer(), quotedNames = null, endState = new SourceMapState(), finalGeneratedColumn = 0, shouldIgnore = false) {
     this.buffer = buffer;
     this.quotedNames = quotedNames; // []string (Go: [][]byte), may be null
@@ -738,6 +771,25 @@ export class Chunk {
 }
 
 export class ChunkBuilder {
+  ;                           
+  ;                      
+  ;                            
+  ;                        
+  ;                               
+  ;                             
+  ;                                
+  ;                                 
+  ;                                
+  ;                                    
+  ;                                   
+  ;                               
+  ;                                
+  ;                               
+  ;                               
+  ;                             
+  ;                      
+  ;                                      
+  ;                                          
   // Go: MakeChunkBuilder(inputSourceMap, lineOffsetTables, asciiOnly)
   constructor(inputSourceMap, lineOffsetTables, asciiOnly) {
     this.inputSourceMap = inputSourceMap;
@@ -1037,3 +1089,4 @@ export class ChunkBuilder {
     b.hasPrevState = true;
   }
 }
+// generated from sourcemap.mts by tools/ts-build.mjs; edit that file

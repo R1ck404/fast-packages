@@ -56,6 +56,10 @@ import { parseJSON, JSONOptions } from "./json_parser.mjs";
 // config.go: TSConfigJSX
 
 export class TSConfigJSX {
+                          
+                                  
+                               
+                      
   constructor() {
     // If not empty, these should override the default values
     this.jsxFactory = null; // []string; default if empty: "React.createElement"
@@ -113,6 +117,15 @@ export class TSConfigJSX {
 // tsconfig_json.go
 
 export class TSConfigJSON {
+  ;                       
+  ;                    
+  ;                               
+  ;                  
+  ;                                
+  ;                     
+  ;                           
+  ;                                
+  ;                          
   constructor() {
     this.absPath = "";
 
@@ -155,6 +168,9 @@ export class TSConfigJSON {
 
 // This information is only used for error messages
 class tsTargetKey {
+  ;                          
+  ;                   
+  ;                    
   constructor(lowerValue = "", source = null, range = new Range(0, 0)) {
     this.lowerValue = lowerValue;
     this.source = source;
@@ -163,6 +179,8 @@ class tsTargetKey {
 }
 
 class TSConfigPath {
+  ;                    
+  ;                   
   constructor(text = "", loc = 0) {
     this.text = text;
     this.loc = loc;
@@ -170,6 +188,8 @@ class TSConfigPath {
 }
 
 class TSConfigPaths {
+  ;                          
+  ;                   
   constructor(map = new Map(), source = null) {
     this.map = map; // map[string][]TSConfigPath
 
@@ -806,3 +826,4 @@ export function applyTSConfigOverride(log, options) {
   options.jsx = jsx;
   options.tsAlwaysStrict = tsConfigOverride.tsAlwaysStrictOrStrict();
 }
+// generated from tsconfig.mts by tools/ts-build.mjs; edit that file

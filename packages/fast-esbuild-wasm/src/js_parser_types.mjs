@@ -3,9 +3,17 @@
 // parse/visit/lower modules. Field order = Go declaration order.
 import { InvalidRef } from "./ast.mjs";
 import { RANGE_ZERO } from "./logger.mjs";
+                                          
 import { AssignTargetNone } from "./js_ast.mjs";
 
 export class globPatternImport {
+                            
+                       
+                       
+                                  
+                      
+                       
+                        
   constructor(assertOrWith = null, parts = [], name = "", approximateRange = RANGE_ZERO, ref = InvalidRef, kind = 0, phase = 0) {
     this.assertOrWith = assertOrWith;
     this.parts = parts;
@@ -18,6 +26,8 @@ export class globPatternImport {
 }
 
 export class namespaceImportItems {
+  ;                              
+  ;                                 
   constructor(entries = new Map(), importRecordIndex = 0) {
     this.entries = entries; // Map<string, LocRef>
     this.importRecordIndex = importRecordIndex;
@@ -25,6 +35,8 @@ export class namespaceImportItems {
 }
 
 export class injectedSymbolSource {
+  ;                   
+  ;                   
   constructor(source = null, loc = 0) {
     this.source = source;
     this.loc = loc;
@@ -32,6 +44,8 @@ export class injectedSymbolSource {
 }
 
 export class injectedDotName {
+  ;                    
+  ;                                   
   constructor(parts = [], injectedDefineIndex = 0) {
     this.parts = parts;
     this.injectedDefineIndex = injectedDefineIndex;
@@ -49,6 +63,10 @@ export function importNamespaceCallKey(ref, kind) {
 }
 
 export class thenCatchChain {
+  ;                       
+  ;                        
+  ;                                
+  ;                         
   constructor(nextTarget = null, catchLoc = 0, hasMultipleArgs = false, hasCatch = false) {
     this.nextTarget = nextTarget; // js_ast.E
     this.catchLoc = catchLoc;
@@ -61,6 +79,8 @@ export class thenCatchChain {
 }
 
 export class tempRef {
+  ;                       
+  ;                   
   constructor(valueOrNil = null, ref = InvalidRef) {
     this.valueOrNil = valueOrNil;
     this.ref = ref;
@@ -70,6 +90,8 @@ export class tempRef {
 export const locModuleScope = -1;
 
 export class scopeOrder {
+                     
+                      
   constructor(scope = null, loc = 0) {
     this.scope = scope;
     this.loc = loc;
@@ -82,6 +104,20 @@ export const allowExpr = 1;
 export const forbidAll = 2;
 
 export class fnOrArrowDataParse {
+                              
+                              
+                            
+                                
+                        
+                        
+                                  
+                                      
+                              
+                                 
+                                       
+                                    
+                                      
+                                                 
   constructor(
     arrowArgErrors = null,
     decoratorScope = null,
@@ -134,6 +170,16 @@ export class fnOrArrowDataParse {
 }
 
 export class fnOrArrowDataVisit {
+  ;                            
+  ;                           
+  ;                        
+  ;                        
+  ;                            
+  ;                             
+  ;                               
+  ;                                   
+  ;                                   
+  ;                                               
   constructor(
     tryBodyCount = 0,
     tryCatchLoc = 0,
@@ -175,6 +221,17 @@ export class fnOrArrowDataVisit {
 
 // Pointer fields (*ast.Ref) are represented as a Ref number or null.
 export class fnOnlyDataVisit {
+  ;                         
+  ;                           
+  ;                                
+  ;                                                       
+  ;                                       
+  ;                              
+  ;                                     
+  ;                                   
+  ;                             
+  ;                             
+  ;                                                      
   constructor(
     argumentsRef = null,
     thisCaptureRef = null,
@@ -223,6 +280,8 @@ export const livenessUnknown = 0;
 export const alwaysLive = 1;
 
 export class switchCaseLiveness {
+                         
+                                  
   constructor(status = livenessUnknown, canFallThrough = false) {
     this.status = status;
     this.canFallThrough = canFallThrough;
@@ -230,6 +289,8 @@ export class switchCaseLiveness {
 }
 
 export class duplicateCaseValue {
+  ;                  
+  ;                    
   constructor(value = null, hash = 0) {
     this.value = value;
     this.hash = hash;
@@ -255,6 +316,11 @@ export const JSXImportFragment = 2;
 export const JSXImportCreateElement = 3;
 
 export class deferredErrors {
+                                         
+                                          
+                                    
+                               
+                         
   constructor(invalidExprDefaultValue = RANGE_ZERO, invalidExprAfterQuestion = RANGE_ZERO, arraySpreadFeature = RANGE_ZERO, invalidParens = []) {
     this.invalidExprDefaultValue = invalidExprDefaultValue;
     this.invalidExprAfterQuestion = invalidExprAfterQuestion;
@@ -264,6 +330,8 @@ export class deferredErrors {
 }
 
 export class deferredArrowArgErrors {
+  ;                               
+  ;                               
   constructor(invalidExprAwait = RANGE_ZERO, invalidExprYield = RANGE_ZERO) {
     this.invalidExprAwait = invalidExprAwait;
     this.invalidExprYield = invalidExprYield;
@@ -271,6 +339,19 @@ export class deferredArrowArgErrors {
 }
 
 export class propertyOpts {
+  ;                         
+  ;                           
+  ;                                
+  ;                         
+  ;                             
+  ;                             
+  ;                           
+  ;                        
+  ;                            
+  ;                         
+  ;                             
+  ;                        
+  ;                                
   constructor(
     decorators = [],
     decoratorScope = null,
@@ -326,6 +407,9 @@ export const wasOriginallyDot = 0;
 export const wasOriginallyIndex = 1;
 
 export class parenExprOpts {
+                            
+                                
+                                                 
   constructor(asyncRange = RANGE_ZERO, forceArrowFn = false, isAfterQuestionAndBeforeColon = false) {
     this.asyncRange = asyncRange;
     this.forceArrowFn = forceArrowFn;
@@ -334,6 +418,8 @@ export class parenExprOpts {
 }
 
 export class invalidLog {
+  ;                            
+  ;                             
   constructor(invalidTokens = [], syntaxFeatures = []) {
     this.invalidTokens = invalidTokens;
     this.syntaxFeatures = syntaxFeatures;
@@ -341,6 +427,8 @@ export class invalidLog {
 }
 
 export class syntaxFeature {
+  ;                       
+  ;                    
   constructor(feature = 0, token = RANGE_ZERO) {
     this.feature = feature;
     this.token = token;
@@ -355,6 +443,7 @@ export const exprFlagAfterQuestionAndBeforeColon = 1 << 3;
 export const exprFlagIsNewTarget = 1 << 4;
 
 export class parseBindingOpts {
+                               
   constructor(isUsingStmt = false) {
     this.isUsingStmt = isUsingStmt;
   }
@@ -365,6 +454,9 @@ export const fnStmt = 0;
 export const fnExpr = 1;
 
 export class parseClassOpts {
+                            
+                                   
+                                       
   constructor(decorators = [], decoratorContext = 0, isTypeScriptDeclare = false) {
     this.decorators = decorators;
     this.decoratorContext = decoratorContext;
@@ -373,6 +465,7 @@ export class parseClassOpts {
 }
 
 export class deferredDecorators {
+  ;                         
   constructor(decorators = []) {
     this.decorators = decorators;
   }
@@ -390,6 +483,20 @@ export const lexicalDeclAllowFnInsideIf = 2;
 export const lexicalDeclAllowFnInsideLabel = 3;
 
 export class parseStmtOpts {
+                                  
+                              
+                                 
+                                    
+                            
+                                   
+                                  
+                                       
+                                 
+                                      
+                                          
+                                           
+                               
+                              
   constructor(
     deferredDecorators = null,
     lexicalDecl = lexicalDeclForbid,
@@ -447,6 +554,9 @@ export const tempRefNoDeclare = 1;
 export const tempRefNeedsDeclareMayBeCapturedInsideLoop = 2;
 
 export class findSymbolResult {
+                      
+                             
+                                     
   constructor(ref = InvalidRef, declareLoc = 0, isInsideWithScope = false) {
     this.ref = ref;
     this.declareLoc = declareLoc;
@@ -460,6 +570,8 @@ export const stmtsLoopBody = 1;
 export const stmtsFnBody = 2;
 
 export class prependTempRefsOpts {
+                         
+                       
   constructor(fnBodyLoc = null, kind = stmtsNormal) {
     this.fnBodyLoc = fnBodyLoc; // *logger.Loc -> number or null
     this.kind = kind;
@@ -472,6 +584,7 @@ export const substituteSuccess = 1;
 export const substituteFailure = 2;
 
 export class bindingOpts {
+                                 
   constructor(duplicateArgCheck = null) {
     this.duplicateArgCheck = duplicateArgCheck; // Map<string, Range> or null
   }
@@ -486,6 +599,10 @@ export const valueDefinitelyNotMutated = 0;
 export const valueCouldBeMutated = 1;
 
 export class visitClassResult {
+                         
+                                    
+                               
+                                        
   constructor(bodyScope = null, innerClassNameRef = InvalidRef, superCtorRef = InvalidRef, canBeRemovedIfUnused = false) {
     this.bodyScope = bodyScope;
     this.innerClassNameRef = innerClassNameRef;
@@ -495,6 +612,10 @@ export class visitClassResult {
 }
 
 export class visitArgsOpts {
+  ;                   
+  ;                           
+  ;                           
+  ;                                         
   constructor(body = [], decoratorScope = null, hasRestArg = false, isUniqueFormalParameters = false) {
     this.body = body;
     this.decoratorScope = decoratorScope;
@@ -508,6 +629,12 @@ export const onlyCheckOriginalOrder = 0;
 export const checkBothOrders = 1;
 
 export class exprIn {
+                            
+                                          
+                                  
+                                                      
+                                              
+                               
   constructor(
     isMethod = false,
     isLoweredPrivateMethod = false,
@@ -538,6 +665,11 @@ export class exprIn {
 export const EXPR_IN_DEFAULT = Object.freeze(new exprIn());
 
 export class exprOut {
+                           
+                               
+                                              
+                                                   
+                                                         
   constructor(
     thisArgFunc = null,
     thisArgWrapFunc = null,
@@ -556,6 +688,13 @@ export class exprOut {
 export const EXPR_OUT_DEFAULT = Object.freeze(new exprOut());
 
 export class binaryExprVisitor {
+                 
+                      
+                     
+                         
+                              
+                                                            
+                    
   constructor(e = null, loc = 0, in_ = EXPR_IN_DEFAULT, leftIn = EXPR_IN_DEFAULT, isStmtExpr = false, oldSilenceWarningAboutThisBeingUndefined = false, expr = null) {
     this.e = e; // *EBinary
     this.loc = loc;
@@ -570,6 +709,8 @@ export class binaryExprVisitor {
 }
 
 export class globPart {
+  ;                    
+  ;                           
   constructor(text = "", isWildcard = false) {
     this.text = text;
     this.isWildcard = isWildcard;
@@ -577,6 +718,12 @@ export class globPart {
 }
 
 export class identifierOpts {
+  ;                            
+  ;                             
+  ;                               
+  ;                                
+  ;                                        
+  ;                                    
   constructor(
     assignTarget = AssignTargetNone,
     isCallTarget = false,
@@ -595,6 +742,9 @@ export class identifierOpts {
 }
 
 export class visitFnOpts {
+  ;                         
+  ;                                   
+  ;                                       
   constructor(isMethod = false, isDerivedClassCtor = false, isLoweredPrivateMethod = false) {
     this.isMethod = isMethod;
     this.isDerivedClassCtor = isDerivedClassCtor;
@@ -603,6 +753,9 @@ export class visitFnOpts {
 }
 
 export class importsExportsScanResult {
+  ;                    
+  ;                                 
+  ;                                    
   constructor(stmts = [], keptImportEquals = false, removedImportEquals = false) {
     this.stmts = stmts;
     this.keptImportEquals = keptImportEquals;
@@ -611,6 +764,8 @@ export class importsExportsScanResult {
 }
 
 export class HelperCall {
+  ;                     
+  ;                       
   constructor(global = [], runtime = "") {
     this.global = global;
     this.runtime = runtime;
@@ -675,6 +830,8 @@ export const couldBeTypeCast = 1;
 export const definitelyTypeParameters = 2;
 
 export class skipTypeScriptTypeArgumentsOpts {
+                                      
+                                                    
   constructor(isInsideJSXElement = false, isParseTypeArgumentsInExpression = false) {
     this.isInsideJSXElement = isInsideJSXElement;
     this.isParseTypeArgumentsInExpression = isParseTypeArgumentsInExpression;
@@ -701,6 +858,9 @@ export const objRestReturnValueIsUnused = 0;
 export const objRestMustReturnInitExpr = 1;
 
 export class lowerUsingDeclarationContext {
+                                
+                           
+                                 
   constructor(firstUsingLoc = 0, stackRef = InvalidRef, hasAwaitUsing = false) {
     this.firstUsingLoc = firstUsingLoc;
     this.stackRef = stackRef;
@@ -712,6 +872,9 @@ export class lowerUsingDeclarationContext {
 // js_parser_lower_class.go
 
 export class classLoweringInfo {
+  ;                                       
+  ;                                     
+  ;                                   
   constructor(lowerAllInstanceFields = false, lowerAllStaticFields = false, shimSuperCtorCalls = false) {
     this.lowerAllInstanceFields = lowerAllInstanceFields;
     this.lowerAllStaticFields = lowerAllStaticFields;
@@ -726,6 +889,43 @@ export const classKindExportStmt = 2;
 export const classKindExportDefaultStmt = 3;
 
 export class lowerClassContext {
+                             
+                       
+                     
+                           
+                         
+                           
+                    
+                             
+                                     
+                                 
+                                 
+                                        
+                                    
+                                     
+                                
+                               
+                                      
+                                                
+                                              
+                                      
+                                        
+                                                 
+                                                                
+                                                              
+                                                 
+                                                   
+                                              
+                                                
+                                           
+                                         
+                        
+                        
+                                       
+                                 
+                                     
+                                                 
+                                 
   constructor() {
     this.nameToKeep = "";
     this.kind = classKindExpr;
@@ -770,6 +970,15 @@ export class lowerClassContext {
 }
 
 export class propertyAnalysis {
+  ;                    
+  ;                                         
+  ;                             
+  ;                               
+  ;                                
+  ;                                            
+  ;                                           
+  ;                                         
+  ;                                                
   constructor() {
     this.private = null; // *js_ast.EPrivateIdentifier
     this.propExperimentalDecorators = [];
@@ -782,3 +991,4 @@ export class propertyAnalysis {
     this.isComputedPropertyCopiedOrMoved = false;
   }
 }
+// generated from js_parser_types.mts by tools/ts-build.mjs; edit that file

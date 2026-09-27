@@ -7,13 +7,15 @@
 // a Go child process, *Sync APIs included, no JS fast path.)
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+                                                  
 
 const require = createRequire(import.meta.url);
-globalThis.self ??= globalThis;
-const esbuild = require("./lib/browser.js");
+(globalThis       ).self ??= globalThis;
+// (lib/browser.js has the same API as esbuild-wasm)
+const esbuild                      = require("./lib/browser.js");
 const STATS = Symbol.for("@r1ck404/fast-esbuild-wasm:stats");
 
-export function initialize(options = {}) {
+export function initialize(options                                 = {})                {
   options = { ...options };
   if (!options.wasmModule && !options.wasmURL) {
     options.wasmModule = new WebAssembly.Module(readFileSync(new URL("./esbuild.wasm", import.meta.url)));
@@ -37,3 +39,4 @@ export const {
 } = esbuild;
 
 export default Object.defineProperty({ ...esbuild, initialize }, STATS, { value: esbuild[STATS] });
+// generated from node.mts by tools/ts-build.mjs; edit that file

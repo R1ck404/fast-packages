@@ -4,6 +4,7 @@
 // listed in CONVENTIONS.md section 8 and are mixed into Parser.prototype here.
 import { bail, BAIL, LEXER_PANIC } from "./bail.mjs";
 import { RANGE_ZERO, mkRange, LineColumnTracker, MsgID_JS_UnsupportedJSXComment, Warning } from "./logger.mjs";
+                                          
 import { isInsideNodeModules } from "./helpers.mjs";
 import {
   InvalidRef,
@@ -125,6 +126,17 @@ import { visitStmt2Methods } from "./js_parser_visit_stmt2.mjs";
 import { visitExprMethods } from "./js_parser_visit_expr.mjs";
 import { lowerMethods } from "./js_parser_lower.mjs";
 
+// The parser methods (mixed into Parser.prototype at the end of this file)
+                                         
+                        
+                    
+                           
+                            
+                           
+                       
+                     
+                                               
+
 const RUNTIME_SOURCE_INDEX = 0; // runtime.SourceIndex
 
 // ---------------------------------------------------------------------------
@@ -132,6 +144,36 @@ const RUNTIME_SOURCE_INDEX = 0; // runtime.SourceIndex
 // optionsThatSupportStructuralEquality fields flattened)
 
 export class Options {
+                               
+                          
+                              
+                           
+                            
+                            
+                       
+                                    
+                                         
+                                        
+                                                
+                                                    
+                        
+                       
+                           
+                               
+                               
+                                
+                             
+                             
+                                
+                                     
+                                    
+                                       
+                                          
+                                        
+                               
+                                
+                                
+                                                    
   constructor() {
     this.injectedFiles = [];
     this.jsx = new JSXOptions();
@@ -216,6 +258,119 @@ export function optionsFromConfig(options) {
 // guards simply become no-ops.
 
 export class Parser {
+  ;                    
+  ;                
+  ;                   
+  ;                                  
+  ;                                              
+  ;                                        
+  ;                             
+  ;                         
+  ;                        
+  ;                      
+  ;                       
+  ;                          
+  ;                                    
+  ;                                            
+  ;                                       
+  ;                                    
+  ;                         
+  ;                                   
+  ;                                    
+  ;                                 
+  ;                                     
+  ;                                                  
+  ;                                                 
+  ;                                          
+  ;                                           
+  ;                              
+  ;                                    
+  ;                                                     
+  ;                                     
+  ;                                     
+  ;                                                 
+  ;                              
+  ;                                  
+  ;                                           
+  ;                                                
+  ;                                     
+  ;                              
+  ;                                  
+  ;                                 
+  ;                                     
+  ;                                     
+  ;                            
+  ;                                      
+  ;                                              
+  ;                                   
+  ;                                   
+  ;                                   
+  ;                                            
+  ;                                           
+  ;                            
+  ;                          
+  ;                            
+  ;                          
+  ;                       
+  ;                             
+  ;                        
+  ;                         
+  ;                     
+  ;                                                 
+  ;                        
+  ;                               
+  ;                                             
+  ;                        
+  ;                                      
+  ;                                    
+  ;                                                  
+  ;                                
+  ;                                
+  ;                                        
+  ;                  
+  ;                              
+  ;                                                 
+  ;                            
+  ;                                    
+  ;                            
+  ;                             
+  ;                               
+  ;                          
+  ;                          
+  ;                         
+  ;                             
+  ;                          
+  ;                         
+  ;                         
+  ;                            
+  ;                                        
+  ;                                       
+  ;                          
+  ;                          
+  ;                                        
+  ;                            
+  ;                               
+  ;                                    
+  ;                                   
+  ;                                       
+  ;                                 
+  ;                                      
+  ;                                  
+  ;                                              
+  ;                               
+  ;                                 
+  ;                                               
+  ;                                                 
+  ;                                    
+  ;                                                        
+  ;                                                        
+  ;                        
+  ;                                  
+  ;                                         
+  ;                                            
+  ;                                  
+  ;                                    
+  ;                                                 
   constructor(log, source, lexer, options) {
     this.options = options;
     this.log = log;
@@ -396,7 +551,7 @@ const defaultJSXFragment = ["React", "Fragment"];
 const defaultJSXImportSource = "react";
 
 // Parse returns [ast, ok]. Any error/warning throws BAIL (see logger.mjs).
-export function parse(log, source, options) {
+export function parse(log, source, options)                 {
   options = options.clone();
   try {
     // Default options for JSX elements
@@ -576,7 +731,7 @@ export function globResolveAST() {
 }
 
 // ParseDefineExpr(text) -> [DefineExpr, E|null]
-export function parseDefineExpr(text) {
+export function parseDefineExpr(text        )                    {
   if (text === "") return [new DefineExpr(), null];
 
   // Try a property chain
@@ -1383,3 +1538,4 @@ Object.assign(
 );
 
 export { BAIL };
+// generated from js_parser.mts by tools/ts-build.mjs; edit that file
