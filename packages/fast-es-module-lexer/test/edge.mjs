@@ -132,10 +132,12 @@ for (const v of [undefined, null, 1, {}, ["import 'a'"], new String("import 'a'"
 }
 
 // --- init: parse before init resolves returns a promise; ImportType; exports list
+// (static imports: both modules evaluate and parse() runs in the same task,
+// before either wasm compile can have resolved)
 {
   const code = `
-    const F = await import(${JSON.stringify(new URL("../lexer.mjs", import.meta.url).href)});
-    const O = await import("es-module-lexer");
+    import * as F from ${JSON.stringify(new URL("../lexer.mjs", import.meta.url).href)};
+    import * as O from "es-module-lexer";
     const pf = F.parse("import a from 'b'", "n"), po = O.parse("import a from 'b'", "n");
     const out = [pf instanceof Promise, po instanceof Promise, JSON.stringify(await pf) === JSON.stringify(await po),
       JSON.stringify(F.ImportType) === JSON.stringify(O.ImportType), Object.keys(F).filter((k) => !k.startsWith("__")).sort().join() === Object.keys(O).sort().join(),
