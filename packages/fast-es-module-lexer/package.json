@@ -1,0 +1,57 @@
+{
+  "name": "@r1ck404/fast-es-module-lexer",
+  "version": "1.7.0",
+  "description": "Faster drop-in replacement for es-module-lexer 1.7.0: a SIMD Rust/WebAssembly port of its lexer, identical results and errors (3-18x faster)",
+  "keywords": [
+    "es-module-lexer",
+    "lexer",
+    "esm",
+    "import",
+    "export",
+    "wasm",
+    "simd",
+    "drop-in"
+  ],
+  "license": "MIT",
+  "author": "R1ck404 (https://github.com/R1ck404)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R1ck404/fast-packages.git",
+    "directory": "packages/fast-es-module-lexer"
+  },
+  "homepage": "https://github.com/R1ck404/fast-packages/tree/main/packages/fast-es-module-lexer#readme",
+  "upstream": "es-module-lexer@1.7.0",
+  "type": "module",
+  "main": "./index.mjs",
+  "module": "./index.mjs",
+  "types": "./types/lexer.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/lexer.d.ts",
+      "default": "./index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "lexer.mjs",
+    "lexer.wasm.mjs",
+    "types/lexer.d.ts",
+    "vendor/lexer.js",
+    "vendor/LICENSE",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/edge.mjs && node test/diff.mjs --quick",
+    "test:full": "node test/diff.mjs && node test/edge.mjs && node test/browser.mjs"
+  },
+  "devDependencies": {
+    "es-module-lexer": "1.7.0",
+    "binaryen": "^132.0.0"
+  }
+}
