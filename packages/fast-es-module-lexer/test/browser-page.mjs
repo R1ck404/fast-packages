@@ -1,5 +1,5 @@
 // In-browser half of browser.mjs: parse every source with es-module-lexer
-// and fast-es-module-lexer in the page, compare results/errors.
+// and @r1ck404/fast-es-module-lexer in the page, compare results/errors.
 export async function run(fastUrl, origUrl, urls, extra) {
   const F = await import(fastUrl);
   const O = await import(origUrl);

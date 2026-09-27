@@ -1,4 +1,4 @@
-// fastlexer: wasm core of fast-es-module-lexer.
+// fastlexer: wasm core of @r1ck404/fast-es-module-lexer.
 //
 // A function-by-function port of es-module-lexer 1.7.0's src/lexer.c. Every
 // function keeps the original's control flow, including its quirks (e.g.

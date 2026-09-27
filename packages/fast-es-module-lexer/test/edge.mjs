@@ -1,9 +1,9 @@
-// Targeted cases for fast-es-module-lexer vs es-module-lexer 1.7.0: string
+// Targeted cases for @r1ck404/fast-es-module-lexer vs es-module-lexer 1.7.0: string
 // escapes in specifiers and export names, chars whose UTF-16 low byte is a
 // token char, block/padding boundaries, memory growth between parses, errors,
 // non-string arguments, async init. Every case runs in every copy mode.
-// usage: node fast-es-module-lexer/test/edge.mjs
-import * as F from "../index.mjs";
+// usage: node packages/fast-es-module-lexer/test/edge.mjs
+import * as F from "../lexer.mjs"; // (with the test hooks)
 import * as O from "es-module-lexer";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -124,7 +124,7 @@ for (const v of [undefined, null, 1, {}, ["import 'a'"], new String("import 'a'"
 // --- init: parse before init resolves returns a promise; ImportType; exports list
 {
   const code = `
-    const F = await import(${JSON.stringify(new URL("../index.mjs", import.meta.url).href)});
+    const F = await import(${JSON.stringify(new URL("../lexer.mjs", import.meta.url).href)});
     const O = await import("es-module-lexer");
     const pf = F.parse("import a from 'b'", "n"), po = O.parse("import a from 'b'", "n");
     const out = [pf instanceof Promise, po instanceof Promise, JSON.stringify(await pf) === JSON.stringify(await po),

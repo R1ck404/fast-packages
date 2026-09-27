@@ -1,6 +1,6 @@
 // Build the wasm core and embed it (base64) into lexer.wasm.mjs, together
-// with the small string-copy module (wasm JS-string builtins, see index.mjs).
-// usage: node fast-es-module-lexer/build.mjs [--no-opt]
+// with the small string-copy module (wasm JS-string builtins, see lexer.mjs).
+// usage: node packages/fast-es-module-lexer/build.mjs [--no-opt]
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

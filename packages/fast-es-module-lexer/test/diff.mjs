@@ -1,17 +1,17 @@
-// Differential test: fast-es-module-lexer vs es-module-lexer 1.7.0 on every
+// Differential test: @r1ck404/fast-es-module-lexer vs es-module-lexer 1.7.0 on every
 // JS/TS file under node_modules, plus variants of each file:
 //   - forced UTF-16 path (non-ASCII comment prepended)
 //   - truncated prefixes (error paths)
 //   - random single-char edits (fuzz)
-// Every check runs fast-es-module-lexer once per way of getting the source
+// Every check runs @r1ck404/fast-es-module-lexer once per way of getting the source
 // into wasm memory (Node Buffer copy, V8 JS-string builtins: charCodeAt or
 // intoCharCodeArray, encodeInto / JS copy as in other browsers).
-// usage: node fast-es-module-lexer/test/diff.mjs [--quick] [--seed=N] [--variants=N] [--modes=node,v8,v8-into,encode]
-import * as F from "../index.mjs";
+// usage: node packages/fast-es-module-lexer/test/diff.mjs [--quick] [--seed=N] [--variants=N] [--modes=node,v8,v8-into,encode]
+import * as F from "../lexer.mjs"; // (with the test hooks)
 import * as O from "es-module-lexer";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { listFiles, nm } from "../../bench/corpus.mjs";
+import { listFiles, nm } from "../../../bench/corpus.mjs";
 
 F.initSync();
 O.initSync();
@@ -43,7 +43,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const dirArgs = args.filter((a) => a.startsWith("--dir=")).map((a) => a.slice(6));
-const dirs = dirArgs.length ? dirArgs : [nm, join(here, "../../../Nodepod/node_modules/.pnpm")].filter((d) => existsSync(d));
+const dirs = dirArgs.length ? dirArgs : [nm, join(here, "../../../../Nodepod/node_modules/.pnpm")].filter((d) => existsSync(d));
 let files = [];
 for (const d of dirs) listFiles(d, exts, files);
 files = [...new Set(files)];

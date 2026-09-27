@@ -1,11 +1,11 @@
 // Differential check in real browsers (Playwright): Chromium takes the V8
 // JS-string-builtins copy path, Firefox and WebKit the encodeInto path.
-// usage: node fast-es-module-lexer/test/browser.mjs [chromium,firefox,webkit]
+// usage: node packages/fast-es-module-lexer/test/browser.mjs [chromium,firefox,webkit]
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname, normalize } from "node:path";
 import * as pw from "playwright-core";
-import { root, listFiles, nm } from "../../bench/corpus.mjs";
+import { root, listFiles, nm } from "../../../bench/corpus.mjs";
 
 const names = (process.argv[2] || "chromium,firefox,webkit").split(",");
 const mime = { ".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript", ".html": "text/html" };
@@ -41,7 +41,7 @@ for (const name of names) {
   const page = await browser.newPage();
   await page.goto(base + "/bench/browser/blank.html");
   const r = await page.evaluate(
-    async ({ urls, extra }) => (await import("/fast-es-module-lexer/test/browser-page.mjs")).run("/fast-es-module-lexer/index.mjs", "/node_modules/es-module-lexer/dist/lexer.js", urls, extra),
+    async ({ urls, extra }) => (await import("/packages/fast-es-module-lexer/test/browser-page.mjs")).run("/packages/fast-es-module-lexer/lexer.mjs", "/node_modules/es-module-lexer/dist/lexer.js", urls, extra),
     { urls, extra },
   );
   console.log(`${name} [${r.mode}]: checks ${r.checks}, mismatches ${r.nfails}, fallbacks ${r.fallbacks} (differing: ${r.fbDiff})  (${r.ua.match(/(Chrome|Firefox|Version)\/[\d.]+/)?.[0]})`);

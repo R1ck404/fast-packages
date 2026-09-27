@@ -1,5 +1,6 @@
-// fast-es-module-lexer: drop-in replacement for es-module-lexer 1.7.0 (same
+// @r1ck404/fast-es-module-lexer: drop-in replacement for es-module-lexer 1.7.0 (same
 // exports: ImportType, init, initSync, parse; same results, same errors).
+// This is the implementation; index.mjs is the public entry.
 //
 // The lexer is a port of es-module-lexer's lexer.c (rust/src/lib.rs) that
 // skips over code with SIMD instead of walking it char by char. Sources go
@@ -119,7 +120,7 @@ function refresh() {
   if (cap >= 0) srcView = new Uint8Array(memBuf, srcPtr, cap);
 }
 
-/** test hook: force how sources are copied ("node" | "node-re" | "v8" | "v8-into" | "encode") */
+/** test hook (not exported by index.mjs): force how sources are copied ("node" | "node-re" | "v8" | "v8-into" | "encode") */
 export function __mode(m) {
   initSync();
   if (m === "node" && NodeBuffer !== null) (mode = 0), loadIsOneByte();
@@ -154,7 +155,7 @@ export const initSync = () => {
 
 const encoder = new TextEncoder();
 
-/** counters for tests */
+/** counters for tests (not exported by index.mjs) */
 export const __stats = { fallback: 0, mode: "" };
 
 function original(source, name) {

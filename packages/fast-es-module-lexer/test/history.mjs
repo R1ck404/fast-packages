@@ -1,6 +1,6 @@
 // The original reads memory past the source's NUL terminator for some
 // malformed inputs (stale data from earlier parses): its result then depends on
-// what was parsed before. fast-es-module-lexer detects those reads and asks the
+// what was parsed before. @r1ck404/fast-es-module-lexer detects those reads and asks the
 // (vendored) original, whose memory history differs from the reference
 // instance's. Such a mismatch is accepted only if the input really is
 // history-dependent.
@@ -10,7 +10,7 @@
 // garbage proves the original's result for `src` depends on stale memory.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { nm } from "../../bench/corpus.mjs";
+import { nm } from "../../../bench/corpus.mjs";
 
 const origB64 = readFileSync(join(nm, "es-module-lexer/dist/lexer.js"), "utf8").match(/"(AGFzbQ[^"]+)"/)[1];
 const origModule = new WebAssembly.Module(Buffer.from(origB64, "base64"));
