@@ -1,8 +1,7 @@
 // esbuild-wasm benchmark. Usage: node bench/esbuild.bench.mjs <impl>
 //   impl: wasm (esbuild-wasm browser build, worker:false — Nodepod's engine)
-//       | native (reference ceiling) | fast (fast-esbuild-wasm)
-//       | prev (snapshot of the package in .scratch/esbuild-prev/fast-esbuild-wasm,
-//         for A/B runs; e.g. git archive HEAD fast-esbuild-wasm + esbuild.wasm)
+//       | native (reference ceiling) | fast (@r1ck404/fast-esbuild-wasm/node.mjs)
+//       | prev (snapshot in .scratch/esbuild-prev/fast-esbuild-wasm, for A/B runs)
 import { runSuite } from "./harness.mjs";
 import { loadJs, readText, nm, root } from "./corpus.mjs";
 import { readFileSync, readdirSync } from "node:fs";
@@ -27,7 +26,7 @@ async function loadImpl(name) {
   if (name === "fast" || name === "prev") {
     // prev: a snapshot of the package before the current round of changes
     const t0 = performance.now();
-    const esbuild = await import(name === "fast" ? "../fast-esbuild-wasm/index.mjs" : "../.scratch/esbuild-prev/fast-esbuild-wasm/index.mjs");
+    const esbuild = await import(name === "fast" ? "@r1ck404/fast-esbuild-wasm/node.mjs" : "../.scratch/esbuild-prev/fast-esbuild-wasm/index.mjs");
     await esbuild.initialize({});
     process.stdout.write("INIT " + (performance.now() - t0).toFixed(1) + "\n");
     return esbuild;

@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 const impl = process.argv[2] || "orig";
 const L =
-  impl === "fast" ? await import("../fast-es-module-lexer/index.mjs")
+  impl === "fast" ? await import("@r1ck404/fast-es-module-lexer")
   : impl === "prev" ? await import("../.scratch/prev/fast-es-module-lexer/index.mjs")
   : await import("es-module-lexer");
 L.initSync();

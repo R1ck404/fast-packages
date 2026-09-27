@@ -1,15 +1,15 @@
-// Independent differential check: fast-brotli-wasm vs brotli-wasm 3.0.1.
+// Independent differential check: @r1ck404/fast-brotli-wasm vs brotli-wasm 3.0.1.
 // compress() default (q11, what Nodepod's zlib polyfill calls) and random
 // qualities on real files in random order (state leakage), decompress of
 // valid/corrupt/truncated streams, and the stream classes with random chunking.
-// usage: node .scratch/verify/verify-brotli.mjs [nFiles]
+// usage: node verify/verify-brotli.mjs [nFiles]
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { allFiles, sample, readBytes, eqBytes, rnd, rint, pick, Tally, describeErr, root } from "./corpus.mjs";
 
 const require = createRequire(import.meta.url);
 const O = require("brotli-wasm");
-const F = require(process.env.FAST_BROTLI || join(root, "fast-brotli-wasm/index.node.cjs"));
+const F = require(process.env.FAST_BROTLI || "@r1ck404/fast-brotli-wasm");
 const N = Number(process.argv[2] || 600);
 const T = new Tally("brotli");
 

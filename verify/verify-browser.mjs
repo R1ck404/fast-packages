@@ -1,8 +1,8 @@
 // Independent browser check (headless Chromium): every package's browser
 // entry point, original vs fast, on the same inputs. Results are hashed in the
 // page and compared here.
-// usage: node .scratch/verify/verify-browser.mjs [nFiles] [prefix]
-//   prefix: where the fast packages live relative to the repo root ("" or ".scratch/prev/")
+// usage: node verify/verify-browser.mjs [nFiles] [prefix]
+//   prefix: prepended to packages/<name>/ in the URLs (default "")
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { join, extname, normalize } from "node:path";
@@ -83,7 +83,7 @@ const pakoFn = async ({ lib, files, tgz }) => {
 {
   const labels = anyFiles.flatMap((f) => [1, 2, 3, 4, 5].map((k) => f + "#" + k)).concat(tgz);
   const a = await inPage(pakoFn, { lib: "/node_modules/pako/dist/pako.esm.mjs", files: anyFiles, tgz });
-  const b = await inPage(pakoFn, { lib: `/${prefix}fast-pako/index.mjs`, files: anyFiles, tgz });
+  const b = await inPage(pakoFn, { lib: `/${prefix}packages/fast-pako/index.mjs`, files: anyFiles, tgz });
   compare("pako", a, b, labels);
 }
 
@@ -106,7 +106,7 @@ const acornFn = async ({ lib, files }) => {
 {
   const labels = jsFiles.flatMap((f) => [f + "#module", f + "#script+loc", f + "#module+loc+ranges"]);
   const a = await inPage(acornFn, { lib: "/node_modules/acorn/dist/acorn.mjs", files: jsFiles });
-  const b = await inPage(acornFn, { lib: `/${prefix}fast-acorn/index.mjs`, files: jsFiles });
+  const b = await inPage(acornFn, { lib: `/${prefix}packages/fast-acorn/index.mjs`, files: jsFiles });
   compare("acorn", a, b, labels);
 }
 
@@ -130,7 +130,7 @@ const emlFn = async ({ lib, files }) => {
 {
   const labels = jsFiles.flatMap((f) => [f, f + "#utf16", f + "#half"]);
   const a = await inPage(emlFn, { lib: "/node_modules/es-module-lexer/dist/lexer.js", files: jsFiles });
-  const b = await inPage(emlFn, { lib: `/${prefix}fast-es-module-lexer/index.mjs`, files: jsFiles });
+  const b = await inPage(emlFn, { lib: `/${prefix}packages/fast-es-module-lexer/index.mjs`, files: jsFiles });
   compare("es-module-lexer", a, b, labels);
 }
 
@@ -154,7 +154,7 @@ const brFn = async ({ lib, files }) => {
   const files = anyFiles.slice(0, 80);
   const labels = files.flatMap((f) => [f + "#c", f + "#d"]);
   const a = await inPage(brFn, { lib: "/node_modules/brotli-wasm/index.web.js", files });
-  const b = await inPage(brFn, { lib: `/${prefix}fast-brotli-wasm/index.mjs`, files });
+  const b = await inPage(brFn, { lib: `/${prefix}packages/fast-brotli-wasm/index.mjs`, files });
   compare("brotli", a, b, labels);
 }
 
@@ -190,7 +190,7 @@ const esFn = async ({ script, wasm, files }) => {
   const files = jsFiles.slice(0, 100);
   const labels = files.flatMap((f) => [f + "#cjs", f + "#esm+map"]);
   const a = await inPage(esFn, { script: "/node_modules/esbuild-wasm/lib/browser.js", wasm: "/node_modules/esbuild-wasm/esbuild.wasm", files });
-  const b = await inPage(esFn, { script: `/${prefix}fast-esbuild-wasm/lib/browser.js`, wasm: `/${prefix}fast-esbuild-wasm/esbuild.wasm`, files });
+  const b = await inPage(esFn, { script: `/${prefix}packages/fast-esbuild-wasm/lib/browser.js`, wasm: `/${prefix}packages/fast-esbuild-wasm/esbuild.wasm`, files });
   compare("esbuild", a, b, labels);
 }
 

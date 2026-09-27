@@ -1,7 +1,7 @@
 // esbuild in a real browser (headless Chromium via playwright-core), the way
 // Nodepod runs it: browser build, default worker mode, wasm streamed from URL.
 // Usage: node bench/esbuild-browser.bench.mjs <impl>
-//   impl: wasm (esbuild-wasm 0.28.2 browser build) | fast (fast-esbuild-wasm)
+//   impl: wasm (esbuild-wasm 0.28.2 browser build) | fast (@r1ck404/fast-esbuild-wasm)
 //       | prev (snapshot in .scratch/esbuild-prev/fast-esbuild-wasm, for A/B runs)
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -33,7 +33,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 
 const libs = {
   wasm: { script: "/node_modules/esbuild-wasm/lib/browser.js", wasm: "/node_modules/esbuild-wasm/esbuild.wasm" },
-  fast: { script: "/fast-esbuild-wasm/lib/browser.js", wasm: "/fast-esbuild-wasm/esbuild.wasm" },
+  fast: { script: "/packages/fast-esbuild-wasm/lib/browser.js", wasm: "/packages/fast-esbuild-wasm/esbuild.wasm" },
   prev: { script: "/.scratch/esbuild-prev/fast-esbuild-wasm/lib/browser.js", wasm: "/.scratch/esbuild-prev/fast-esbuild-wasm/esbuild.wasm" },
 }[impl];
 

@@ -9,4 +9,5 @@ SEED=${SEED:-11} node verify/verify-brotli.mjs 1500 > verify/out/brotli.txt 2>&1
 SEED=${SEED:-11} node verify/verify-esbuild.mjs 2000 1500 > verify/out/esbuild.txt 2>&1; echo "esbuild exit $?"
 SEED=${SEED:-11} node verify/verify-browser.mjs 300 > verify/out/browser.txt 2>&1; echo "browser exit $?"
 SEED=${SEED:-11} node verify/verify-toplevel-min.mjs 1500 > verify/out/toplevel-min.txt 2>&1; echo "toplevel-min exit $?"
-grep -h "checks:" verify/out/*.txt
+node verify/pack-smoke.mjs > verify/out/pack-smoke.txt 2>&1; echo "pack-smoke exit $?"
+grep -h -e "checks:" -e "browser bundle" verify/out/*.txt

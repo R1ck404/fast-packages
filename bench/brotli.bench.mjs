@@ -1,5 +1,5 @@
 // brotli-wasm benchmark. Usage: node bench/brotli.bench.mjs <impl>
-//   impl: orig (brotli-wasm 3.0.1) | fast (fast-brotli-wasm) | prev (snapshot in .scratch/prev)
+//   impl: orig (brotli-wasm 3.0.1) | fast (@r1ck404/fast-brotli-wasm) | prev (snapshot in .scratch/prev)
 import { createRequire } from "node:module";
 import { runSuite } from "./harness.mjs";
 import { read, jsonText, utf8 } from "./corpus.mjs";
@@ -8,7 +8,7 @@ const impl = process.argv[2] || "orig";
 const require = createRequire(import.meta.url);
 const B =
   impl === "fast"
-    ? require("../fast-brotli-wasm/index.node.cjs")
+    ? require("@r1ck404/fast-brotli-wasm")
     : impl === "prev"
       ? require("../.scratch/prev/fast-brotli-wasm/index.node.cjs")
       : impl === "orig"

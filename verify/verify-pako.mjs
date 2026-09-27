@@ -1,12 +1,12 @@
-// Independent differential check: fast-pako vs pako 2.1.0, Nodepod-style usage
+// Independent differential check: @r1ck404/fast-pako vs pako 2.1.0, Nodepod-style usage
 // plus randomized options, streaming, corruption and truncation.
-// usage: node .scratch/verify/verify-pako.mjs [nFiles]
+// usage: node verify/verify-pako.mjs [nFiles]
 import pako from "pako";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { allFiles, sample, readBytes, eqBytes, capture, rnd, rint, pick, Tally, root } from "./corpus.mjs";
 
-const F = (await import(process.env.FAST_PAKO || "../fast-pako/index.mjs")).default;
+const F = (await import(process.env.FAST_PAKO || "@r1ck404/fast-pako")).default;
 const N = Number(process.argv[2] || 1200);
 const T = new Tally("pako");
 

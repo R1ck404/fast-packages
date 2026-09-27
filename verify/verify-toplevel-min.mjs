@@ -1,6 +1,6 @@
 // Nodepod's topLevelParser() (src/syntax-transforms.ts) as it ships: extracted
 // from the Nodepod source, minified by esbuild, bundled once against acorn and
-// once against fast-acorn. Checks that fast-acorn recognises the minified
+// once against @r1ck404/fast-acorn. Checks that it recognises the minified
 // subclass (speed) and parses identically.
 // usage: node verify/verify-toplevel-min.mjs [nFiles]
 import { buildSync } from "esbuild";
@@ -24,7 +24,7 @@ if (a < 0 || m < 0 || b <= 0) throw new Error("topLevelParser not found in Nodep
 const dir = join(here, "out/min");
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, "tl.ts"), 'import * as acorn from "acorn";\n' + src.slice(a, b) + "\n");
-const fastPath = pathToFileURL(join(root, "fast-acorn/index.mjs")).href;
+const fastPath = pathToFileURL(join(root, "packages/fast-acorn/index.mjs")).href;
 for (const [name, alias] of [["fast", fastPath], ["orig", "acorn"]]) {
   const r = buildSync({ entryPoints: [join(dir, "tl.ts")], bundle: true, format: "esm", minify: true, write: false, external: ["acorn", fastPath], alias: { acorn: alias }, platform: "node" });
   writeFileSync(join(dir, `tl-${name}.mjs`), r.outputFiles[0].text);

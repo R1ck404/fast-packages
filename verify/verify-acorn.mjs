@@ -1,14 +1,16 @@
-// Independent differential check: fast-acorn vs acorn 8.18 (+ acorn-jsx 5.3.2)
+// Independent differential check: @r1ck404/fast-acorn (+ @r1ck404/fast-acorn-jsx) vs acorn
+// 8.18 (+ acorn-jsx 5.3.2)
 // using the option sets and subclasses Nodepod uses, plus tokenizer,
 // onComment, parseExpressionAt and error paths (truncations / edits).
-// usage: node .scratch/verify/verify-acorn.mjs [nFiles] [nJsx]
+// usage: node verify/verify-acorn.mjs [nFiles] [nJsx]
 import * as O from "acorn";
 import acornJsx from "acorn-jsx";
+import { createRequire } from "node:module";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { allFiles, sample, readText, rnd, rint, pick, Tally, here, describeErr } from "./corpus.mjs";
 
-const F = await import(process.env.FAST_ACORN || "../fast-acorn/index.mjs");
+const F = await import(process.env.FAST_ACORN || "@r1ck404/fast-acorn");
 const N = Number(process.argv[2] || 1500);
 const NJ = Number(process.argv[3] || 1500);
 const T = new Tally("acorn");
@@ -91,6 +93,9 @@ function topLevel(acorn) {
 }
 const TopO = topLevel(O), TopF = topLevel(F);
 const JsxO = O.Parser.extend(acornJsx()), JsxF = F.Parser.extend(acornJsx());
+// @r1ck404/fast-acorn-jsx (what a minified bundle uses): registered with @r1ck404/fast-acorn
+const fastJsx = createRequire(import.meta.url)(process.env.FAST_ACORN_JSX || "@r1ck404/fast-acorn-jsx");
+const JsxS = F.Parser.extend(fastJsx()), JsxSO = O.Parser.extend(fastJsx());
 const JsxNsO = O.Parser.extend(acornJsx({ allowNamespacedObjects: true })), JsxNsF = F.Parser.extend(acornJsx({ allowNamespacedObjects: true }));
 const JsxNoNsO = O.Parser.extend(acornJsx({ allowNamespaces: false })), JsxNoNsF = F.Parser.extend(acornJsx({ allowNamespaces: false }));
 
@@ -168,6 +173,8 @@ for (let i = 0; i < jfiles.length; i++) {
   const name = jfiles[i].slice(-24);
   cmp(`${name} jsx module+locations`, () => JsxO.parse(src, rollupOpts("module")), () => JsxF.parse(src, rollupOpts("module")));
   cmp(`${name} jsx plain`, () => JsxO.parse(src, { ecmaVersion: L, sourceType: "module" }), () => JsxF.parse(src, { ecmaVersion: L, sourceType: "module" }));
+  cmp(`${name} @r1ck404/fast-acorn-jsx on @r1ck404/fast-acorn`, () => JsxO.parse(src, rollupOpts("module")), () => JsxS.parse(src, rollupOpts("module")));
+  cmp(`${name} @r1ck404/fast-acorn-jsx on acorn`, () => JsxO.parse(src, rollupOpts("module")), () => JsxSO.parse(src, rollupOpts("module")));
   cmp(`${name} jsx nsObjects`, () => JsxNsO.parse(src, { ecmaVersion: L, sourceType: "module", ranges: true }), () => JsxNsF.parse(src, { ecmaVersion: L, sourceType: "module", ranges: true }));
   cmp(`${name} jsx noNs`, () => JsxNoNsO.parse(src, { ecmaVersion: L, sourceType: "module" }), () => JsxNoNsF.parse(src, { ecmaVersion: L, sourceType: "module" }));
   cmp(`${name} plain acorn (rollup first try)`, () => O.parse(src, rollupOpts("module")), () => F.parse(src, rollupOpts("module")));
@@ -208,6 +215,7 @@ const jsxCases = [
 ];
 for (const c of jsxCases) {
   cmp(`jsxcase ${c}`, () => JsxO.parse(c, rollupOpts("module")), () => JsxF.parse(c, rollupOpts("module")));
+  cmp(`jsxcase fast-acorn-jsx ${c}`, () => JsxO.parse(c, rollupOpts("module")), () => JsxS.parse(c, rollupOpts("module")));
   cmp(`jsxcase nsobj ${c}`, () => JsxNsO.parse(c, rollupOpts("module")), () => JsxNsF.parse(c, rollupOpts("module")));
   cmp(`jsxcase nons ${c}`, () => JsxNoNsO.parse(c, rollupOpts("module")), () => JsxNoNsF.parse(c, rollupOpts("module")));
   cmp(`jsxcase tok ${c}`, () => tokens(JsxO, c, { ecmaVersion: L, sourceType: "module" }), () => tokens(JsxF, c, { ecmaVersion: L, sourceType: "module" }));

@@ -1,6 +1,6 @@
 // acorn benchmark. Usage: node bench/acorn.bench.mjs <impl>
-//   impl: acorn (8.18) | meriyah (reference only: different AST) | fast
-//         | prev (snapshot of fast-acorn in .scratch/prev, for A/B runs)
+//   impl: acorn (8.18) | meriyah (reference only: different AST) | fast (@r1ck404/fast-acorn)
+//         | prev (snapshot in .scratch/prev/fast-acorn, for A/B runs)
 import { runSuite } from "./harness.mjs";
 import { loadJs, root } from "./corpus.mjs";
 import { createRequire } from "node:module";
@@ -12,7 +12,7 @@ const require = createRequire(import.meta.url);
 
 async function loadImpl(name) {
   if (name === "acorn") return await import("acorn");
-  if (name === "fast") return await import("../fast-acorn/index.mjs");
+  if (name === "fast") return await import("@r1ck404/fast-acorn");
   if (name === "prev") return await import("../.scratch/prev/fast-acorn/index.mjs");
   if (name === "meriyah") {
     const m = await import("meriyah");
@@ -181,13 +181,13 @@ if (existsSync(jsxDir)) {
       for (const s of batch) JsxParser.parse(s, rollupOpts);
     },
   });
-  // what a bundled (minified) build would use: fast-acorn's own acorn-jsx
-  // module (the genuine plugin's source text no longer matches after
-  // minification); acorn / prev: the genuine plugin
-  const ownJsx = impl === "fast" ? (await import("../fast-acorn/acorn-jsx.mjs")).default : acornJsx;
+  // what a bundled (minified) build would use: @r1ck404/fast-acorn-jsx (the genuine
+  // plugin's source text no longer matches after minification); acorn /
+  // prev: the genuine plugin
+  const ownJsx = impl === "fast" ? require("@r1ck404/fast-acorn-jsx") : acornJsx;
   const OwnJsxParser = acorn.Parser.extend(ownJsx());
   cases.push({
-    name: `jsx via fast-acorn/acorn-jsx.mjs x${batch.length} median .jsx`,
+    name: `jsx via @r1ck404/fast-acorn-jsx x${batch.length} median .jsx`,
     bytes: batchBytes,
     fn: () => {
       for (const s of batch) OwnJsxParser.parse(s, rollupOpts);

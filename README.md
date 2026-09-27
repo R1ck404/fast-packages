@@ -1,17 +1,59 @@
-# Faster drop-in versions of pako, acorn, esbuild-wasm, es-module-lexer and brotli-wasm (experiments)
+# fast-* drop-ins: faster pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm
 
-Standalone experiments — nothing here is wired into Nodepod. Each package is a
-drop-in replacement for the version Nodepod uses and is verified to produce
-**identical results** (byte-identical output / identical ASTs, errors and
-callbacks) against the original on large real-world corpora.
+Faster drop-in replacements for the packages Nodepod uses, published as
+`@r1ck404/fast-<name of the package it replaces>` with the **same version**
+as the original. Each is verified to produce **identical results**
+(byte-identical output, identical ASTs, errors and callbacks) against the
+original on large real-world corpora. Nothing here is wired into Nodepod yet.
 
-| package | replaces | approach |
-|---|---|---|
-| `fast-pako/` | pako 2.1.0 | faithful Rust -> wasm port of pako's zlib (deflate + inflate state machines, trees, checksums) with identical output, plus a libdeflate-style fast inflate loop (32-byte match copies, one fast table builder whose slow path keeps zlib's exact byte reads), table-free folding crc32, SIMD adler32, precomputed per-block codes and a branchless bit writer for level-1 emission; emulates pako's JS-level push/chunk/string semantics; streaming sessions are pooled; vendored pako as fallback for exotic inputs |
-| `fast-acorn/` | acorn 8.18 | a new parser mirroring acorn function-by-function (integer token types, flag tables, deferred node construction, exact key order, exact "Unexpected token" errors); other errors re-run real acorn. Native acorn-jsx mode for the genuine acorn-jsx 5.3.2 class (recognised by source + structure + probe parses) or `fast-acorn/acorn-jsx.mjs`; subclasses that only override `parseFunctionBody` (Nodepod's `topLevelParser`) run their own method against a facade over the fast parser after a whitelist analysis of its source; `tokenizer()` and unrecognised plugins run the vendored acorn with a faster tokenizer (`fasttok.mjs`) that reproduces its exact state |
-| `fast-esbuild-wasm/` | esbuild-wasm 0.28.2 | a JavaScript port (~40k lines) of esbuild's transform pipeline running inside esbuild's own (minimally patched) JS glue; supports source maps and tsconfigRaw; printer writes UTF-8 bytes into one buffer; the shared runtime is printed/linked once and reused (verified in a checking mode that recomputes every cache hit); anything not provably identical (errors, warnings, unsupported options such as minify or non-esnext targets) falls back to the real Go wasm |
-| `fast-es-module-lexer/` | es-module-lexer 1.7.0 | Rust -> wasm port of lexer.c function-by-function; the main loop only stops at the few chars that matter (SIMD nibble-table classifier over 64-char blocks with hoisted constants, stop masks walked directly, a separate tight loop for brackets/non-keywords), SIMD skipping of strings/comments/templates/import clauses; source enters wasm via Node's `Buffer.latin1Write`/`ucs2Write`, a wasm loop over the JS-string builtins in Chromium, or `TextEncoder.encodeInto` elsewhere (always one byte per UTF-16 unit); results come back as one int array and unescaped specifiers are sliced instead of `eval`'d; any input where the original reads outside its source buffer (stale memory) runs the vendored original |
-| `fast-brotli-wasm/` | brotli-wasm 3.0.1 | same Rust crates (brotli 5.0.0 / brotli-decompressor 4.0.0, vendored) built at O3+SIMD with a C-ABI glue instead of wasm-bindgen; encoder hot paths rewritten with byte-identical output (Zopfli relaxation with per-insert-code length-cost tables, per-position distance-cache tables, dominated start positions skipped, sorted start queue, early-exit clustering over nonzero bins, SIMD match finding/block splitting, no zeroing of buffers that are written before read); a new one-shot decoder (straight into the output buffer, 64-bit bit reader, fused command/distance tables) with the reference decoder as fallback for errors |
+| package | replaces | typical speedup | approach |
+|---|---|---|---|
+| [`@r1ck404/fast-pako`](packages/fast-pako) | pako 2.1.0 | ungzip 5-6x, inflate 4x, deflate L1 3x | pako's zlib ported to Rust/wasm, same bytes |
+| [`@r1ck404/fast-acorn`](packages/fast-acorn) | acorn 8.18.0 | parse 2.5-3.1x, JSX and `parseFunctionBody` subclasses 2.2-2.6x | a parser mirroring acorn function by function |
+| [`@r1ck404/fast-acorn-jsx`](packages/fast-acorn-jsx) | acorn-jsx 5.3.2 | (enables the JSX fast path in minified bundles) | acorn-jsx + a registration hook |
+| [`@r1ck404/fast-esbuild-wasm`](packages/fast-esbuild-wasm) | esbuild-wasm 0.28.2 | transform 5-35x small/medium, 3-4x on 1MB | JavaScript port of esbuild's transform pipeline in esbuild's own glue |
+| [`@r1ck404/fast-es-module-lexer`](packages/fast-es-module-lexer) | es-module-lexer 1.7.0 | 3-18x (Node), 2.3-7.4x (Chromium) | SIMD Rust/wasm port of lexer.c |
+| [`@r1ck404/fast-brotli-wasm`](packages/fast-brotli-wasm) | brotli-wasm 3.0.1 | compress q11 3-12.7x, decompress 2-3.6x | same Rust crates, rewritten encoder hot paths, new decoder |
+
+## Naming and versions
+
+* **Name**: `@r1ck404/fast-<original name>`. `@r1ck404` is a personal npm
+  scope, so nobody else can publish into it; `fast-` marks the packages as
+  faster re-implementations (not forks or official builds) and keeps the
+  family together; the rest is the exact name of the package it replaces.
+* **Version**: the version of the original it mirrors (`@r1ck404/fast-acorn@8.18.0`
+  is acorn 8.18.0). Major and minor always equal the original's, so peer
+  dependency ranges keep working (acorn-jsx's `acorn ^8`); the patch number
+  is ours and moves on for our own fixes. The exact mirrored release is in
+  each `package.json`'s `upstream` field.
+
+## Using them
+
+Install under the original name, so every import (including those inside
+other dependencies) gets the fast version:
+
+```jsonc
+// package.json
+"dependencies": {
+  "pako": "npm:@r1ck404/fast-pako@2.1.0",
+  "acorn": "npm:@r1ck404/fast-acorn@8.18.0",
+  "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@5.3.2",
+  "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@0.28.2",
+  "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.0",
+  "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.1"
+}
+```
+
+(pnpm: the same specs under `pnpm.overrides` also redirect transitive
+dependencies. A bundler alias, e.g. Vite `resolve.alias`, works as well.)
+Alias `acorn-jsx` together with `acorn`: in a minified bundle the genuine
+acorn-jsx is no longer recognisable, `@r1ck404/fast-acorn-jsx` is.
+
+Entry points mirror the originals' (ESM and CommonJS, browser fields, types).
+Differences are listed in each package's README; the notable ones: in Node,
+`@r1ck404/fast-esbuild-wasm` is esbuild-wasm's own Node API (the fast path is the
+browser build, or `@r1ck404/fast-esbuild-wasm/node.mjs` in-thread); pako's
+`lib/*`/`dist/*` and es-module-lexer's `/js` subpaths are not provided.
 
 ## Results
 
@@ -21,7 +63,7 @@ rounds per case. **before** = the packages at the start of the second
 optimisation round (`prev`), **now** = current; both as speedup over the
 original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
 
-**fast-pako vs pako 2.1.0**
+**@r1ck404/fast-pako vs pako 2.1.0**
 
 | case | pako | before | now |
 |---|---|---|---|
@@ -33,7 +75,7 @@ original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
 | inflateRaw / ungzip of 300B | 11.8 / 9.7 us | 2.1 / 1.7x | **5.6 / 4.3x** |
 | deflate level 6 / level 9 | | 1.9-2.3x / 1.7-2.0x | unchanged |
 
-**fast-acorn vs acorn 8.18**
+**@r1ck404/fast-acorn (+ @r1ck404/fast-acorn-jsx) vs acorn 8.18 (+ acorn-jsx 5.3.2)**
 
 | case | acorn | before | now |
 |---|---|---|---|
@@ -46,7 +88,7 @@ original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
 | `parseExpressionAt` x8 (with locations) | 29 us | 1.7x | **3.1x** |
 | any other `Parser.extend()` plugin | | 0.9x | 1.0x |
 
-**fast-es-module-lexer vs es-module-lexer 1.7.0**
+**@r1ck404/fast-es-module-lexer vs es-module-lexer 1.7.0**
 
 | case | Node: orig | before | now | Chromium: orig | before | now |
 |---|---|---|---|---|---|---|
@@ -56,8 +98,8 @@ original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
 | typescript.js 9MB | 35 ms | 3.0x | **7.4x** | | | |
 | batches of real package files (34-753 files) | 2.0-15.5 ms | 1.8-2.9x | **5.1-7.6x** | 2.1-16.2 ms | 1.7-2.8x | **3.5-4.5x** |
 
-**fast-brotli-wasm vs brotli-wasm 3.0.1** (`compress()` defaults to quality
-11, which is what Nodepod's zlib polyfill uses)
+**@r1ck404/fast-brotli-wasm vs brotli-wasm 3.0.1** (`compress()` defaults to
+quality 11, which is what Nodepod's zlib polyfill uses)
 
 | case | brotli-wasm | before | now |
 |---|---|---|---|
@@ -68,7 +110,7 @@ original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
 | decompress | 7 us .. 2.5 ms | 2.0-3.6x | unchanged |
 | `CompressStream` q5 / `DecompressStream` 1MB | 31 / 2.3 ms | 2.2 / 1.2x | 2.4 / 1.5x |
 
-**fast-esbuild-wasm vs esbuild-wasm 0.28.2**
+**@r1ck404/fast-esbuild-wasm vs esbuild-wasm 0.28.2**
 
 | case | esbuild-wasm | before | now | (native esbuild) |
 |---|---|---|---|---|
@@ -87,113 +129,106 @@ original. Full tables: `results/*_vs_prev_vs_fast*-interleaved-*.md`.
 | Chromium: 1-1.2MB files | 66-130 ms | 2.5-3.3x | **3.1-3.8x** | |
 | Chromium: initialize() + first transform | 153 ms | 2.0x | 2.0x | |
 
-esbuild-wasm in Node pays the OS timer granularity (15.6 ms on Windows) per
-request; the Chromium numbers are the fairer comparison for small inputs. For
-small and medium files the JS engine is faster than calling native esbuild
-through its child-process API; in steady state (warm JIT, no GC in the
-window) it transforms three.module.js in ~20 ms, about native speed.
+The Node rows use `@r1ck404/fast-esbuild-wasm/node.mjs` (in-thread, `worker:
+false`); esbuild-wasm there pays the OS timer granularity (15.6 ms on
+Windows) per request, so the Chromium numbers are the fairer comparison for
+small inputs. For small and medium files the JS engine is faster than calling
+native esbuild through its child-process API; in steady state (warm JIT, no GC
+in the window) it transforms three.module.js in ~20 ms, about native speed.
 
 ## Verification
 
-Each package has its own differential suites; `sh verify/suites.sh` runs all
-of them. Final run, all against the original packages:
+`npm run test:full` (`verify/suites.sh`) runs every package's differential
+suites; `npm run verify` (`verify/all.sh`) runs the independent checks. All
+compare against the original packages in `node_modules`.
 
-* **pako**: `test/equiv.mjs` 7,864 checks (levels, strategies, memLevels,
-  windowBits, chunk sizes, dictionaries, gzip headers, multi-member/truncated
-  streams, string output chunking, 6,000 corruption-fuzz cases, streaming with
-  flush modes); `test/fuzz.mjs` 14,368 + 14,363 (two seeds: crafted streams
-  for every decoder corner, random Huffman headers, random options and push
-  sizes, every observable stream field incl. `strm.data_type`, error shapes);
-  `test/corpus.mjs` 2,292 (Nodepod-style packing of 4,795 real files and the
-  npm tarballs): 0 failures.
-* **acorn**: `test/diff.mjs --locs --comments --nodepod` - 14,666 files incl.
-  Nodepod's pnpm store as script/module, with locations+ranges, onComment and
-  Nodepod's option sets, ASTs/comments/prototypes/object sharing compared:
-  93,817 parses identical, 0 false accepts; `expr-diff.mjs` 61,047;
-  `jsx-diff.mjs` 124,645 (3,243 real JSX files, 3,000 JS files, generated
-  and mutated JSX, all acorn-jsx option sets, both jsx modules);
-  `override-diff.mjs` 17,899 (4 subclass variants that must be recognised, 10
-  that must not); `error-diff.mjs` 274,385 error cases (223,763 produced by
-  the fast parser itself); `acorn-diff.mjs` 40,912 (vendored acorn +
-  fasttok vs npm acorn incl. onToken/tokenizer); `options.mjs` 2,428:
-  0 mismatches.
-* **esbuild-wasm**: `test/diff.mjs` - 3,336 JS/TS files under 18 option sets
-  (preserve, Nodepod's esm->cjs options, esm, iife, ts, ts->cjs, Vite-style
-  tsconfigRaw, decorators, JSONC tsconfig, source maps for all): 29,204
-  outputs (code and map) byte-identical, 0 mismatches, 0 false accepts,
-  0 crashes (runtime caches recomputed and compared on every hit); extra
-  source trees (7,426 TS/TSX files) 63,180 identical; `test/fuzz.mjs` 12,949
-  generated programs (escapes, surrogates, non-ASCII + source maps, JSX,
-  names colliding with runtime helpers); `bailreasons.mjs`: 0 unnecessary
-  fallbacks; `smoke.mjs` 516; `api.mjs` through the whole glue.
-* **es-module-lexer**: `test/diff.mjs` - 26,228 files (local + Nodepod pnpm)
-  plus UTF-16, truncated and randomly edited variants, each in all 4 copy
-  modes: 157,350 x 4 checks, 0 mismatches; `edge.mjs` 24,661 (escapes,
-  high chars whose low byte is a token char, every length 0-300, memory
-  growth); `browser.mjs` in Chromium, Firefox and WebKit. Inputs on which the
-  original reads memory past its source (only malformed code) are confirmed
-  to be history-dependent in the original (different garbage, different
-  answer); those use the vendored original.
-* **brotli-wasm**: `test/compress-equiv.mjs` 4,916 + 18,116 on the pnpm store
-  (all qualities 0-11 byte-identical); `compress-stress.mjs` 11,844 generated
-  inputs; `decode-equiv.mjs` 285,127 decompress checks (native-brotli streams
-  with random parameters, generated streams covering every format feature,
-  189k fuzzed streams, errors included); `stream-equiv.mjs` 500 streaming
-  call sequences; `api.mjs` 321: 0 failures.
+Package suites (last full run, 0 failures / mismatches / false accepts):
 
-**Independent checks** (`verify/`, written separately from the package
-suites; `sh verify/all.sh`), each package called the way Nodepod calls it:
-pako 63,170 checks over two seeds (Nodepod content packing, randomized
-options, streaming with random flushes, corrupt/truncated streams, tarballs);
-acorn 48,307 (Nodepod's exact `topLevelParser` code and acorn-jsx on real
-JS and a 3,243-file JSX corpus built by `verify/make-jsx-corpus.mjs`,
-tokenizer, parseExpressionAt, onComment, edits); es-module-lexer 80,082
-(two seeds, random order, UTF-16/truncated/edited variants); brotli 7,906
-(q11 and random qualities in random order, corrupt/truncated streams, stream
-classes with random chunking); esbuild 8,114 through the public `transform()`
-API vs esbuild-wasm (Nodepod and Vite options, fallback options, truncations);
-every package's browser entry point in headless Chromium, 3,669 checks; the
-minified `topLevelParser` as Nodepod ships it (`verify-toplevel-min.mjs`):
-recognised and identical. All 0 failures.
+* **fast-pako**: `test/equiv.mjs` 7,864 checks (levels, strategies,
+  memLevels, windowBits, chunk sizes, dictionaries, gzip headers,
+  multi-member/truncated streams, string output, 6,000 corruption-fuzz cases,
+  streaming with flush modes); `test/fuzz.mjs` 14,368 + 14,363 (two seeds:
+  crafted streams for every decoder corner, random Huffman headers, random
+  options and pushes, every observable stream field, error shapes);
+  `test/corpus.mjs` 2,292 (Nodepod-style packing of 4,795 real files, npm
+  tarballs).
+* **fast-acorn / fast-acorn-jsx**: `test/diff.mjs --locs --comments --nodepod`
+  over 14,666 files incl. Nodepod's pnpm store (script/module, locations,
+  ranges, onComment, Nodepod's option sets; ASTs, comments, prototypes and
+  object sharing compared): 93,817 parses identical; `expr-diff.mjs` 61,047;
+  `jsx-diff.mjs` 124,645 (real, generated and mutated JSX, every acorn-jsx
+  option set, genuine acorn-jsx and fast-acorn-jsx); `override-diff.mjs`
+  17,899 (subclasses that must and must not be recognised); `error-diff.mjs`
+  274,385 errors (223,763 produced by the fast parser itself);
+  `acorn-diff.mjs` 40,912 (the vendored acorn with the faster tokenizer vs npm
+  acorn, incl. tokenizer/onToken); `options.mjs` 2,428.
+* **fast-esbuild-wasm**: `test/diff.mjs` over 3,677 JS/TS files (node_modules
+  + Nodepod's own source) under 18 option sets (Nodepod's esm->cjs options,
+  esm, iife, ts, Vite-style tsconfigRaw, decorators, JSX, source maps for all):
+  32,271 outputs (code and map) byte-identical, 0 crashes;
+  `bailreasons.mjs`: no unnecessary fallbacks; `fuzz.mjs` 12,949 generated
+  programs; `smoke.mjs` 516; `api.mjs` through the whole glue vs esbuild-wasm
+  plus the export surface of all four browser builds.
+* **fast-es-module-lexer**: `test/diff.mjs` over 26,228 files plus UTF-16,
+  truncated and edited variants, each in all 4 source-copy modes: 157,350 x 4;
+  `edge.mjs` 24,661; `browser.mjs` in Chromium, Firefox and WebKit. Inputs on
+  which the original reads memory past its source (malformed code only) are
+  confirmed history-dependent in the original and use the vendored original.
+* **fast-brotli-wasm**: `test/compress-equiv.mjs` 4,916 + 18,116 on the pnpm
+  store (qualities 0-11 byte-identical); `compress-stress.mjs` 11,844;
+  `decode-equiv.mjs` 285,127 (native-brotli streams with random parameters,
+  generated streams covering every format feature, 189k fuzzed streams, errors
+  included); `stream-equiv.mjs` 500; `api.mjs` 321.
 
-## Using in Nodepod
+Independent checks (`verify/`, written separately from the package suites,
+calling every package the way Nodepod does), 0 failures: pako 37,896
+(Nodepod's content packing, random options, streaming with random flushes,
+corrupt/truncated streams, tarballs); acorn 54,816 (Nodepod's exact
+`topLevelParser` code, acorn-jsx and fast-acorn-jsx on a 3,243-file real-world
+JSX corpus, tokenizer, parseExpressionAt, onComment, edits); es-module-lexer
+40,041; brotli 7,906 (q11 and random qualities in random order, corrupt and
+truncated streams, stream classes); esbuild 8,114 through the public
+`transform()` API vs esbuild-wasm; every browser build in headless Chromium
+3,669; Nodepod's `topLevelParser` minified the way it ships: recognised (2.2x)
+and identical on 1,501 files; `verify/pack-smoke.mjs`: the packed tarballs
+installed under the original names work from Node (ESM and CommonJS) and
+bundle for the browser.
 
-* Alias `acorn` -> `fast-acorn/index.mjs` and `acorn-jsx` ->
-  `fast-acorn/acorn-jsx.mjs`. The genuine acorn-jsx is recognised by its
-  source text, which a minifier changes, so a minified bundle needs the alias
-  to get the JSX speedup (without it, JSX parses at acorn speed, still
-  identical). The `topLevelParser` subclass is recognised minified too.
+## Repository layout
 
-## Known differences (all pre-existing, none reachable through Nodepod)
+    packages/fast-<name>/   one npm package each (@r1ck404/fast-<name>): sources, build, tests, tools
+    bench/                  benchmark suites + harness (interleave.mjs, compare.mjs, corpus.mjs)
+    verify/                 independent verification, pack/install smoke test, full-suite runner
+    results/                benchmark tables
+    corpus/                 npm tarballs for the pako bench (gitignored; `npm pack` into it)
 
-* acorn: patching `acorn.Parser.prototype` directly (instead of through
-  `Parser.extend`) is ignored by the fast path; a per-parse guard would cost
-  more than a small parse. On extremely deep nesting acorn can run out of
-  stack where fast-acorn returns an AST.
-* pako: `Inflate.push()` with something other than a byte array *after* the
-  first push (plain arrays with values > 255, other typed arrays, DataView)
-  can differ from pako, which feeds those raw values into its JS inflate.
-  Such an input on the first push hands the stream to the original.
-* es-module-lexer: on malformed inputs where the original reads stale memory
-  past its source, the answer depends on what that instance parsed before;
-  fast-es-module-lexer asks the vendored original, whose history differs.
+## Development
 
-## Benchmarks
+    npm install             # links the workspaces; builds @r1ck404/fast-esbuild-wasm (lib/, esm/)
+    npm test                # quick tests of every package
+    npm run test:full       # all package suites (long)
+    npm run verify          # independent checks + pack/install smoke test (long)
+    npm run build:wasm      # rebuild the wasm of pako, es-module-lexer, brotli-wasm
+                            # (Rust with the wasm32-unknown-unknown target)
 
-    node bench/interleave.mjs pako 3 pako prev fast
-    node bench/interleave.mjs acorn 3 acorn prev fast
-    node bench/interleave.mjs esbuild 3 wasm prev fast native     # Node, worker:false
-    node bench/interleave.mjs esbuild-browser 2 wasm prev fast    # headless Chromium, worker mode
-    node bench/interleave.mjs es-module-lexer 3 orig prev fast
-    node bench/interleave.mjs es-module-lexer-browser 3 orig prev fast   # BROWSER=firefox|webkit
-    node bench/interleave.mjs brotli 3 orig prev fast
+The larger corpora are optional: Nodepod's pnpm store (a `Nodepod` checkout
+next to this repo), `corpus/*.tgz` for the pako bench, and the JSX corpus
+(`node verify/make-jsx-corpus.mjs`, from .tsx/.jsx files near this repo).
 
-`prev` loads a snapshot from `.scratch/prev/<package>` (esbuild:
-`.scratch/esbuild-prev/`); drop it from the list if there is none. The pako
-bench needs npm tarballs in `corpus/` (`cd corpus && npm pack typescript@5.9.3
-react-dom three ...`). `interleave.mjs` alternates implementations in fresh
-processes and keeps the best run per case, which makes the comparison robust
-to CPU frequency changes and background load.
+Benchmarks:
+
+    node bench/interleave.mjs pako 3 pako fast
+    node bench/interleave.mjs acorn 3 acorn fast
+    node bench/interleave.mjs esbuild 3 wasm fast native          # Node, worker:false
+    node bench/interleave.mjs esbuild-browser 2 wasm fast         # headless Chromium, worker mode
+    node bench/interleave.mjs es-module-lexer 3 orig fast
+    node bench/interleave.mjs es-module-lexer-browser 3 orig fast  # BROWSER=firefox|webkit
+    node bench/interleave.mjs brotli 3 orig fast
+
+`interleave.mjs` alternates implementations in fresh processes and keeps the
+best run per case, which makes the comparison robust to CPU frequency changes
+and background load. The `prev` implementation in each suite loads a snapshot
+from `.scratch/prev/` (not in git) for before/after comparisons.
 
 ## Dead ends (kept for the record)
 
@@ -218,6 +253,7 @@ to CPU frequency changes and background load.
   copy loop is slow, so the first ~1M chars use `intoCharCodeArray`.
 * acorn: lazily created token start positions, interning identifiers, object
   literal AST nodes (4x slower node creation), per-method speedups of the
-  vendored acorn for unrecognised plugins (no measurable gain). `locations`
+  vendored acorn for unrecognised plugins (no measurable gain), a guard against
+  direct `Parser.prototype` patches (costs more than a small parse). `locations`
   costs are dominated by GC of the Position/SourceLocation objects the AST
   must contain.

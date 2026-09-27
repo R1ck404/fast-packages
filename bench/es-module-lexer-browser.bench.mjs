@@ -29,7 +29,7 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
 const lib = {
   orig: "/node_modules/es-module-lexer/dist/lexer.js",
-  fast: "/fast-es-module-lexer/index.mjs",
+  fast: "/packages/fast-es-module-lexer/index.mjs",
   prev: "/.scratch/prev/fast-es-module-lexer/index.mjs",
 }[impl];
 

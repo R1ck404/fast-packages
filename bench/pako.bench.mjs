@@ -33,9 +33,9 @@ async function loadImpl(name) {
       ungzip: (d) => f.gunzipSync(d),
     };
   }
-  if (name === "fast") return (await import("../fast-pako/index.mjs")).default;
+  if (name === "fast") return (await import("@r1ck404/fast-pako")).default;
   if (name === "prev") return (await import("../.scratch/prev/fast-pako/index.mjs")).default;
-  if (name.startsWith("fast:")) return (await import(`../fast-pako/${name.slice(5)}`)).default;
+  if (name.startsWith("fast:")) return (await import(`../packages/fast-pako/${name.slice(5)}`)).default;
   throw new Error("unknown impl " + name);
 }
 

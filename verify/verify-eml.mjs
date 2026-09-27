@@ -1,16 +1,16 @@
-// Independent differential check: fast-es-module-lexer vs es-module-lexer 1.7.0.
+// Independent differential check: @r1ck404/fast-es-module-lexer vs es-module-lexer 1.7.0.
 // Real files (all JS/TS kinds), random order, UTF-16 variants, edits,
 // truncations; mismatches on malformed inputs are accepted only if the
 // original's own answer is provably history-dependent (two fresh original
 // instances with different memory history disagree).
-// usage: node .scratch/verify/verify-eml.mjs [nFiles]
+// usage: node verify/verify-eml.mjs [nFiles]
 import * as O from "es-module-lexer";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { allFiles, sample, readText, rnd, rint, pick, Tally, root, describeErr } from "./corpus.mjs";
-import { historyDependent as isHistoryDependent } from "../fast-es-module-lexer/test/history.mjs";
+import { historyDependent as isHistoryDependent } from "../packages/fast-es-module-lexer/test/history.mjs";
 
-const F = await import(process.env.FAST_EML || "../fast-es-module-lexer/index.mjs");
+const F = await import(process.env.FAST_EML || "@r1ck404/fast-es-module-lexer");
 await O.init;
 F.initSync();
 const N = Number(process.argv[2] || 3000);

@@ -1,14 +1,15 @@
-// Independent differential check: fast-esbuild-wasm vs official esbuild-wasm
+// Independent differential check: @r1ck404/fast-esbuild-wasm vs official esbuild-wasm
 // 0.28.2 through the public transform() API (result objects, warnings, errors),
 // with Nodepod's module-transformer options and Vite-style ts/tsx options.
-// usage: node .scratch/verify/verify-esbuild.mjs [nJs] [nTs]
+// usage: node verify/verify-esbuild.mjs [nJs] [nTs]
 import * as O from "esbuild-wasm";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { allFiles, sample, readText, rnd, rint, pick, Tally, root, walk, here } from "./corpus.mjs";
 
-const F = await import(process.env.FAST_ESBUILD ? pathToFileURL(process.env.FAST_ESBUILD).href : "../fast-esbuild-wasm/index.mjs");
+const F = await import(process.env.FAST_ESBUILD ? pathToFileURL(process.env.FAST_ESBUILD).href : "@r1ck404/fast-esbuild-wasm/node.mjs");
 await F.initialize({});
+const stats = F.default[Symbol.for("@r1ck404/fast-esbuild-wasm:stats")];
 const NJ = Number(process.argv[2] || 800);
 const NT = Number(process.argv[3] || 600);
 const T = new Tally("esbuild");
@@ -77,8 +78,8 @@ for (let i = 0; i < all.length; i++) {
   // truncation (error path) now and then
   if (i % 10 === 0) jobs.push(cmp(`${name} trunc`, src.slice(0, rint(src.length)), nodepod(f)));
   await Promise.all(jobs);
-  if (i % 100 === 0) process.stderr.write(`  ${i}/${all.length} ${((Date.now() - t0) / 1000).toFixed(0)}s fails=${T.fails} fast=${F.fastStats?.fast} bail=${F.fastStats?.bail}\n`);
+  if (i % 100 === 0) process.stderr.write(`  ${i}/${all.length} ${((Date.now() - t0) / 1000).toFixed(0)}s fails=${T.fails} fast=${stats.fast} bail=${stats.bail}\n`);
 }
-console.log("fast path stats:", JSON.stringify({ fast: F.fastStats.fast, bail: F.fastStats.bail, error: F.fastStats.error }));
+console.log("fast path stats:", JSON.stringify({ fast: stats.fast, bail: stats.bail, error: stats.error }));
 await O.stop?.();
 process.exit(T.report() ? 1 : 0);
