@@ -243,6 +243,7 @@ export class Parser {
     this.legacyOctalLiterals = new Map(); // map[js_ast.E]logger.Range
     this.scopesInOrderForEnum = new Map(); // map[logger.Loc][]scopeOrder
     this.binaryExprStack = [];
+    this.binaryExprVisitorPool = []; // JS-only: see acquireBinaryExprVisitor
 
     this.hoistedRefForSloppyModeBlockFn = new Map();
 
@@ -302,6 +303,9 @@ export class Parser {
     this.topLevelTempRefsToDeclare = [];
 
     this.lexer = lexer;
+
+    // JS-only: the object returned by findSymbol() (reused)
+    this.findSymbolScratch = null;
 
     this.parseExperimentalDecoratorNesting = 0;
 
@@ -500,7 +504,8 @@ export function parse(log, source, options) {
         switch (s.k) {
           case S_LOCAL:
             // Split up top-level multi-declaration variable statements
-            for (const decl of s.decls) {
+            for (let $i23 = 0, $a23 = s.decls; $i23 < $a23.length; $i23++) {
+              const decl = $a23[$i23];
               const clone = new SLocal([decl], s.kind, s.isExport, s.wasTSImportEquals);
               parts = p.appendPart(parts, [new Stmt(clone, stmt.loc)]);
             }
@@ -857,7 +862,8 @@ export const coreMethods = {
             }
 
             if (s.items !== null) {
-              for (const item of s.items) {
+              for (let $i24 = 0, $a24 = s.items; $i24 < $a24.length; $i24++) {
+                const item = $a24[$i24];
                 p.namedImports.set(item.name.ref, new NamedImport(item.alias, [], item.aliasLoc, s.namespaceRef, s.importRecordIndex));
               }
             }
@@ -870,7 +876,8 @@ export const coreMethods = {
           if (s.defaultName !== null) {
             record.flags |= ContainsDefaultAlias;
           } else if (s.items !== null) {
-            for (const item of s.items) {
+            for (let $i25 = 0, $a25 = s.items; $i25 < $a25.length; $i25++) {
+              const item = $a25[$i25];
               if (item.alias === "default") record.flags |= ContainsDefaultAlias;
               else if (item.alias === "__esModule") record.flags |= ContainsESModuleAlias;
             }
@@ -925,7 +932,8 @@ export const coreMethods = {
           const record = p.importRecords[s.importRecordIndex];
           p.currentPart.importRecordIndices.push(s.importRecordIndex);
 
-          for (const item of s.items) {
+          for (let $i26 = 0, $a26 = s.items; $i26 < $a26.length; $i26++) {
+            const item = $a26[$i26];
             // Note that the imported alias is not item.Alias, which is the
             // exported alias.
             p.namedImports.set(item.name.ref, new NamedImport(item.originalName, [], item.name.loc, s.namespaceRef, s.importRecordIndex, false, true));
@@ -1072,7 +1080,8 @@ export const coreMethods = {
         if (p.options.jsx.automaticRuntime) {
           p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
         } else {
-          const [expr] = parseDefineExpr(jsxFactory.text);
+          const $d67 = parseDefineExpr(jsxFactory.text);
+          const expr = $d67[0];
           if (expr.parts !== null && expr.parts.length > 0) p.options.jsx.factory = expr;
           else p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
         }
@@ -1083,7 +1092,8 @@ export const coreMethods = {
         if (p.options.jsx.automaticRuntime) {
           p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
         } else {
-          const [expr] = parseDefineExpr(jsxFragment.text);
+          const $d68 = parseDefineExpr(jsxFragment.text);
+          const expr = $d68[0];
           if ((expr.parts !== null && expr.parts.length > 0) || expr.constant !== null) p.options.jsx.fragment = expr;
           else p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
         }
@@ -1258,9 +1268,11 @@ export const coreMethods = {
 
     // Do a second pass for exported items now that imported items are filled out
     for (const part of parts) {
-      for (const stmt of part.stmts) {
+      for (let $i27 = 0, $a27 = part.stmts; $i27 < $a27.length; $i27++) {
+        const stmt = $a27[$i27];
         if (stmt.data.k === S_EXPORT_CLAUSE) {
-          for (const item of stmt.data.items) {
+          for (let $i28 = 0, $a28 = stmt.data.items; $i28 < $a28.length; $i28++) {
+            const item = $a28[$i28];
             // Mark re-exported imports as such
             const namedImport = p.namedImports.get(item.name.ref);
             if (namedImport !== undefined) {

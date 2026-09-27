@@ -4,14 +4,18 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as acorn from "../vendor/acorn.mjs";
+// reference: acorn 8.18 from node_modules. (Not ../vendor/acorn.mjs: its
+// Parser.parseExpressionAt is the fast path once ../index.mjs is loaded.)
+import * as acorn from "acorn";
+import * as V from "../vendor/acorn.mjs";
 import { fastParseExpressionAt } from "../parser.mjs";
 import * as fastIndex from "../index.mjs";
+import { idSer } from "./idser.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const limit = Number(args.includes("--limit") ? args[args.indexOf("--limit") + 1] : Infinity);
-const getOptions = acorn._getOptions;
+const getOptions = V._getOptions;
 const files = [];
 (function walk(d) {
   let es;
@@ -39,14 +43,14 @@ for (const file of files) {
     const pos = positions[i];
     const opts = { ecmaVersion: "latest", sourceType, locations: (idx++ & 1) === 0 };
     let a, aErr = null;
-    try { a = JSON.stringify(acorn.Parser.parseExpressionAt(code, pos, opts), replacer); } catch (e) { aErr = e; }
+    try { a = idSer(acorn.Parser.parseExpressionAt(code, pos, opts)); } catch (e) { aErr = e; }
     let b, bErr = null;
-    try { b = JSON.stringify(fastParseExpressionAt(code, pos, getOptions(opts)), replacer); } catch (e) { bErr = e; }
+    try { b = idSer(fastParseExpressionAt(code, pos, getOptions(opts))); } catch (e) { bErr = e; }
     if (aErr) { if (bErr) bothFail++; else { falseAccept++; if (falseAccept < 6) console.log("FALSE-ACCEPT", file, pos, aErr.message); } continue; }
     if (bErr) { bail++; continue; }
     if (a !== b) { mismatch++; if (mismatch < 6) console.log("MISMATCH", file, pos); continue; }
     // also through the public entry point (must agree with acorn, via fast path or fallback)
-    const c = JSON.stringify(fastIndex.parseExpressionAt(code, pos, opts), replacer);
+    const c = idSer(fastIndex.parseExpressionAt(code, pos, opts));
     if (c !== a) { mismatch++; if (mismatch < 6) console.log("INDEX-MISMATCH", file, pos); continue; }
     ok++;
   }

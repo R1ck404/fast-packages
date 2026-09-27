@@ -324,20 +324,39 @@ let utf8Decoder = null;
 // Parsed options per distinct flag list. validateDefines/processDefines are
 // expensive (they rebuild the ~800 known-global defines) and their results are
 // read-only afterwards, so they are shared between calls with the same flags.
-const configCache = new Map();
-function cachedConfigFromFlags(flags, input) {
+//
+// The cached config.Options object itself is handed to transformBundle with
+// the input in "stdin" (set by fastTransform and reset afterwards): the first
+// thing the bundler does is to make its own copy (bundler.scanBundle), so the
+// cached object is never mutated otherwise.
+const configCache = new Map(); // key -> {options, stdinTemplate}
+let lastFlags = null; // (the flags and entry of the previous call)
+let lastEntry = null;
+function cachedConfigFromFlags(flags) {
+  // Consecutive calls usually use the same options
+  if (lastFlags !== null && lastFlags.length === flags.length) {
+    let same = true;
+    for (let i = 0; i < flags.length; i++) {
+      if (flags[i] !== lastFlags[i]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return lastEntry;
+  }
   // (Flag values may contain newlines, e.g. a JSONC "--tsconfig-raw=" with a
   // block comment, so joining with a separator would be ambiguous)
   const key = JSON.stringify(flags);
-  let cached = configCache.get(key);
-  if (cached === undefined) {
-    cached = configFromFlags(flags, "");
+  let entry = configCache.get(key);
+  if (entry === undefined) {
+    const options = configFromFlags(flags, "");
+    entry = { options, stdinTemplate: options.stdin };
     if (configCache.size >= 64) configCache.clear();
-    configCache.set(key, cached);
+    configCache.set(key, entry);
   }
-  const options = Object.assign(new Options(), cached);
-  options.stdin = new StdinInfo(input, cached.stdin.sourceFile, "", cached.stdin.loader);
-  return options;
+  lastFlags = flags.slice();
+  lastEntry = entry;
+  return entry;
 }
 
 // Returns the Go service's transform response, or undefined to fall back.
@@ -361,8 +380,17 @@ export function fastTransform(flags, input, mangleCache) {
         break;
       }
     }
-    const options = cachedConfigFromFlags(flags, input);
-    const result = transformBundle(options, new Log());
+    const entry = cachedConfigFromFlags(flags);
+    const options = entry.options;
+    const stdin = entry.stdinTemplate;
+    options.stdin = new StdinInfo(input, stdin.sourceFile, "", stdin.loader);
+    let result;
+    try {
+      result = transformBundle(options, new Log());
+    } finally {
+      // (don't keep the input alive)
+      options.stdin = stdin;
+    }
     let code = result.code;
     // The glue decodes response strings with a default TextDecoder, which
     // drops a leading BOM.

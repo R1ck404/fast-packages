@@ -271,7 +271,8 @@ export class SourceMapPieces {
       const potentialEndOfRun = current;
 
       // Read the generated column
-      const [generatedColumnDelta, next] = decodeVLQ(mappings, current);
+      const $d230 = decodeVLQ(mappings, current);
+      const generatedColumnDelta = $d230[0], next = $d230[1];
       generated.columns += generatedColumnDelta;
       current = next;
 
@@ -429,7 +430,8 @@ export function appendSourceMapChunk(j, prevEndState, startState, buffer) {
   let originalLine = 0;
   let originalColumn = 0;
   let omitSource = false;
-  let [generatedColumn, i] = decodeVLQ(data, semicolons);
+  const $d231 = decodeVLQ(data, semicolons);
+  let generatedColumn = $d231[0], i = $d231[1];
   if (i === data.length || data.charCodeAt(i) === 44 /* ',' */ || data.charCodeAt(i) === 59 /* ';' */) {
     omitSource = true;
   } else {
@@ -453,7 +455,8 @@ export function appendSourceMapChunk(j, prevEndState, startState, buffer) {
   // relative to that of the previous chunk.
   if (buffer.firstNameOffset >= 0) {
     const before = buffer.firstNameOffset;
-    let [originalName, after] = decodeVLQ(data, before);
+    const $d232 = decodeVLQ(data, before);
+    let originalName = $d232[0], after = $d232[1];
     originalName += startState.originalName - prevEndState.originalName;
     j.addBytes(data.slice(i, before));
     j.addBytes(encodeVLQ("", originalName));
@@ -535,6 +538,31 @@ function writeVLQ(buf, pos, value) {
 
 let asciiDecoder = null;
 
+// The length in bytes of the rune starting at output[i] (utf8.DecodeRune:
+// an invalid sequence is a single byte)
+function utf8RuneSize(p, i, n) {
+  const b0 = p[i];
+  if (b0 < 0x80) return 1;
+  if (b0 >= 0xc2 && b0 <= 0xdf) {
+    return i + 1 < n && (p[i + 1] & 0xc0) === 0x80 ? 2 : 1;
+  }
+  if (b0 >= 0xe0 && b0 <= 0xef) {
+    if (i + 2 >= n) return 1;
+    const b1 = p[i + 1];
+    const lo = b0 === 0xe0 ? 0xa0 : 0x80;
+    const hi = b0 === 0xed ? 0x9f : 0xbf;
+    return b1 >= lo && b1 <= hi && (p[i + 2] & 0xc0) === 0x80 ? 3 : 1;
+  }
+  if (b0 >= 0xf0 && b0 <= 0xf4) {
+    if (i + 3 >= n) return 1;
+    const b1 = p[i + 1];
+    const lo = b0 === 0xf0 ? 0x90 : 0x80;
+    const hi = b0 === 0xf4 ? 0x8f : 0xbf;
+    return b1 >= lo && b1 <= hi && (p[i + 2] & 0xc0) === 0x80 && (p[i + 3] & 0xc0) === 0x80 ? 4 : 1;
+  }
+  return 1;
+}
+
 // Line terminators other than "\n"
 const otherLineTerminators = new RegExp("[\\r" + String.fromCharCode(0x2028, 0x2029) + "]");
 
@@ -579,32 +607,109 @@ export function generateLineOffsetTables(contents, approximateLineCount) {
   return starts.subarray(0, count);
 }
 
-// helpers.QuoteForJSON(text, asciiOnly) for long texts (the source contents).
-// JSON.stringify escapes exactly the same characters as Go when asciiOnly is
-// false (except U+FEFF), and the same characters except the non-ASCII ones
-// when asciiOnly is true, in both cases with the same escape sequences except
-// that "\u00XX" escapes use lowercase hex digits. So the result of
-// JSON.stringify is used unless the text contains a control character with a
-// hex letter in its escape or a lone surrogate, and the remaining escapes are
-// added (non-ASCII characters in the JSON.stringify output are never part of
-// an escape sequence, so they can be replaced safely).
-const controlCharsWithHexLetters = /[\x0b\x0e\x0f\x1a-\x1f]/;
-const nonASCIIChars = new RegExp("[" + String.fromCharCode(0x7f) + "-" + String.fromCharCode(0xffff) + "]", "g");
-const byteOrderMarks = new RegExp(String.fromCharCode(0xfeff), "g");
-const hexDigits = "0123456789ABCDEF";
-function escapeUTF16CodeUnit(c) {
-  const code = c.charCodeAt(0);
-  return "\\" + "u" + hexDigits[code >> 12] + hexDigits[(code >> 8) & 15] + hexDigits[(code >> 4) & 15] + hexDigits[code & 15];
-}
+// helpers.QuoteForJSON(text, asciiOnly) for long texts (the source contents):
+// the same escapes as helpers.quoteForJSON (Go's internalQuote with '"'), but
+// written as UTF-8 bytes into a reused buffer and decoded once, which is much
+// faster than building a string for large (in particular two-byte) texts.
+let quoteBuffer = null;
+const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+const hexDigitCodes = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 65, 66, 67, 68, 69, 70]; // "0123456789ABCDEF"
 export function quoteForJSONLong(text, asciiOnly) {
-  if (controlCharsWithHexLetters.test(text) || !text.isWellFormed()) {
-    return quoteForJSON(text, asciiOnly);
+  const n = text.length;
+  let buf = quoteBuffer;
+  // (Grown below when needed: an escape is at most 12 bytes per code unit pair)
+  if (buf === null || buf.length < n + 64) buf = new Uint8Array(Math.max(1 << 16, n + (n >> 3) + 64));
+  let cap = buf.length - 16;
+  let len = 0;
+  buf[len++] = 34; // '"'
+  for (let i = 0; i < n; i++) {
+    if (len > cap) {
+      const grown = new Uint8Array(buf.length * 2);
+      grown.set(buf.subarray(0, len));
+      buf = grown;
+      cap = buf.length - 16;
+    }
+    const c = text.charCodeAt(i);
+
+    // canPrintWithoutEscape: printable ASCII other than '\\' and '"'
+    if (c >= 0x20 && c <= 0x7e) {
+      if (c === 92 || c === 34) {
+        buf[len++] = 92;
+      }
+      buf[len++] = c;
+      continue;
+    }
+
+    // canPrintWithoutEscape: non-ASCII other than U+FEFF and surrogates (a
+    // surrogate pair is a code point above 0xFFFF, which is printed too)
+    if (c >= 0x7f && !asciiOnly && c !== 0xfeff) {
+      if (c < 0x80) {
+        buf[len++] = c;
+        continue;
+      }
+      if (c < 0x800) {
+        buf[len++] = 0xc0 | (c >> 6);
+        buf[len++] = 0x80 | (c & 63);
+        continue;
+      }
+      if (c < 0xd800 || c > 0xdfff) {
+        buf[len++] = 0xe0 | (c >> 12);
+        buf[len++] = 0x80 | ((c >> 6) & 63);
+        buf[len++] = 0x80 | (c & 63);
+        continue;
+      }
+      if (c <= 0xdbff && i + 1 < n) {
+        const c2 = text.charCodeAt(i + 1);
+        if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+          const r = ((c - 0xd800) << 10) + (c2 - 0xdc00) + 0x10000;
+          buf[len++] = 0xf0 | (r >> 18);
+          buf[len++] = 0x80 | ((r >> 12) & 63);
+          buf[len++] = 0x80 | ((r >> 6) & 63);
+          buf[len++] = 0x80 | (r & 63);
+          i++;
+          continue;
+        }
+      }
+      // (a lone surrogate is escaped below)
+    }
+
+    switch (c) {
+      case 8:
+        buf[len++] = 92;
+        buf[len++] = 98; // "\\b"
+        continue;
+      case 12:
+        buf[len++] = 92;
+        buf[len++] = 102; // "\\f"
+        continue;
+      case 10:
+        buf[len++] = 92;
+        buf[len++] = 110; // "\\n"
+        continue;
+      case 13:
+        buf[len++] = 92;
+        buf[len++] = 114; // "\\r"
+        continue;
+      case 9:
+        buf[len++] = 92;
+        buf[len++] = 116; // "\\t"
+        continue;
+    }
+
+    // "\\uXXXX" (a surrogate pair with asciiOnly becomes two of these, like
+    // Go's UTF-16 encoding of code points above 0xFFFF)
+    buf[len++] = 92;
+    buf[len++] = 117;
+    buf[len++] = hexDigitCodes[c >> 12];
+    buf[len++] = hexDigitCodes[(c >> 8) & 15];
+    buf[len++] = hexDigitCodes[(c >> 4) & 15];
+    buf[len++] = hexDigitCodes[c & 15];
   }
-  const quoted = JSON.stringify(text);
-  if (asciiOnly) {
-    return quoted.replace(nonASCIIChars, escapeUTF16CodeUnit);
-  }
-  return quoted.replace(byteOrderMarks, escapeUTF16CodeUnit);
+  buf[len++] = 34; // '"'
+  const quoted = utf8Decoder.decode(buf.subarray(0, len));
+  // (Keep a moderately sized buffer for the next call)
+  quoteBuffer = buf.length <= 1 << 20 ? buf : null;
+  return quoted;
 }
 
 export class MappingsBuffer {
@@ -785,12 +890,25 @@ export class ChunkBuilder {
   }
 
   // Scan over the printed text since the last source mapping and update the
-  // generated line and column numbers
+  // generated line and column numbers. "output" holds UTF-8 bytes (Go ranges
+  // over the runes of string(output[...]); an invalid byte is one U+FFFD).
   updateGeneratedLineAndColumn(output, outputLen) {
     const b = this;
     let generatedColumn = b.generatedColumn;
     for (let i = b.lastGeneratedUpdate; i < outputLen; i++) {
-      const c = output[i];
+      let c = output[i];
+      if (c >= 0x80) {
+        // Decode the rune (only U+2028/U+2029 and the UTF-16 length matter)
+        const size = utf8RuneSize(output, i, outputLen);
+        if (size === 3 && c === 0xe2 && output[i + 1] === 0x80 && (output[i + 2] === 0xa8 || output[i + 2] === 0xa9)) {
+          c = output[i + 2] === 0xa8 ? 0x2028 : 0x2029;
+        } else {
+          // Mozilla's "source-map" library counts columns using UTF-16 code units
+          generatedColumn += size === 4 ? 2 : 1;
+        }
+        i += size - 1;
+        if (c < 0x2028) continue;
+      }
       if (c === 13 || c === 10 || c === 0x2028 || c === 0x2029) {
         // Handle Windows-specific "\r\n" newlines
         if (c === 13) {

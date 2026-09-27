@@ -1,5 +1,5 @@
 // pako benchmark. Usage: node bench/pako.bench.mjs <impl>
-//   impl: pako (2.1.0, what Nodepod ships) | pako3 | fflate (reference) | fast
+//   impl: pako (2.1.0, what Nodepod ships) | pako3 | fflate (reference) | fast | prev (snapshot)
 import { runSuite } from "./harness.mjs";
 import { loadJs, tarballs, randomBytes, jsonText, utf8, read } from "./corpus.mjs";
 
@@ -34,6 +34,7 @@ async function loadImpl(name) {
     };
   }
   if (name === "fast") return (await import("../fast-pako/index.mjs")).default;
+  if (name === "prev") return (await import("../.scratch/prev/fast-pako/index.mjs")).default;
   if (name.startsWith("fast:")) return (await import(`../fast-pako/${name.slice(5)}`)).default;
   throw new Error("unknown impl " + name);
 }
@@ -127,6 +128,38 @@ if (pako.Inflate) {
       return def.result;
     },
   });
+}
+
+// ---- Nodepod memory-volume packing / reading patterns and small one-shots
+{
+  // ~128KB group of small files joined (PACK_CHUNK_BYTES), deflateRaw level 1
+  const group = utf8(js.filter((f) => !f.name.includes("9MB")).map((f) => f.code.slice(0, 20000)).join("\n")).subarray(0, 128 * 1024);
+  cases.push({ name: "deflateRaw L1 group 128KB", bytes: group.length, fn: () => pako.deflateRaw(group, { level: 1 }) });
+  const g1 = ref.deflateRaw(group, { level: 1 });
+  cases.push({ name: "inflateRaw(L1) group 128KB", bytes: group.length, fn: () => pako.inflateRaw(g1) });
+  const g6 = ref.deflateRaw(group);
+  cases.push({ name: "inflateRaw(L6) group 128KB", bytes: group.length, fn: () => pako.inflateRaw(g6) });
+  // solo file: Deflate({ level: 1, raw: true }) pushed in 256KB pieces
+  cases.push({
+    name: "Deflate L1 raw 256KB pushes js 1MB",
+    bytes: reactDev.length,
+    fn: () => {
+      const d = new pako.Deflate({ level: 1, raw: true });
+      const PIECE = 256 * 1024;
+      for (let o = 0; o < reactDev.length; o += PIECE) {
+        const e = Math.min(reactDev.length, o + PIECE);
+        d.push(reactDev.subarray(o, e), e === reactDev.length);
+      }
+      return d.result;
+    },
+  });
+  const small = text1k.subarray(0, 300);
+  cases.push({ name: "deflateRaw L1 300B", bytes: small.length, fn: () => pako.deflateRaw(small, { level: 1 }) });
+  const smallZ = ref.deflateRaw(small, { level: 1 });
+  cases.push({ name: "inflateRaw 300B", bytes: small.length, fn: () => pako.inflateRaw(smallZ) });
+  const smallG = ref.gzip(small);
+  cases.push({ name: "ungzip 300B", bytes: small.length, fn: () => pako.ungzip(smallG) });
+  cases.push({ name: "gzip 300B", bytes: small.length, fn: () => pako.gzip(small) });
 }
 
 await runSuite(impl, cases, { maxTimeMs: Number(process.env.BENCH_TIME || 1500) });

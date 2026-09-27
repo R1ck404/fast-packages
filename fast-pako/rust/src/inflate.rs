@@ -2,13 +2,23 @@
 // case-for-case identical, including pako quirks (dmax = 1 << wbits for zlib
 // streams, and updatewindow() never re-initializing wsize after
 // inflateReset). The inner decode loop is a new implementation: 64-bit bit
-// buffer with branchless refill, 8/16-byte match copies. At every point where
+// buffer with branchless refill, 16-byte match copies. At every point where
 // control returns to the slow path the bit buffer is canonical (fewer than 8
 // bits held, unused whole bytes given back), which is exactly the state the
 // original produces, so all externally visible state matches.
+//
+// Only one decode table per code is built (fasttab.rs); zlib's own tables
+// for literal/length and distance codes are not: inflate_table()'s accept/
+// reject rules are applied to the code lengths (code_ok), and the slow path
+// decodes from the fast table with zlib's pull/drop behaviour (a code whose
+// length fits the held bits is determined by them, so the number of bytes
+// pulled only depends on the code length; invalid entries carry the length
+// zlib's table gives them). One-shot sessions (contiguous output) also skip
+// the window copies (the window is the output right before the current
+// position) and compute each member's check value at its CHECK state.
 
 use crate::checksum::{adler32, crc32};
-use crate::inftrees::{inflate_table, CODES, DISTS, LENS};
+use crate::inftrees::{code_ok, inflate_table, CODES, DISTS, LENS};
 
 pub const Z_NO_FLUSH: i32 = 0;
 pub const Z_FINISH: i32 = 4;
@@ -78,12 +88,37 @@ pub const M_TOO_FAR: u8 = 16;
 pub const M_DATA_CHECK: u8 = 17;
 pub const M_LENGTH_CHECK: u8 = 18;
 
-const LENBITS: u32 = 10;
-const DISTBITS: u32 = 8;
-const LEN_TABLE: usize = 4096;
-const DIST_TABLE: usize = 2048;
+
+
+/// code-length code table (zlib inflate_table, 7-bit root, no subtables)
+const LEN_TABLE: usize = 128;
+
 
 static ORDER: [u8; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+use crate::fasttab::{EOB as EOB_F, EXC as EXC_F, LIT as LIT_F, SUB as SUB_F};
+const LMASK: u64 = (1 << crate::fasttab::LBITS) - 1;
+const DMASK: u64 = (1 << crate::fasttab::DBITS) - 1;
+
+/// bits of the code (not its extra bits) a literal/length table entry needs
+#[inline(always)]
+fn lneed(e: u32) -> u32 {
+    if e & (LIT_F | EXC_F) != 0 {
+        e & 0xff
+    } else {
+        (e >> 8) & 0xf
+    }
+}
+
+/// same for a distance table entry
+#[inline(always)]
+fn dneed(e: u32) -> u32 {
+    if e & EXC_F != 0 {
+        e & 0xff
+    } else {
+        (e >> 8) & 0xf
+    }
+}
 
 pub struct Head {
     pub active: bool,
@@ -119,60 +154,17 @@ impl Head {
     }
 }
 
-struct Fixed {
-    len: [u32; 512],
-    dist: [u32; 32],
-}
+static mut FIXED_FAST: Option<Box<[u32; crate::fasttab::TSIZE]>> = None;
 
-static mut FIXED: Option<Box<Fixed>> = None;
-
-#[allow(static_mut_refs)]
-fn fixed() -> &'static Fixed {
-    unsafe {
-        if FIXED.is_none() {
-            let mut lens = [0u16; 320];
-            let mut work = [0u16; 288];
-            let mut f = Box::new(Fixed { len: [0; 512], dist: [0; 32] });
-            let mut sym = 0;
-            while sym < 144 {
-                lens[sym] = 8;
-                sym += 1;
-            }
-            while sym < 256 {
-                lens[sym] = 9;
-                sym += 1;
-            }
-            while sym < 280 {
-                lens[sym] = 7;
-                sym += 1;
-            }
-            while sym < 288 {
-                lens[sym] = 8;
-                sym += 1;
-            }
-            let mut b = 9;
-            inflate_table(LENS, &lens, 288, &mut f.len, &mut work, &mut b);
-            for s in 0..32 {
-                lens[s] = 5;
-            }
-            let mut b = 5;
-            inflate_table(DISTS, &lens, 32, &mut f.dist, &mut work, &mut b);
-            FIXED = Some(f);
-        }
-        FIXED.as_ref().unwrap()
-    }
-}
-
-static mut FIXED_FAST: Option<Box<([u32; crate::fasttab::LSIZE], [u32; crate::fasttab::DSIZE])>> = None;
-
+/// fast tables for the fixed code (literal/length at 0, distance at LSIZE)
 #[allow(static_mut_refs)]
 #[inline(always)]
-fn fixed_fast() -> &'static ([u32; crate::fasttab::LSIZE], [u32; crate::fasttab::DSIZE]) {
+fn fixed_fast() -> *const u32 {
     unsafe {
         if FIXED_FAST.is_none() {
             init_fixed_fast();
         }
-        FIXED_FAST.as_ref().unwrap()
+        FIXED_FAST.as_ref().unwrap().as_ptr()
     }
 }
 
@@ -186,10 +178,10 @@ fn init_fixed_fast() {
             for (i, l) in lens.iter_mut().enumerate() {
                 *l = if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 };
             }
-            let mut t = Box::new(([0u32; crate::fasttab::LSIZE], [0u32; crate::fasttab::DSIZE]));
-            crate::fasttab::build(&lens, 288, true, &mut t.0);
+            let mut t = Box::new([0u32; crate::fasttab::TSIZE]);
+            crate::fasttab::build(&lens, 288, &crate::fasttab::count_lens(&lens), true, &mut t[..crate::fasttab::LSIZE]);
             let d = [5u16; 32];
-            crate::fasttab::build(&d, 32, false, &mut t.1);
+            crate::fasttab::build(&d, 32, &crate::fasttab::count_lens(&d), false, &mut t[crate::fasttab::LSIZE..]);
             FIXED_FAST = Some(t);
         }
     }
@@ -246,10 +238,14 @@ pub struct Inflate {
     lens: [u16; 320],
     work: [u16; 288],
     lendyn: Box<[u32; LEN_TABLE]>,
-    flit: Box<[u32; crate::fasttab::LSIZE]>,
-    fdist: Box<[u32; crate::fasttab::DSIZE]>,
+    ftab: Box<[u32; crate::fasttab::TSIZE]>,
     pub contiguous: bool,
-    distdyn: Box<[u32; DIST_TABLE]>,
+    /// one-shot: the check value of a member is computed at its CHECK state
+    /// over the (contiguous) output instead of per call (not observable)
+    pub defer_check: bool,
+    /// start of the session output buffer (offsets survive reallocation)
+    pub out_base: *const u8,
+    chk_off: usize,
     sane: bool,
     back: i32,
     was: u32,
@@ -300,10 +296,11 @@ impl Inflate {
             lens: [0; 320],
             work: [0; 288],
             lendyn: Box::new([0; LEN_TABLE]),
-            flit: Box::new([0; crate::fasttab::LSIZE]),
-            fdist: Box::new([0; crate::fasttab::DSIZE]),
+            ftab: Box::new([0; crate::fasttab::TSIZE]),
             contiguous: false,
-            distdyn: Box::new([0; DIST_TABLE]),
+            defer_check: false,
+            out_base: core::ptr::null(),
+            chk_off: 0,
             sane: true,
             back: 0,
             was: 0,
@@ -427,11 +424,34 @@ impl Inflate {
             let need = self.wsize;
             match &mut self.window {
                 Some(w) if w.len() >= need => {}
-                _ => self.window = Some(vec![0u8; core::cmp::max(need, 1 << 15)]),
+                _ => self.window = Some(vec![0u8; core::cmp::max(need, 1 << 15) + 16]), // +16: vector copies read past
             }
             self.win_present = true;
         }
         let wsize = self.wsize;
+        if self.contiguous {
+            // the window bytes are the output right before the current
+            // position; only the bookkeeping is needed
+            if copy >= wsize {
+                self.wnext = 0;
+                self.whave = wsize;
+            } else {
+                let dist = core::cmp::min(wsize - self.wnext, copy);
+                if copy - dist != 0 {
+                    self.wnext = copy - dist;
+                    self.whave = wsize;
+                } else {
+                    self.wnext += dist;
+                    if self.wnext == wsize {
+                        self.wnext = 0;
+                    }
+                    if self.whave < wsize {
+                        self.whave += dist;
+                    }
+                }
+            }
+            return;
+        }
         let win = self.window.as_mut().unwrap();
         unsafe {
             if copy >= wsize {
@@ -491,22 +511,21 @@ impl Inflate {
         Z_OK
     }
 
+    /// fast decode tables of the current block (literal/length at 0,
+    /// distance at LSIZE)
     #[inline(always)]
-    fn lcode(&self) -> *const u32 {
+    fn fast_tab(&self) -> *const u32 {
         if self.use_fixed {
-            fixed().len.as_ptr()
+            fixed_fast()
         } else {
-            self.lendyn.as_ptr()
+            self.ftab.as_ptr()
         }
     }
 
-    #[inline(always)]
-    fn dcode(&self) -> *const u32 {
-        if self.use_fixed {
-            fixed().dist.as_ptr()
-        } else {
-            self.distdyn.as_ptr()
-        }
+    fn check_span(&mut self, p: *const u8, len: usize) {
+        let data = unsafe { core::slice::from_raw_parts(p, len) };
+        self.check = if self.flags != 0 { crc32(self.check, data) } else { adler32(self.check, data) };
+        self.adler = self.check;
     }
 
     fn check_update(&mut self, from: usize, len: usize) {
@@ -573,6 +592,13 @@ impl Inflate {
                 self.check = crc32(self.check, &hbuf[..2]);
             }};
         }
+        macro_rules! mark_check {
+            () => {{
+                if self.defer_check {
+                    self.chk_off = (output as usize + put) - self.out_base as usize;
+                }
+            }};
+        }
         macro_rules! bad {
             ($m:expr) => {{
                 self.msg = $m;
@@ -622,6 +648,7 @@ impl Inflate {
                     self.flags = 0;
                     self.check = 1;
                     self.adler = 1;
+                    mark_check!();
                     self.mode = if hold & 0x200 != 0 { DICTID } else { TYPE };
                     initbits!();
                 }
@@ -818,6 +845,7 @@ impl Inflate {
                     }
                     self.check = 0;
                     self.adler = 0;
+                    mark_check!();
                     self.mode = TYPE;
                 }
                 DICTID => {
@@ -839,6 +867,7 @@ impl Inflate {
                     }
                     self.check = 1;
                     self.adler = 1;
+                    mark_check!();
                     self.mode = TYPE;
                 }
                 TYPE | TYPEDO => {
@@ -1007,29 +1036,27 @@ impl Inflate {
                         bad!(M_MISSING_EOB);
                         continue;
                     }
-                    let mut b = LENBITS;
+                    // zlib's validity rules for the two sets (the tables
+                    // themselves are only built in the fast format)
                     let nlen = self.nlen as usize;
-                    let r = inflate_table(LENS, &self.lens[..], nlen, &mut self.lendyn[..], &mut self.work, &mut b);
-                    self.lenbits = b;
-                    if r != 0 {
+                    let lcount = crate::fasttab::count_lens(&self.lens[..nlen]);
+                    if !code_ok(LENS, &lcount) {
                         bad!(M_INVALID_LITLEN_SET);
                         continue;
                     }
-                    let mut b = DISTBITS;
                     let ndist = self.ndist as usize;
                     let lens_d: [u16; 32] = {
                         let mut t = [0u16; 32];
                         t[..ndist].copy_from_slice(&self.lens[nlen..nlen + ndist]);
                         t
                     };
-                    let r = inflate_table(DISTS, &lens_d, ndist, &mut self.distdyn[..], &mut self.work, &mut b);
-                    self.distbits = b;
-                    if r != 0 {
+                    let dcount = crate::fasttab::count_lens(&lens_d[..ndist]);
+                    if !code_ok(DISTS, &dcount) {
                         bad!(M_INVALID_DIST_SET);
                         continue;
                     }
-                    crate::fasttab::build(&self.lens[..], nlen, true, &mut self.flit[..]);
-                    crate::fasttab::build(&lens_d, ndist, false, &mut self.fdist[..]);
+                    crate::fasttab::build(&self.lens[..], nlen, &lcount, true, &mut self.ftab[..crate::fasttab::LSIZE]);
+                    crate::fasttab::build(&lens_d, ndist, &dcount, false, &mut self.ftab[crate::fasttab::LSIZE..]);
                     self.mode = LEN_;
                     if flush == Z_TREES {
                         break 'inf_leave;
@@ -1064,55 +1091,57 @@ impl Inflate {
                         // the fast loop stopped at a symbol it leaves to the
                         // exact slow path: decode that one symbol below
                     }
+                    // Symbol decoding from the fast table with zlib's exact
+                    // pull/drop behaviour: pull bytes until the code's full
+                    // length is held (a code whose length fits the held bits
+                    // is fully determined by them, so this matches zlib's own
+                    // tables), drop the code bits, then act on the symbol.
+                    // Invalid entries carry the length zlib's table gives them.
                     self.back = 0;
-                    let lcode = self.lcode();
-                    let mut here;
+                    let lt = self.fast_tab();
+                    let mut e;
                     loop {
-                        here = unsafe { *lcode.add((hold & ((1u64 << self.lenbits) - 1)) as usize) };
-                        if (here >> 24) <= bits {
+                        e = unsafe { *lt.add((hold & LMASK) as usize) };
+                        if lneed(e) <= bits {
                             break;
                         }
                         pullbyte!();
                     }
-                    let mut here_bits = here >> 24;
-                    let mut here_op = (here >> 16) & 0xff;
-                    let mut here_val = here & 0xffff;
-                    if here_op != 0 && (here_op & 0xf0) == 0 {
-                        let last_bits = here_bits;
-                        let last_op = here_op;
-                        let last_val = here_val;
+                    if e & (LIT_F | EXC_F | SUB_F) == EXC_F | SUB_F {
+                        let rb = e & 0xff;
+                        let sb = (e >> 8) & 0xf;
+                        let off = ((e >> 16) & 0x7fff) as usize;
+                        let mut e2;
                         loop {
-                            here = unsafe {
-                                *lcode.add(last_val as usize + ((hold & ((1u64 << (last_bits + last_op)) - 1)) >> last_bits) as usize)
-                            };
-                            here_bits = here >> 24;
-                            here_op = (here >> 16) & 0xff;
-                            here_val = here & 0xffff;
-                            if last_bits + here_bits <= bits {
+                            e2 = unsafe { *lt.add(off + ((hold >> rb) & ((1u64 << sb) - 1)) as usize) };
+                            if rb + lneed(e2) <= bits {
                                 break;
                             }
                             pullbyte!();
                         }
-                        dropbits!(last_bits);
-                        self.back += last_bits as i32;
+                        dropbits!(rb);
+                        self.back += rb as i32;
+                        e = e2;
                     }
-                    dropbits!(here_bits);
-                    self.back += here_bits as i32;
-                    self.length = here_val;
-                    if here_op == 0 {
+                    let n = lneed(e);
+                    dropbits!(n);
+                    self.back += n as i32;
+                    if e & LIT_F != 0 {
+                        self.length = (e >> 8) & 0xff;
                         self.mode = LIT;
                         continue;
                     }
-                    if (here_op & 32) != 0 {
-                        self.back = -1;
-                        self.mode = TYPE;
-                        continue;
-                    }
-                    if (here_op & 64) != 0 {
+                    if e & EXC_F != 0 {
+                        if e & EOB_F != 0 {
+                            self.back = -1;
+                            self.mode = TYPE;
+                            continue;
+                        }
                         bad!(M_INVALID_LITLEN_CODE);
                         continue;
                     }
-                    self.extra = here_op & 15;
+                    self.length = e >> 16;
+                    self.extra = (e & 0xff) - n;
                     self.mode = LENEXT;
                 }
                 LENEXT => {
@@ -1126,45 +1155,40 @@ impl Inflate {
                     self.mode = DIST;
                 }
                 DIST => {
-                    let dcode = self.dcode();
-                    let mut here;
+                    let dt = unsafe { self.fast_tab().add(crate::fasttab::LSIZE) };
+                    let mut e;
                     loop {
-                        here = unsafe { *dcode.add((hold & ((1u64 << self.distbits) - 1)) as usize) };
-                        if (here >> 24) <= bits {
+                        e = unsafe { *dt.add((hold & DMASK) as usize) };
+                        if dneed(e) <= bits {
                             break;
                         }
                         pullbyte!();
                     }
-                    let mut here_bits = here >> 24;
-                    let mut here_op = (here >> 16) & 0xff;
-                    let mut here_val = here & 0xffff;
-                    if (here_op & 0xf0) == 0 {
-                        let last_bits = here_bits;
-                        let last_op = here_op;
-                        let last_val = here_val;
+                    if e & (EXC_F | SUB_F) == EXC_F | SUB_F {
+                        let rb = e & 0xff;
+                        let sb = (e >> 8) & 0xf;
+                        let off = ((e >> 16) & 0x7fff) as usize;
+                        let mut e2;
                         loop {
-                            here = unsafe {
-                                *dcode.add(last_val as usize + ((hold & ((1u64 << (last_bits + last_op)) - 1)) >> last_bits) as usize)
-                            };
-                            here_bits = here >> 24;
-                            here_op = (here >> 16) & 0xff;
-                            here_val = here & 0xffff;
-                            if last_bits + here_bits <= bits {
+                            e2 = unsafe { *dt.add(off + ((hold >> rb) & ((1u64 << sb) - 1)) as usize) };
+                            if rb + dneed(e2) <= bits {
                                 break;
                             }
                             pullbyte!();
                         }
-                        dropbits!(last_bits);
-                        self.back += last_bits as i32;
+                        dropbits!(rb);
+                        self.back += rb as i32;
+                        e = e2;
                     }
-                    dropbits!(here_bits);
-                    self.back += here_bits as i32;
-                    if (here_op & 64) != 0 {
+                    let n = dneed(e);
+                    dropbits!(n);
+                    self.back += n as i32;
+                    if e & EXC_F != 0 {
                         bad!(M_INVALID_DIST_CODE);
                         continue;
                     }
-                    self.offset = here_val;
-                    self.extra = here_op & 15;
+                    self.offset = e >> 16;
+                    self.extra = (e & 0xff) - n;
                     self.mode = DISTEXT;
                 }
                 DISTEXT => {
@@ -1191,6 +1215,26 @@ impl Inflate {
                         copy = self.offset as usize - copy;
                         if copy > self.whave && self.sane {
                             bad!(M_TOO_FAR);
+                            continue;
+                        }
+                        if self.contiguous {
+                            // the window bytes precede the output: copy the
+                            // whole (possibly overlapping) match in one go;
+                            // the end state equals zlib's piecewise copy
+                            let n = core::cmp::min(self.length as usize, left);
+                            left -= n;
+                            self.length -= n as u32;
+                            unsafe {
+                                let d = output.add(put);
+                                let s = d.sub(self.offset as usize);
+                                for i in 0..n {
+                                    *d.add(i) = *s.add(i);
+                                }
+                            }
+                            put += n;
+                            if self.length == 0 {
+                                self.mode = LEN;
+                            }
                             continue;
                         }
                         if copy > self.wnext {
@@ -1248,8 +1292,16 @@ impl Inflate {
                         out0 -= left;
                         self.total_out += out0 as u64;
                         self.total += out0 as u64;
-                        if (self.wrap & 4) != 0 && out0 != 0 {
-                            self.check_update(put - out0, out0);
+                        if (self.wrap & 4) != 0 {
+                            if self.defer_check {
+                                let start = self.out_base as usize + self.chk_off;
+                                let end = output as usize + put;
+                                if end > start {
+                                    self.check_span(start as *const u8, end - start);
+                                }
+                            } else if out0 != 0 {
+                                self.check_update(put - out0, out0);
+                            }
                         }
                         out0 = left;
                         let h = hold as u32;
@@ -1305,7 +1357,7 @@ impl Inflate {
         self.total_in += in_used as u64;
         self.total_out += out_used as u64;
         self.total += out_used as u64;
-        if (self.wrap & 4) != 0 && out_used != 0 {
+        if (self.wrap & 4) != 0 && out_used != 0 && !self.defer_check {
             let from = self.next_out - out_used;
             self.check_update(from, out_used);
         }
@@ -1327,63 +1379,71 @@ impl Inflate {
     /// canonical bit buffer, exactly where zlib's slow path would stand.
     /// Reads may run up to 8 bytes past the input (the session buffers carry
     /// slack); only bits from real input are ever consumed.
+    ///
+    /// Written to keep few values live (V8 has ~10 usable registers): plain
+    /// pointers, one table base, and in the match path the bit count is only
+    /// committed at the end so a bail-out needs just the saved `hold`.
     #[inline(never)]
     unsafe fn inflate_fast(&mut self, start: usize) -> bool {
-        use crate::fasttab::{DBITS, EOB, EXC, LBITS, LIT, SUB};
-        let input = self.input;
-        let mut inp = self.next_in;
-        let in_last = self.next_in + self.avail_in - 16;
-        let output = self.output;
-        let mut out = self.next_out;
-        let beg = out - (start - self.avail_out);
-        let out_last = out + self.avail_out - (258 + 40);
+        use crate::fasttab::{DBITS, EOB, EXC, LBITS, LIT, LSIZE, SUB};
+        let in0 = self.input.add(self.next_in);
+        let mut ip = in0;
+        // at every loop check bits is in 56..=63, so "at least 16 unread
+        // input bytes" (ip - bits/8 < end - 16) is ip < end - 9
+        let ip_lim = in0.add(self.avail_in - 9);
+        let out0 = self.output.add(self.next_out);
+        let mut op = out0;
+        let op_lim = out0.add(self.avail_out - (258 + 40));
         let dmax = self.dmax as usize;
-        let whave = self.whave;
-        let contiguous = self.contiguous;
+        // Matches are copied straight from the output buffer when valid
+        // (dist <= produced-in-this-call + whave, zlib's rule) and the
+        // source bytes are in this buffer: with contiguous output all of the
+        // window is right before `beg`; otherwise only the current chunk
+        // (from self.output) is, and older bytes come from the window.
+        // op - reach_base = min(produced + whave, op - lin_base).
+        let beg = out0 as usize - (start - self.avail_out);
+        let reach_base = if self.contiguous {
+            beg - self.whave
+        } else {
+            core::cmp::max(beg.saturating_sub(self.whave), self.output as usize)
+        };
         let mut bailed = false;
         let mut hold = self.hold;
         let mut bits = self.bits as u64;
-        let (lt, dt) = if self.use_fixed {
-            let f = fixed_fast();
-            (f.0.as_ptr(), f.1.as_ptr())
-        } else {
-            (self.flit.as_ptr(), self.fdist.as_ptr())
-        };
+        let lt = if self.use_fixed { fixed_fast() } else { self.ftab.as_ptr() };
+        let dt = lt.add(LSIZE);
         const LMASK: u64 = (1 << LBITS) - 1;
         const DMASK: u64 = (1 << DBITS) - 1;
 
         macro_rules! refill {
             () => {{
-                hold |= (input.add(inp) as *const u64).read_unaligned() << bits;
-                inp += ((63 - bits) >> 3) as usize;
+                hold |= (ip as *const u64).read_unaligned() << bits;
+                ip = ip.add(((63 - bits) >> 3) as usize);
                 bits |= 56;
             }};
         }
-        macro_rules! consume {
-            ($n:expr) => {{
-                let n = $n as u64;
+        macro_rules! lit {
+            ($e:expr) => {{
+                let e = $e;
+                let n = (e & 0xff) as u64;
                 hold >>= n;
                 bits -= n;
+                *op = (e >> 8) as u8;
+                op = op.add(1);
             }};
         }
 
         refill!();
         let mut e = *lt.add((hold & LMASK) as usize);
-        'main: while inp - ((bits >> 3) as usize) < in_last && out < out_last {
+        'main: while ip < ip_lim && op < op_lim {
             if e & LIT != 0 {
-                consume!(e & 0xff);
-                (output.add(out) as *mut u16).write_unaligned((e >> 8) as u16);
-                out += 1 + ((e >> 30) & 1) as usize;
+                lit!(e);
                 e = *lt.add((hold & LMASK) as usize);
                 if e & LIT != 0 {
-                    consume!(e & 0xff);
-                    (output.add(out) as *mut u16).write_unaligned((e >> 8) as u16);
-                    out += 1 + ((e >> 30) & 1) as usize;
+                    lit!(e);
                     e = *lt.add((hold & LMASK) as usize);
                     if e & LIT != 0 {
-                        consume!(e & 0xff);
-                        (output.add(out) as *mut u16).write_unaligned((e >> 8) as u16);
-                        out += 1 + ((e >> 30) & 1) as usize;
+                        lit!(e);
                         e = *lt.add((hold & LMASK) as usize);
                         refill!();
                         continue 'main;
@@ -1391,104 +1451,102 @@ impl Inflate {
                 }
                 refill!();
             }
-            // symbol start (for bailing out to the slow path)
-            let (sh, sb, si) = (hold, bits, inp);
+            // symbol start: from here until the commit below, `bits` and
+            // `ip` stay at the symbol start and `used` counts consumed bits
+            let sh = hold;
+            let mut used: u64;
             if e & EXC != 0 {
                 if e & SUB != 0 {
-                    consume!(e & 0xff);
+                    used = (e & 0xff) as u64;
+                    hold >>= used;
                     e = *lt.add(((e >> 16) & 0x7fff) as usize + (hold & ((1u64 << ((e >> 8) & 0xf)) - 1)) as usize);
                     if e & LIT != 0 {
-                        consume!(e & 0xff);
-                        (output.add(out) as *mut u16).write_unaligned((e >> 8) as u16);
-                        out += 1 + ((e >> 30) & 1) as usize;
+                        bits -= used;
+                        lit!(e);
                         e = *lt.add((hold & LMASK) as usize);
                         refill!();
                         continue 'main;
                     }
                     if e & EXC != 0 {
                         if e & EOB != 0 {
-                            consume!(e & 0xff);
+                            let n = (e & 0xff) as u64;
+                            hold >>= n;
+                            bits -= used + n;
                             self.mode = TYPE;
                         } else {
                             hold = sh;
-                            bits = sb;
-                            inp = si;
                             bailed = true;
                         }
                         break 'main;
                     }
                 } else if e & EOB != 0 {
-                    consume!(e & 0xff);
+                    let n = (e & 0xff) as u64;
+                    hold >>= n;
+                    bits -= n;
                     self.mode = TYPE;
                     break 'main;
                 } else {
                     bailed = true;
                     break 'main;
                 }
+            } else {
+                used = 0;
             }
             // length (+ extra bits in one go)
-            let saved = hold;
             let t = (e & 0xff) as u64;
-            consume!(t);
-            let len = (e >> 16) as usize + ((saved & ((1u64 << t) - 1)) >> ((e >> 8) & 0xf)) as usize;
+            let len = (e >> 16) as usize + ((hold & ((1u64 << t) - 1)) >> ((e >> 8) & 0xf)) as usize;
+            hold >>= t;
+            used += t;
             let mut d = *dt.add((hold & DMASK) as usize);
             if d & EXC != 0 {
                 if d & SUB != 0 {
-                    consume!(d & 0xff);
+                    let n = (d & 0xff) as u64;
+                    hold >>= n;
+                    used += n;
                     d = *dt.add(((d >> 16) & 0x7fff) as usize + (hold & ((1u64 << ((d >> 8) & 0xf)) - 1)) as usize);
                 }
                 if d & EXC != 0 {
                     hold = sh;
-                    bits = sb;
-                    inp = si;
                     bailed = true;
                     break 'main;
                 }
             }
-            let saved = hold;
             let t = (d & 0xff) as u64;
-            consume!(t);
-            let dist = (d >> 16) as usize + ((saved & ((1u64 << t) - 1)) >> ((d >> 8) & 0xf)) as usize;
-            if dist > dmax {
-                hold = sh;
-                bits = sb;
-                inp = si;
-                bailed = true;
-                break 'main;
-            }
-            let produced = out - beg;
-            if dist > produced {
-                let op2 = dist - produced;
-                if op2 > whave {
-                    // invalid distance too far back: exact slow path reports it
+            let dist = (d >> 16) as usize + ((hold & ((1u64 << t) - 1)) >> ((d >> 8) & 0xf)) as usize;
+            hold >>= t;
+            // One well-predicted compare covers the rare cases: beyond dmax,
+            // beyond the window (both reported by the exact slow path) and,
+            // when the output is not contiguous, reaching into the window.
+            if dist > core::cmp::min(dmax, (op as usize).wrapping_sub(reach_base)) {
+                let produced = op as usize - beg;
+                if dist > dmax || dist - produced > self.whave {
                     hold = sh;
-                    bits = sb;
-                    inp = si;
                     bailed = true;
                     break 'main;
                 }
-                if !contiguous {
-                    out = self.window_copy(output, out, dist, len, op2);
-                    e = *lt.add((hold & LMASK) as usize);
-                    refill!();
-                    continue 'main;
-                }
+                bits -= used + t;
+                op = self.window_copy(op, dist, len, dist - produced);
+                e = *lt.add((hold & LMASK) as usize);
+                refill!();
+                continue 'main;
             }
+            bits -= used + t;
             let ne = *lt.add((hold & LMASK) as usize);
             refill!();
-            copy_match(output, out, dist, len);
-            out += len;
+            copy_match(op, dist, len);
+            op = op.add(len);
             e = ne;
         }
         // give back whole unused bytes; keep < 8 bits (canonical state)
-        let unused = (bits >> 3) as usize;
-        inp -= unused;
+        ip = ip.sub((bits >> 3) as usize);
         bits &= 7;
         hold &= (1u64 << bits) - 1;
-        self.avail_in -= inp - self.next_in;
-        self.next_in = inp;
-        self.avail_out -= out - self.next_out;
-        self.next_out = out;
+        let used_in = ip as usize - in0 as usize;
+        self.avail_in -= used_in;
+        self.next_in += used_in;
+        let produced = op as usize - out0 as usize;
+        self.avail_out -= produced;
+        self.next_out += produced;
         self.hold = hold;
         self.bits = bits as u32;
         bailed
@@ -1519,73 +1577,73 @@ impl Inflate {
     /// match that starts in the sliding window (zlib inffast logic); returns new out
     #[inline(never)]
     #[cold]
-    unsafe fn window_copy(&self, output: *mut u8, mut out: usize, dist: usize, mut len: usize, mut op2: usize) -> usize {
+    unsafe fn window_copy(&self, mut op: *mut u8, dist: usize, mut len: usize, mut op2: usize) -> *mut u8 {
         let w = self.window.as_ref().unwrap().as_ptr();
         let wsize = self.wsize;
         let wnext = self.wnext;
-        let mut from: usize;
-        let mut from_win = true;
+        let from: usize;
         if wnext == 0 {
             from = wsize - op2;
             if op2 < len {
                 len -= op2;
-                core::ptr::copy_nonoverlapping(w.add(from), output.add(out), op2);
-                out += op2;
-                from = out - dist;
-                from_win = false;
+                copy_short(w.add(from), op, op2);
+                op = op.add(op2);
+                copy_match(op, dist, len);
+                return op.add(len);
             }
         } else if wnext < op2 {
-            from = wsize + wnext - op2;
+            let f = wsize + wnext - op2;
             op2 -= wnext;
             if op2 < len {
                 len -= op2;
-                core::ptr::copy_nonoverlapping(w.add(from), output.add(out), op2);
-                out += op2;
-                from = 0;
+                copy_short(w.add(f), op, op2);
+                op = op.add(op2);
                 if wnext < len {
                     len -= wnext;
-                    core::ptr::copy_nonoverlapping(w.add(from), output.add(out), wnext);
-                    out += wnext;
-                    from = out - dist;
-                    from_win = false;
+                    copy_short(w, op, wnext);
+                    op = op.add(wnext);
+                    copy_match(op, dist, len);
+                    return op.add(len);
                 }
+                from = 0;
+            } else {
+                from = f;
             }
         } else {
             from = wnext - op2;
             if op2 < len {
                 len -= op2;
-                core::ptr::copy_nonoverlapping(w.add(from), output.add(out), op2);
-                out += op2;
-                from = out - dist;
-                from_win = false;
+                copy_short(w.add(from), op, op2);
+                op = op.add(op2);
+                copy_match(op, dist, len);
+                return op.add(len);
             }
         }
-        if from_win {
-            core::ptr::copy_nonoverlapping(w.add(from), output.add(out), len);
-            out += len;
-        } else {
-            copy_match(output, out, out - from, len);
-            out += len;
-        }
-        out
+        copy_short(w.add(from), op, len);
+        op.add(len)
     }
 }
 
 /// Copy a match of `len` bytes from `out - dist` to `out` (may overlap).
-/// Writes up to 15 bytes past `out + len` (callers leave that slack).
+/// Writes up to 31 bytes past `out + len` (callers leave that slack). The
+/// first 32 bytes are copied unconditionally so short matches (most of
+/// them) take no data-dependent loop branch.
 #[cfg(target_arch = "wasm32")]
 #[inline(always)]
-unsafe fn copy_match(output: *mut u8, out: usize, dist: usize, len: usize) {
+unsafe fn copy_match(dst: *mut u8, dist: usize, len: usize) {
     use core::arch::wasm32::{i8x16_swizzle, v128, v128_load, v128_store};
-    let dst = output.add(out);
-    let src = output.add(out - dist);
+    let src = dst.sub(dist);
     if dist >= 16 {
-        let mut i = 0;
-        loop {
-            v128_store(dst.add(i) as *mut v128, v128_load(src.add(i) as *const v128));
-            i += 16;
-            if i >= len {
-                break;
+        v128_store(dst as *mut v128, v128_load(src as *const v128));
+        v128_store(dst.add(16) as *mut v128, v128_load(src.add(16) as *const v128));
+        if len > 32 {
+            let mut i = 32;
+            loop {
+                v128_store(dst.add(i) as *mut v128, v128_load(src.add(i) as *const v128));
+                i += 16;
+                if i >= len {
+                    break;
+                }
             }
         }
     } else {
@@ -1594,24 +1652,28 @@ unsafe fn copy_match(output: *mut u8, out: usize, dist: usize, len: usize) {
         let base = v128_load(src as *const v128);
         let mut v = i8x16_swizzle(base, v128_load(PAT.0[dist].as_ptr() as *const v128));
         let adv = v128_load(PAT.1[dist].as_ptr() as *const v128);
-        let mut i = 0;
-        loop {
-            v128_store(dst.add(i) as *mut v128, v);
-            i += 16;
-            if i >= len {
-                break;
+        v128_store(dst as *mut v128, v);
+        v = i8x16_swizzle(v, adv);
+        v128_store(dst.add(16) as *mut v128, v);
+        if len > 32 {
+            let mut i = 32;
+            loop {
+                v = i8x16_swizzle(v, adv);
+                v128_store(dst.add(i) as *mut v128, v);
+                i += 16;
+                if i >= len {
+                    break;
+                }
             }
-            v = i8x16_swizzle(v, adv);
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
-unsafe fn copy_match(output: *mut u8, out: usize, dist: usize, len: usize) {
+unsafe fn copy_match(dst: *mut u8, dist: usize, len: usize) {
     // portable version (native builds)
-    let dst = output.add(out);
-    let src = output.add(out - dist);
+    let src = dst.sub(dist);
     if dist >= 8 {
         let mut i = 0;
         loop {
@@ -1626,4 +1688,24 @@ unsafe fn copy_match(output: *mut u8, out: usize, dist: usize, len: usize) {
             *dst.add(i) = *src.add(i);
         }
     }
+}
+
+/// Copy `n` (<= 258) bytes between non-overlapping buffers with 16-byte
+/// vectors instead of memory.copy (which costs a call in V8). Reads and
+/// writes up to 15 bytes past the range (window and output carry slack).
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+unsafe fn copy_short(src: *const u8, dst: *mut u8, n: usize) {
+    use core::arch::wasm32::{v128, v128_load, v128_store};
+    let mut i = 0;
+    while i < n {
+        v128_store(dst.add(i) as *mut v128, v128_load(src.add(i) as *const v128));
+        i += 16;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+unsafe fn copy_short(src: *const u8, dst: *mut u8, n: usize) {
+    core::ptr::copy_nonoverlapping(src, dst, n);
 }

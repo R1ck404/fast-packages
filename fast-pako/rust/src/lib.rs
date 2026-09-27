@@ -14,6 +14,7 @@ use deflate::{Deflate, GzHead};
 use inflate::Inflate;
 
 #[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
 extern "C" {
     /// kind: 0 = full chunk, 1 = partial chunk (subarray), 2 = string segment
     fn js_emit(kind: u32, ptr: *const u8, len: usize, chunk_size: usize);
@@ -34,6 +35,99 @@ mod tests;
 const SLACK: usize = 64;
 
 // ---------------------------------------------------------------- memory
+
+/// Growable byte buffer that is never zero-filled (only bytes written by the
+/// codec are ever read back) and can be presized from a size hint.
+pub struct OutBuf {
+    ptr: *mut u8,
+    cap: usize,
+}
+
+impl OutBuf {
+    pub const fn new() -> OutBuf {
+        OutBuf { ptr: core::ptr::null_mut(), cap: 0 }
+    }
+    #[inline(always)]
+    pub fn ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+    #[inline(always)]
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+    #[inline(always)]
+    fn layout(n: usize) -> std::alloc::Layout {
+        unsafe { std::alloc::Layout::from_size_align_unchecked(n, 16) }
+    }
+    /// Ensure capacity >= need (doubling), preserving bytes [0, keep).
+    #[inline]
+    pub fn reserve(&mut self, need: usize, keep: usize) {
+        if need > self.cap {
+            let mut n = self.cap.max(1 << 16);
+            while n < need {
+                n *= 2;
+            }
+            self.set_cap(n, keep);
+        }
+    }
+    /// Ensure capacity >= need (exact size), preserving bytes [0, keep).
+    pub fn reserve_exact(&mut self, need: usize, keep: usize) {
+        if need > self.cap {
+            self.set_cap(need, keep);
+        }
+    }
+    /// Best-effort capacity hint for an empty buffer: failure is ignored
+    /// (the buffer then grows on demand as usual).
+    pub fn hint(&mut self, need: usize) {
+        if need > self.cap {
+            unsafe {
+                let p = std::alloc::alloc(Self::layout(need));
+                if !p.is_null() {
+                    self.free();
+                    self.ptr = p;
+                    self.cap = need;
+                }
+            }
+        }
+    }
+    #[cold]
+    #[inline(never)]
+    fn set_cap(&mut self, n: usize, keep: usize) {
+        use std::alloc::{alloc, dealloc, handle_alloc_error, realloc};
+        unsafe {
+            let p = if self.ptr.is_null() {
+                alloc(Self::layout(n))
+            } else if keep * 2 >= self.cap {
+                realloc(self.ptr, Self::layout(self.cap), n)
+            } else {
+                let p = alloc(Self::layout(n));
+                if !p.is_null() {
+                    core::ptr::copy_nonoverlapping(self.ptr, p, keep);
+                    dealloc(self.ptr, Self::layout(self.cap));
+                }
+                p
+            };
+            if p.is_null() {
+                handle_alloc_error(Self::layout(n));
+            }
+            self.ptr = p;
+            self.cap = n;
+        }
+    }
+    pub fn free(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { std::alloc::dealloc(self.ptr, Self::layout(self.cap)) };
+            self.ptr = core::ptr::null_mut();
+            self.cap = 0;
+        }
+    }
+}
+
+impl Drop for OutBuf {
+    fn drop(&mut self) {
+        self.free();
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn fz_alloc(n: usize) -> *mut u8 {
@@ -107,12 +201,12 @@ fn res() -> &'static mut Res {
 
 pub struct DefSession {
     d: Box<Deflate>,
-    out: Vec<u8>,
+    out: OutBuf,
     chunk_base: usize,
     chunk_size: usize,
     produced: usize,
     streaming: bool,
-    input: Vec<u8>,
+    input: OutBuf,
 }
 
 /// Create (or re-initialize) a deflate session. Returns 0 and sets
@@ -139,12 +233,12 @@ pub unsafe extern "C" fn def_init(prev: *mut DefSession, level: i32, method: i32
             r.status = 0;
             Box::into_raw(Box::new(DefSession {
                 d,
-                out: Vec::new(),
+                out: OutBuf::new(),
                 chunk_base: 0,
                 chunk_size,
                 produced: 0,
                 streaming: streaming != 0,
-                input: Vec::new(),
+                input: OutBuf::new(),
             }))
         }
         Err(e) => {
@@ -165,10 +259,8 @@ pub unsafe extern "C" fn def_destroy(s: *mut DefSession) {
 #[no_mangle]
 pub unsafe extern "C" fn def_input(s: *mut DefSession, n: usize) -> *mut u8 {
     let s = &mut *s;
-    if s.input.len() < n + SLACK {
-        s.input = vec![0u8; n + SLACK];
-    }
-    s.input.as_mut_ptr()
+    s.input.reserve_exact(n + SLACK, 0);
+    s.input.ptr()
 }
 
 #[no_mangle]
@@ -218,14 +310,8 @@ unsafe fn def_new_chunk(s: &mut DefSession) {
         s.chunk_base = s.produced;
     }
     let need = s.chunk_base + s.chunk_size + SLACK;
-    if s.out.len() < need {
-        let mut n = s.out.len().max(1 << 16);
-        while n < need {
-            n *= 2;
-        }
-        s.out.resize(n, 0);
-    }
-    s.d.output = s.out.as_mut_ptr().add(s.chunk_base);
+    s.out.reserve(need, s.chunk_base);
+    s.d.output = s.out.ptr().add(s.chunk_base);
     s.d.next_out = 0;
     s.d.avail_out = s.chunk_size;
 }
@@ -233,7 +319,7 @@ unsafe fn def_new_chunk(s: &mut DefSession) {
 unsafe fn def_emit(s: &mut DefSession, full: bool) {
     let len = s.d.next_out;
     if s.streaming {
-        js_emit(if full { 0 } else { 1 }, s.out.as_ptr().add(s.chunk_base), len, s.chunk_size);
+        js_emit(if full { 0 } else { 1 }, s.out.ptr().add(s.chunk_base), len, s.chunk_size);
     } else {
         s.produced = s.chunk_base + len;
     }
@@ -245,11 +331,14 @@ pub unsafe extern "C" fn def_push(sp: *mut DefSession, len: usize, flush: i32) -
     let s = &mut *sp;
     let r = res();
     r.ended = 0;
-    s.d.input = s.input.as_ptr();
+    s.d.input = s.input.ptr() as *const u8;
     s.d.next_in = 0;
     s.d.avail_in = len;
     if !s.streaming && s.produced == 0 && s.d.avail_out == 0 {
         s.chunk_base = 0;
+        // one-shot: capacity hint only (compressed output is rarely > len/2
+        // for real data; the buffer still grows on demand)
+        s.out.hint((len / 2).min(1 << 28) + s.chunk_size + SLACK);
     }
     let mut ret = 1;
     loop {
@@ -301,7 +390,7 @@ unsafe fn def_fill_res(s: &mut DefSession) {
     r.data_type = s.d.data_type;
     r.total_in = s.d.total_in as f64;
     r.total_out = s.d.total_out as f64;
-    r.out_ptr = s.out.as_ptr() as u32;
+    r.out_ptr = s.out.ptr() as u32;
     r.out_len = s.produced as u32;
 }
 
@@ -309,13 +398,13 @@ unsafe fn def_fill_res(s: &mut DefSession) {
 
 pub struct InfSession {
     s: Box<Inflate>,
-    out: Vec<u8>,
+    out: OutBuf,
     chunk_base: usize,
     chunk_size: usize,
     produced: usize,
     streaming: bool,
     to_string: bool,
-    input: Vec<u8>,
+    input: OutBuf,
     dict: Option<Vec<u8>>,
     segs: Vec<u32>,
     wbits: i32,
@@ -344,6 +433,7 @@ pub unsafe extern "C" fn inf_init(prev: *mut InfSession, wbits: i32, chunk_size:
         r.status = 0;
         s.s.get_header();
         s.s.contiguous = streaming == 0;
+        s.s.defer_check = streaming == 0;
         return prev;
     }
     match Inflate::new(wbits) {
@@ -351,15 +441,16 @@ pub unsafe extern "C" fn inf_init(prev: *mut InfSession, wbits: i32, chunk_size:
             r.status = 0;
             st.get_header();
             st.contiguous = streaming == 0;
+            st.defer_check = streaming == 0;
             Box::into_raw(Box::new(InfSession {
                 s: st,
-                out: Vec::new(),
+                out: OutBuf::new(),
                 chunk_base: 0,
                 chunk_size,
                 produced: 0,
                 streaming: streaming != 0,
                 to_string: to_string != 0,
-                input: Vec::new(),
+                input: OutBuf::new(),
                 dict: None,
                 segs: Vec::new(),
                 wbits,
@@ -383,10 +474,8 @@ pub unsafe extern "C" fn inf_destroy(s: *mut InfSession) {
 #[no_mangle]
 pub unsafe extern "C" fn inf_input(s: *mut InfSession, n: usize) -> *mut u8 {
     let s = &mut *s;
-    if s.input.len() < n + SLACK {
-        s.input = vec![0u8; n + SLACK];
-    }
-    s.input.as_mut_ptr()
+    s.input.reserve_exact(n + SLACK, 0);
+    s.input.ptr()
 }
 
 /// Store the dictionary option; in raw mode it is applied immediately
@@ -449,16 +538,6 @@ fn utf8border(buf: &[u8], chunk_len: usize, max0: usize) -> usize {
     }
 }
 
-fn grow(v: &mut Vec<u8>, need: usize) {
-    if v.len() < need {
-        let mut n = v.len().max(1 << 16);
-        while n < need {
-            n *= 2;
-        }
-        v.resize(n, 0);
-    }
-}
-
 unsafe fn inf_new_chunk(s: &mut InfSession) {
     if s.streaming {
         s.chunk_base = 0;
@@ -466,8 +545,9 @@ unsafe fn inf_new_chunk(s: &mut InfSession) {
         s.chunk_base = s.produced;
     }
     let need = s.chunk_base + s.chunk_size + SLACK;
-    grow(&mut s.out, need);
-    s.s.output = s.out.as_mut_ptr().add(s.chunk_base);
+    s.out.reserve(need, s.chunk_base);
+    s.s.out_base = s.out.ptr();
+    s.s.output = s.out.ptr().add(s.chunk_base);
     s.s.next_out = 0;
     s.s.avail_out = s.chunk_size;
 }
@@ -480,10 +560,23 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
     let r = res();
     r.ended = 0;
     s.segs.clear();
-    s.s.input = s.input.as_ptr();
+    s.s.input = s.input.ptr() as *const u8;
     s.s.next_in = 0;
     s.s.avail_in = len;
-    let data = s.input.as_ptr();
+    let data = s.input.ptr() as *const u8;
+    if !s.streaming && s.produced == 0 && s.chunk_base == 0 {
+        // one-shot: size the output buffer up front (only a capacity hint;
+        // the chunking below is unchanged). A gzip member's trailer holds
+        // the uncompressed size; otherwise guess 4x.
+        // (a corrupt trailer can claim anything: cap the hint at 64x the
+        // input and never fail on it)
+        let cap = len.saturating_mul(64).saturating_add(1 << 20).min(1 << 28);
+        let mut hint = len.saturating_mul(4);
+        if len >= 18 && (s.s.wrap & 2) != 0 && *data == 0x1f && *data.add(1) == 0x8b {
+            hint = (data.add(len - 4) as *const u32).read_unaligned() as usize;
+        }
+        s.out.hint(hint.min(cap) + s.chunk_size + SLACK);
+    }
     let mut ret = 1;
     loop {
         if s.s.avail_out == 0 {
@@ -519,14 +612,14 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
         if s.s.next_out != 0 && (s.s.avail_out == 0 || status == inflate::Z_STREAM_END) {
             let next_out = s.s.next_out;
             if s.to_string {
-                let chunk = core::slice::from_raw_parts(s.out.as_ptr().add(s.chunk_base), next_out);
+                let chunk = core::slice::from_raw_parts(s.out.ptr().add(s.chunk_base), next_out);
                 let border = utf8border(chunk, s.chunk_size, next_out);
                 let tail = next_out - border;
                 if s.streaming {
-                    js_emit(2, s.out.as_ptr().add(s.chunk_base), border, s.chunk_size);
+                    js_emit(2, s.out.ptr().add(s.chunk_base), border, s.chunk_size);
                     if tail != 0 {
-                        let base = s.chunk_base;
-                        s.out.copy_within(base + border..base + border + tail, base);
+                        let base = s.out.ptr().add(s.chunk_base);
+                        core::ptr::copy(base.add(border), base, tail);
                     }
                 } else {
                     s.segs.push(s.chunk_base as u32);
@@ -535,13 +628,14 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
                     s.chunk_base += border;
                     s.produced = s.chunk_base + tail;
                     let need = s.chunk_base + s.chunk_size + SLACK;
-                    grow(&mut s.out, need);
-                    s.s.output = s.out.as_mut_ptr().add(s.chunk_base);
+                    s.out.reserve(need, s.produced);
+                    s.s.out_base = s.out.ptr();
+                    s.s.output = s.out.ptr().add(s.chunk_base);
                 }
                 s.s.next_out = tail;
                 s.s.avail_out = s.chunk_size - tail;
             } else if s.streaming {
-                js_emit(if s.chunk_size == next_out { 0 } else { 1 }, s.out.as_ptr().add(s.chunk_base), next_out, s.chunk_size);
+                js_emit(if s.chunk_size == next_out { 0 } else { 1 }, s.out.ptr().add(s.chunk_base), next_out, s.chunk_size);
             } else {
                 s.produced = s.chunk_base + next_out;
             }
@@ -576,7 +670,7 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
     r.data_type = s.s.data_type;
     r.total_in = s.s.total_in as f64;
     r.total_out = s.s.total_out as f64;
-    r.out_ptr = s.out.as_ptr() as u32;
+    r.out_ptr = s.out.ptr() as u32;
     r.out_len = s.produced as u32;
     r.seg_ptr = s.segs.as_ptr() as u32;
     r.seg_len = (s.segs.len() / 2) as u32;
@@ -658,22 +752,22 @@ pub unsafe extern "C" fn inf_header(sp: *mut InfSession) -> *const HeadOut {
 #[no_mangle]
 pub unsafe extern "C" fn inf_trim(sp: *mut InfSession, keep: usize) {
     let s = &mut *sp;
-    if s.out.len() > keep {
-        s.out = Vec::new();
+    if s.out.cap() > keep {
+        s.out.free();
     }
-    if s.input.len() > keep {
-        s.input = Vec::new();
+    if s.input.cap() > keep {
+        s.input.free();
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn def_trim(sp: *mut DefSession, keep: usize) {
     let s = &mut *sp;
-    if s.out.len() > keep {
-        s.out = Vec::new();
+    if s.out.cap() > keep {
+        s.out.free();
     }
-    if s.input.len() > keep {
-        s.input = Vec::new();
+    if s.input.cap() > keep {
+        s.input.free();
     }
 }
 

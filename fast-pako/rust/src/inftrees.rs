@@ -153,3 +153,26 @@ pub fn inflate_table(ty: u8, lens: &[u16], codes: usize, table: &mut [u32], work
     *bits = root as u32;
     0
 }
+
+/// zlib's accept/reject decision of inflate_table() for a set of code
+/// lengths given as a histogram (count[len]), without building the table:
+/// over-subscribed sets are rejected, incomplete sets only allowed for
+/// LENS/DISTS with a single 1-bit code (or no codes at all).
+pub fn code_ok(ty: u8, count: &[u16; 16]) -> bool {
+    let mut max = MAXBITS;
+    while max >= 1 && count[max] == 0 {
+        max -= 1;
+    }
+    if max == 0 {
+        return true;
+    }
+    let mut left: i32 = 1;
+    for len in 1..=MAXBITS {
+        left <<= 1;
+        left -= count[len] as i32;
+        if left < 0 {
+            return false;
+        }
+    }
+    !(left > 0 && (ty == CODES || max != 1))
+}

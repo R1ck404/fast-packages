@@ -29,18 +29,23 @@ import {
 import { Keywords, StrictModeReservedWords } from "./js_lexer.mjs";
 import { isIdentifier, forceValidIdentifier } from "./js_ident.mjs";
 
+let keywordReservedNames = null;
+
 // Returns a Map<string, number>. Note: js_lexer's Keywords and
 // StrictModeReservedWords may be a Map or a Set; only their keys are used.
 export function computeReservedNames(moduleScopes, symbols) {
-  const names = new Map();
-
   // All keywords and strict mode reserved words are reserved names
-  for (const k of Keywords.keys()) {
-    names.set(k, 1);
+  // (JS-only: copied from a prebuilt map with the same entries in the same order)
+  if (keywordReservedNames === null) {
+    keywordReservedNames = new Map();
+    for (const k of Keywords.keys()) {
+      keywordReservedNames.set(k, 1);
+    }
+    for (const k of StrictModeReservedWords.keys()) {
+      keywordReservedNames.set(k, 1);
+    }
   }
-  for (const k of StrictModeReservedWords.keys()) {
-    names.set(k, 1);
-  }
+  const names = new Map(keywordReservedNames);
 
   // All unbound symbols must be reserved names
   for (const scope of moduleScopes) {
@@ -50,14 +55,49 @@ export function computeReservedNames(moduleScopes, symbols) {
   return names;
 }
 
+// JS-only: the reserved names contributed by the members of a cached (shared)
+// module scope, i.e. the runtime's. They only depend on the shared symbols,
+// which are frozen and copied on write (graph.writableSymbol), so they are
+// memoized per members map and reused while no symbol of that source has been
+// written to in the current link.
+const sharedMembersReservedNames = new WeakMap(); // members map -> {sourceIndex, names}
+export function registerSharedModuleScopeMembers(members, sourceIndex) {
+  sharedMembersReservedNames.set(members, { sourceIndex, names: null });
+}
+
 function computeReservedNamesForScope(scope, symbols, names) {
-  for (const member of scope.members.values()) {
-    const symbol = symbols.get(member.ref);
-    if (symbol.kind === SymbolUnbound || (symbol.flags & MustNotBeRenamed) !== 0) {
-      names.set(symbol.originalName, 1);
+  const shared = sharedMembersReservedNames.get(scope.members);
+  if (shared !== undefined && !(symbols.sharedWritten !== null && symbols.sharedWritten[shared.sourceIndex] === true)) {
+    let memo = shared.names;
+    if (memo === null) {
+      memo = [];
+      for (const member of scope.members.values()) {
+        const symbol = symbols.get(member.ref);
+        if (symbol.kind === SymbolUnbound || (symbol.flags & MustNotBeRenamed) !== 0) {
+          memo.push(symbol.originalName);
+        }
+      }
+      shared.names = memo;
+    } else if (globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__) {
+      // (Test hook: the memo must match a fresh computation)
+      const fresh = [];
+      for (const member of scope.members.values()) {
+        const symbol = symbols.get(member.ref);
+        if (symbol.kind === SymbolUnbound || (symbol.flags & MustNotBeRenamed) !== 0) fresh.push(symbol.originalName);
+      }
+      if (fresh.join("\0") !== memo.join("\0")) throw new globalThis.Error("fast-esbuild: reserved names memo mismatch");
+    }
+    for (let i = 0; i < memo.length; i++) names.set(memo[i], 1);
+  } else {
+    for (const member of scope.members.values()) {
+      const symbol = symbols.get(member.ref);
+      if (symbol.kind === SymbolUnbound || (symbol.flags & MustNotBeRenamed) !== 0) {
+        names.set(symbol.originalName, 1);
+      }
     }
   }
-  for (const ref of scope.generated) {
+  for (let $i102 = 0, $a102 = scope.generated; $i102 < $a102.length; $i102++) {
+    const ref = $a102[$i102];
     const symbol = symbols.get(ref);
     if (symbol.kind === SymbolUnbound || (symbol.flags & MustNotBeRenamed) !== 0) {
       names.set(symbol.originalName, 1);
@@ -67,7 +107,8 @@ function computeReservedNamesForScope(scope, symbols, names) {
   // If there's a direct "eval" somewhere inside the current scope, continue
   // traversing down the scope tree until we find it to get all reserved names
   if (scope.containsDirectEval) {
-    for (const child of scope.children) {
+    for (let $i103 = 0, $a103 = scope.children; $i103 < $a103.length; $i103++) {
+      const child = $a103[$i103];
       if (child.containsDirectEval) {
         computeReservedNamesForScope(child, symbols, names);
       }
@@ -365,12 +406,14 @@ export function assignNestedScopeSlots(moduleScope, symbols) {
   for (const member of moduleScope.members.values()) {
     symbols[refInner(member.ref)].nestedScopeSlot = validSlot;
   }
-  for (const ref of moduleScope.generated) {
+  for (let $i104 = 0, $a104 = moduleScope.generated; $i104 < $a104.length; $i104++) {
+    const ref = $a104[$i104];
     symbols[refInner(ref)].nestedScopeSlot = validSlot;
   }
 
   // Assign nested scope slots independently for each nested scope
-  for (const child of moduleScope.children) {
+  for (let $i105 = 0, $a105 = moduleScope.children; $i105 < $a105.length; $i105++) {
+    const child = $a105[$i105];
     slotCountsUnionMax(slotCounts, assignNestedScopeSlotsHelper(child, symbols, newSlotCounts()));
   }
 
@@ -379,7 +422,8 @@ export function assignNestedScopeSlots(moduleScope, symbols) {
   for (const member of moduleScope.members.values()) {
     symbols[refInner(member.ref)].nestedScopeSlot = -1;
   }
-  for (const ref of moduleScope.generated) {
+  for (let $i106 = 0, $a106 = moduleScope.generated; $i106 < $a106.length; $i106++) {
+    const ref = $a106[$i106];
     symbols[refInner(ref)].nestedScopeSlot = -1;
   }
   return slotCounts;
@@ -387,6 +431,31 @@ export function assignNestedScopeSlots(moduleScope, symbols) {
 
 function compareNumbers(a, b) {
   return a - b;
+}
+
+// sort.Ints for the member lists below. Member maps are usually already in
+// ascending order (symbols are declared in source order), so check that first;
+// small lists use an insertion sort (Array.prototype.sort allocates a scratch
+// copy and calls the comparator through a builtin). Equal numbers are
+// indistinguishable, so the result is the same as any sort.
+function sortNumbers(a) {
+  const n = a.length;
+  let i = 1;
+  while (i < n && a[i - 1] <= a[i]) i++;
+  if (i >= n) return;
+  if (n > 64) {
+    a.sort(compareNumbers);
+    return;
+  }
+  for (; i < n; i++) {
+    const x = a[i];
+    let j = i - 1;
+    while (j >= 0 && a[j] > x) {
+      a[j + 1] = a[j];
+      j--;
+    }
+    a[j + 1] = x;
+  }
 }
 
 function assignNestedScopeSlotsHelper(scope, symbols, slot) {
@@ -398,7 +467,7 @@ function assignNestedScopeSlotsHelper(scope, symbols, slot) {
   for (const member of scope.members.values()) {
     sortedMembers.push(refInner(member.ref));
   }
-  sortedMembers.sort(compareNumbers);
+  sortNumbers(sortedMembers);
 
   // Assign slots for this scope's symbols. Only do this if the slot is
   // not already assigned. Nested scopes have copies of symbols from parent
@@ -411,7 +480,8 @@ function assignNestedScopeSlotsHelper(scope, symbols, slot) {
       slot[ns]++;
     }
   }
-  for (const ref of scope.generated) {
+  for (let $i107 = 0, $a107 = scope.generated; $i107 < $a107.length; $i107++) {
+    const ref = $a107[$i107];
     const symbol = symbols[refInner(ref)];
     const ns = symbol.slotNamespace();
     if (ns !== SlotMustNotBeRenamed && !(symbol.nestedScopeSlot >= 0)) {
@@ -429,7 +499,8 @@ function assignNestedScopeSlotsHelper(scope, symbols, slot) {
 
   // Assign slots for the symbols of child scopes
   const slotCounts = slot.slice();
-  for (const child of scope.children) {
+  for (let $i108 = 0, $a108 = scope.children; $i108 < $a108.length; $i108++) {
+    const child = $a108[$i108];
     slotCountsUnionMax(slotCounts, assignNestedScopeSlotsHelper(child, symbols, slot));
   }
   return slotCounts;
@@ -516,7 +587,8 @@ export class NumberRenamer {
 
   // "sorted" is a scratch array shared between calls (Go: *[]int)
   assignNamesInScope(scope, sourceIndex, parent, sorted) {
-    const s = new numberScope(parent, new Map());
+    // (The name map is allocated when the first name is added; see numberScope)
+    const s = new numberScope(parent, null);
 
     if (scope.members.size > 0) {
       // Sort member map keys for determinism, reusing a shared memory buffer
@@ -524,7 +596,7 @@ export class NumberRenamer {
       for (const member of scope.members.values()) {
         sorted.push(refInner(member.ref));
       }
-      sorted.sort(compareNumbers);
+      sortNumbers(sorted);
 
       // Rename all user-defined symbols in this scope
       for (const innerIndex of sorted) {
@@ -533,17 +605,19 @@ export class NumberRenamer {
     }
 
     // Also rename all generated symbols in this scope
-    for (const ref of scope.generated) {
+    for (let $i109 = 0, $a109 = scope.generated; $i109 < $a109.length; $i109++) {
+      const ref = $a109[$i109];
       this.assignName(s, ref);
     }
 
     return s;
   }
 
-  assignNamesRecursive(scope, sourceIndex, parent, sorted) {
+  assignNamesRecursive(scope, sourceIndex, parent, sorted, stamp) {
     // For performance in extreme cases (e.g. 10,000 nested scopes), traversing
     // through singly-nested scopes uses iteration instead of recursion
     for (;;) {
+      scope.renamerStamp = stamp;
       if (scope.members.size > 0 || scope.generated.length > 0) {
         // For performance in extreme cases (e.g. 10,000 nested scopes), only
         // allocate a scope when it's necessary.
@@ -558,23 +632,38 @@ export class NumberRenamer {
     }
 
     // Symbols in child scopes may also have to be renamed to avoid conflicts
-    for (const child of scope.children) {
-      this.assignNamesRecursive(child, sourceIndex, parent, sorted);
+    const children = scope.children;
+    for (let i = 0; i < children.length; i++) {
+      this.assignNamesRecursive(children[i], sourceIndex, parent, sorted, stamp);
     }
   }
 
   // "nestedScopes" is a Map<number (source index), Scope[]>. Go renames the
   // files in parallel; each file only reads the shared root scope and writes
   // to its own nested scopes, so the order does not matter.
+  //
+  // JS-only: a part's scope list ("part.Scopes") contains every scope pushed
+  // while visiting the part, i.e. nested scopes come after (and are also
+  // reached through) their ancestors. Renaming a scope again does nothing:
+  // every symbol of the scope and its descendants was either given a name by
+  // the first visit or is skipped by assignName for a reason that does not
+  // change (its slot namespace), so a later assignName returns early. Such
+  // scopes are skipped (each visited scope is stamped with an id unique to
+  // this call; runtime scopes are shared between transforms).
   assignNamesByScope(nestedScopes) {
+    const stamp = ++renamerStampCounter;
     for (const [sourceIndex, scopes] of nestedScopes) {
       const sorted = [];
-      for (const scope of scopes) {
-        this.assignNamesRecursive(scope, sourceIndex, this.root, sorted);
+      for (let i = 0; i < scopes.length; i++) {
+        const scope = scopes[i];
+        if (scope.renamerStamp === stamp) continue;
+        this.assignNamesRecursive(scope, sourceIndex, this.root, sorted, stamp);
       }
     }
   }
 }
+
+let renamerStampCounter = 0;
 
 // "reservedNames" (Map<string, number>) becomes the root scope's name counts
 // and is mutated by top-level renaming, exactly like in Go.
@@ -592,14 +681,14 @@ export class numberScope {
     // incrementing a number at the end until the name is unused. We save the
     // count here so that subsequent collisions can start counting from where the
     // previous collision ended instead of having to start counting from 1.
-    this.nameCounts = nameCounts; // Map<string, number>
+    this.nameCounts = nameCounts; // Map<string, number>, or null while it is empty
   }
 
   findNameUse(name) {
     const original = this;
     let s = this;
     for (;;) {
-      if (s.nameCounts.has(name)) {
+      if (s.nameCounts !== null && s.nameCounts.has(name)) {
         if (s === original) {
           return nameUsedInSameScope;
         }
@@ -660,6 +749,7 @@ export class numberScope {
 
     // Each name starts off with a count of 1 so that the first collision with
     // "name" is called "name2"
+    if (this.nameCounts === null) this.nameCounts = new Map();
     this.nameCounts.set(name, 1);
     return name;
   }

@@ -289,3 +289,46 @@ the embedded `optionsThatSupportStructuralEquality` fields, flattened):
 Each porter writes only their own module(s). Do not edit foundation files or
 other porters' files; if something is missing in a foundation module, define
 it locally (non-exported) and list it in your final report.
+
+## 9. JS-only performance deviations (keep in mind when comparing with Go)
+
+These change how results are computed, never what they are. Each one is
+marked "JS-only" in the source and relies on the invariant stated here.
+
+- **Output buffer is UTF-8** (`js_printer.mjs`): like Go's `p.js`, a growable
+  `Uint8Array`, decoded once per printed part with `TextDecoder("utf-8")`.
+  Saved positions are byte lengths (as in Go); `lastChar()` is the last
+  byte and `lastCodePoint()` is `utf8.DecodeLastRune`. The source map
+  `ChunkBuilder` decodes the bytes to count UTF-16 columns like Go.
+- **String escaping writes straight into the output buffer**
+  (`printUnquotedUTF16`); only characters that may need an escape
+  (`ESCAPE_CANDIDATE`) go through Go's per-character logic.
+- **Expression comments**: a bitset of the locations in `exprComments`
+  (cached per map) filters the per-expression lookups.
+- **Runtime print cache** (`linker.printRuntimeCached`): the printed code of
+  the runtime helpers is reused when the live runtime parts, the printer
+  options and every (ref, name) pair the renamer returned are the same.
+- **Runtime linker memo** (`linker.sharedStep5Memos`): step 5 of
+  scanImportsAndExports (namespace export part, symbol uses and dependencies
+  of every part) is a pure function of the cached runtime AST.
+- **Reserved names memo** (`renamer.computeReservedNamesForScope`): the names
+  contributed by the shared runtime module scope, reused while no shared
+  runtime symbol has been copied for writing (`SymbolMap.sharedWritten`).
+- **Renamer**: a part's scope list contains nested scopes that are also
+  reached through their parents; renaming a scope twice is a no-op, so such
+  scopes are skipped (`Scope.renamerStamp`). `numberScope.nameCounts` is
+  allocated on the first name.
+- **Reused objects**: `findSymbol` returns a reused result object (callers
+  copy the fields right away); `binaryExprVisitor`s are pooled (parser and
+  printer); `handleIdentifier` / the binary visitor return the original
+  `Expr` instead of an equal new one (Exprs are immutable values);
+  never-mutated "not found" tuples are shared frozen arrays
+  (`NOT_REWRITTEN`, `BOOLEAN_UNKNOWN`, ...); `parseStmt` clones its options
+  on the first mutation instead of up front; identifierOpts for
+  `handleIdentifier` come from a table.
+- **Multiple return values** are read by index (`const r = f(); r[0]`), not
+  by array destructuring (which goes through the iterator protocol), and
+  loops over known arrays use indices instead of `for...of`.
+- **Test hook**: with `globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__` set
+  (test/diff.mjs, test/fuzz.mjs) every cache/memo hit above is checked
+  against a fresh computation and a mismatch throws (reported as CRASH).

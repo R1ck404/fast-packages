@@ -158,6 +158,10 @@ pub struct Deflate {
     pub bi_valid: u32,
     /// highest window index ever written (bytes above are still zero)
     pub win_dirty: usize,
+    /// per-block emission tables (compress_block): literals, lengths, dist codes
+    pub ctab: [u32; crate::trees::CT_SIZE],
+    /// heap keys for build_tree: freq << 10 | depth
+    pub hkey: [u32; HEAP_SIZE],
 }
 
 impl Deflate {
@@ -266,6 +270,8 @@ impl Deflate {
             bi_buf: 0,
             bi_valid: 0,
             win_dirty: 0,
+            ctab: [0; crate::trees::CT_SIZE],
+            hkey: [0; HEAP_SIZE],
         });
         s.reset();
         Ok(s)

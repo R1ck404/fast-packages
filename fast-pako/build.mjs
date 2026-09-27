@@ -16,8 +16,11 @@ if (!process.argv.includes("--no-opt")) {
     const { default: binaryen } = await import("binaryen");
     const mod = binaryen.readBinary(bytes);
     mod.setFeatures(binaryen.Features.All);
-    binaryen.setOptimizeLevel(3);
+    binaryen.setOptimizeLevel(Number(process.env.WASMOPT_LEVEL || 3));
     binaryen.setShrinkLevel(0);
+    // keep big single-caller functions (the inflate fast loop) out of their
+    // callers: V8 allocates registers better in the smaller function
+    binaryen.setOneCallerInlineMaxSize(Number(process.env.WASMOPT_ONECALLER || 200));
     mod.optimize();
     const out = mod.emitBinary();
     console.log("wasm-opt -O3:", out.length, "bytes");

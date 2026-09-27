@@ -226,7 +226,8 @@ function isOddInt(x) {
     // 1 << 53 is the largest exact integer in the float64 format.
     return false;
   }
-  const [xi, xf] = goMathModf(x);
+  const $d0 = goMathModf(x);
+  const xi = $d0[0], xf = $d0[1];
   return xf === 0 && Math.abs(xi) % 2 === 1;
 }
 
@@ -237,14 +238,16 @@ export function goMathMod(x, y) {
   }
   y = Math.abs(y);
 
-  const [yfr, yexp] = goMathFrexp(y);
+  const $d1 = goMathFrexp(y);
+  const yfr = $d1[0], yexp = $d1[1];
   let r = x;
   if (x < 0) {
     r = -x;
   }
 
   while (r >= y) {
-    let [rfr, rexp] = goMathFrexp(r);
+    const $d2 = goMathFrexp(r);
+    let rfr = $d2[0], rexp = $d2[1];
     if (rfr < yfr) {
       rexp = rexp - 1;
     }
@@ -272,7 +275,8 @@ export function goMathLog(x) {
   if (x < 0) return NaN;
   if (x === 0) return -Infinity;
 
-  let [f1, ki] = goMathFrexp(x);
+  const $d3 = goMathFrexp(x);
+  let f1 = $d3[0], ki = $d3[1];
   if (f1 < Math.SQRT2 / 2) {
     f1 *= 2;
     ki--;
@@ -372,7 +376,8 @@ export function goMathPow(x, y) {
     return 1 / Math.sqrt(x);
   }
 
-  let [yi, yf] = goMathModf(Math.abs(y));
+  const $d4 = goMathModf(Math.abs(y));
+  let yi = $d4[0], yf = $d4[1];
   if (yf !== 0 && x < 0) {
     return NaN;
   }
@@ -403,7 +408,8 @@ export function goMathPow(x, y) {
   // accumulate powers of two into exp.
   // Note: "i" is Go's int64(yi); yi < 2**63 is integral so halving with floor
   // is exact, and "i&1" is "i % 2" (values above 2**53 are always even).
-  let [x1, xe] = goMathFrexp(x);
+  const $d5 = goMathFrexp(x);
+  let x1 = $d5[0], xe = $d5[1];
   for (let i = yi; i !== 0; i = Math.floor(i / 2)) {
     if (xe < -(1 << 12) || 1 << 12 < xe) {
       // catch xe before it overflows the left shift below
@@ -493,7 +499,8 @@ export function assignStmt(a, b) {
 // operators. For example, calling this with "!!x" will return "!x" instead
 // of returning "!!!x".
 export function not(expr) {
-  const [result, ok] = maybeSimplifyNot(expr);
+  const $d6 = maybeSimplifyNot(expr);
+  const result = $d6[0], ok = $d6[1];
   if (ok) {
     return result;
   }
@@ -534,7 +541,8 @@ export function maybeSimplifyNot(expr) {
       return [new Expr(new EBoolean(e.value === 0 || e.value !== e.value), expr.loc), true];
 
     case E_BIG_INT: {
-      const [equal, ok] = checkEqualityBigInt(e.value, "0");
+      const $d7 = checkEqualityBigInt(e.value, "0");
+      const equal = $d7[0], ok = $d7[1];
       if (ok) {
         return [new Expr(new EBoolean(equal), expr.loc), true];
       }
@@ -1085,7 +1093,8 @@ Object.assign(HelperContext.prototype, {
           let comma = null;
           let templateLoc = 0;
           let template = null;
-          for (const part of e.parts) {
+          for (let $i3 = 0, $a3 = e.parts; $i3 < $a3.length; $i3++) {
+            const part = $a3[$i3];
             // If we know this value is some kind of primitive, then we know that
             // "ToString" has no side effects and can be avoided.
             if (knownPrimitiveType(part.value.data) !== PrimitiveUnknown) {
@@ -1115,7 +1124,8 @@ Object.assign(HelperContext.prototype, {
           // Note that there are no implicit "ToString" operations for tagged
           // template literals.
           let comma = null;
-          for (const part of e.parts) {
+          for (let $i4 = 0, $a4 = e.parts; $i4 < $a4.length; $i4++) {
+            const part = $a4[$i4];
             comma = joinWithComma(comma, ctx.simplifyUnusedExpr(part.value, unsupportedFeatures));
           }
           return comma;
@@ -1126,7 +1136,8 @@ Object.assign(HelperContext.prototype, {
         // Arrays with "..." spread expressions can't be unwrapped because the
         // "..." triggers code evaluation via iterators. In that case, just trim
         // the other items instead and leave the array expression there.
-        for (const spread of e.items) {
+        for (let $i5 = 0, $a5 = e.items; $i5 < $a5.length; $i5++) {
+          const spread = $a5[$i5];
           if (spread.data.k === E_SPREAD) {
             const items = [];
             for (let item of e.items) {
@@ -1145,7 +1156,8 @@ Object.assign(HelperContext.prototype, {
         // Otherwise, the array can be completely removed. We only need to keep any
         // array items with side effects. Apply this simplification recursively.
         let result = null;
-        for (const item of e.items) {
+        for (let $i6 = 0, $a6 = e.items; $i6 < $a6.length; $i6++) {
+          const item = $a6[$i6];
           result = joinWithComma(result, ctx.simplifyUnusedExpr(item, unsupportedFeatures));
         }
         return result;
@@ -1155,10 +1167,12 @@ Object.assign(HelperContext.prototype, {
         // Objects with "..." spread expressions can't be unwrapped because the
         // "..." triggers code evaluation via getters. In that case, just trim
         // the other items instead and leave the object expression there.
-        for (const spread of e.properties) {
+        for (let $i7 = 0, $a7 = e.properties; $i7 < $a7.length; $i7++) {
+          const spread = $a7[$i7];
           if (spread.kind === PropertySpread) {
             const properties = [];
-            for (const original of e.properties) {
+            for (let $i8 = 0, $a8 = e.properties; $i8 < $a8.length; $i8++) {
+              const original = $a8[$i8];
               const property = original.clone(); // Go copies the struct
               // Spread properties must always be evaluated
               if (property.kind !== PropertySpread) {
@@ -1186,7 +1200,8 @@ Object.assign(HelperContext.prototype, {
         // Otherwise, the object can be completely removed. We only need to keep any
         // object properties with side effects. Apply this simplification recursively.
         let result = null;
-        for (const property of e.properties) {
+        for (let $i9 = 0, $a9 = e.properties; $i9 < $a9.length; $i9++) {
+          const property = $a9[$i9];
           if ((property.flags & PropertyIsComputed) !== 0) {
             // Make sure "ToString" is still evaluated on the key
             result = joinWithComma(
@@ -1339,7 +1354,8 @@ Object.assign(HelperContext.prototype, {
           }
 
           case BinOpAdd: {
-            const [result, isStringAddition] = simplifyUnusedStringAdditionChain(expr);
+            const $d8 = simplifyUnusedStringAdditionChain(expr);
+            const result = $d8[0], isStringAddition = $d8[1];
             if (isStringAddition) {
               return result;
             }
@@ -1464,7 +1480,8 @@ function simplifyUnusedStringAdditionChain(expr) {
 
     case E_BINARY:
       if (e.op === BinOpAdd) {
-        const [left, leftIsStringAddition] = simplifyUnusedStringAdditionChain(e.left);
+        const $d9 = simplifyUnusedStringAdditionChain(e.left);
+        const left = $d9[0], leftIsStringAddition = $d9[1];
 
         const right = e.right.data;
         if (right.k === E_STRING) {
@@ -1584,7 +1601,8 @@ export function toNumberWithoutSideEffects(data) {
       }
 
       // "+'1'" => "1"
-      const [num, ok] = stringToEquivalentNumberValue(e.value);
+      const $d10 = stringToEquivalentNumberValue(e.value);
+      const num = $d10[0], ok = $d10[1];
       if (ok) {
         return [num, true];
       }
@@ -1667,9 +1685,11 @@ export function extractNumericValue(data) {
 
 // Returns [a, b, ok]
 export function extractNumericValues(left, right) {
-  const [a, okA] = extractNumericValue(left.data);
+  const $d11 = extractNumericValue(left.data);
+  const a = $d11[0], okA = $d11[1];
   if (okA) {
-    const [b, okB] = extractNumericValue(right.data);
+    const $d12 = extractNumericValue(right.data);
+    const b = $d12[0], okB = $d12[1];
     if (okB) {
       return [a, b, true];
     }
@@ -1696,9 +1716,11 @@ export function extractStringValue(data) {
 
 // Returns [a, b, ok]
 export function extractStringValues(left, right) {
-  const [a, okA] = extractStringValue(left.data);
+  const $d13 = extractStringValue(left.data);
+  const a = $d13[0], okA = $d13[1];
   if (okA) {
-    const [b, okB] = extractStringValue(right.data);
+    const $d14 = extractStringValue(right.data);
+    const b = $d14[0], okB = $d14[1];
     if (okB) {
       return [a, b, true];
     }
@@ -1769,7 +1791,8 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
     case BinOpAdd: {
       // Addition of small-ish integers can definitely be folded without issues
       // "1 + 2" => "3"
-      const [left, right, ok] = extractNumericValues(binary.left, binary.right);
+      const $d15 = extractNumericValues(binary.left, binary.right);
+      const left = $d15[0], right = $d15[1], ok = $d15[2];
       if (ok && left === Math.trunc(left) && Math.abs(left) <= 0xffffffff && right === Math.trunc(right) && Math.abs(right) <= 0xffffffff) {
         return true;
       }
@@ -1784,7 +1807,8 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
     case BinOpSub: {
       // Subtraction of small-ish integers can definitely be folded without issues
       // "3 - 1" => "2"
-      const [left, right, ok] = extractNumericValues(binary.left, binary.right);
+      const $d16 = extractNumericValues(binary.left, binary.right);
+      const left = $d16[0], right = $d16[1], ok = $d16[2];
       if (ok && left === Math.trunc(left) && Math.abs(left) <= 0xffffffff && right === Math.trunc(right) && Math.abs(right) <= 0xffffffff) {
         return true;
       }
@@ -1794,7 +1818,8 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
     case BinOpMul: {
       // Allow multiplication of small-ish integers to be folded
       // "1 * 2" => "3"
-      const [left, right, ok] = extractNumericValues(binary.left, binary.right);
+      const $d17 = extractNumericValues(binary.left, binary.right);
+      const left = $d17[0], right = $d17[1], ok = $d17[2];
       if (ok && left === Math.trunc(left) && Math.abs(left) <= 0xff && right === Math.trunc(right) && Math.abs(right) <= 0xff) {
         return true;
       }
@@ -1805,7 +1830,8 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
       // "0/0" => "NaN"
       // "1/0" => "Infinity"
       // "1/-0" => "-Infinity"
-      const [, right, ok] = extractNumericValues(binary.left, binary.right);
+      const $d18 = extractNumericValues(binary.left, binary.right);
+      const right = $d18[1], ok = $d18[2];
       if (ok && right === 0) {
         return true;
       }
@@ -1815,7 +1841,8 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
     case BinOpShl: {
       // "1 << 3" => "8"
       // "1 << 24" => "1 << 24" (since "1<<24" is shorter than "16777216")
-      const [left, right, ok] = extractNumericValues(binary.left, binary.right);
+      const $d19 = extractNumericValues(binary.left, binary.right);
+      const left = $d19[0], right = $d19[1], ok = $d19[2];
       if (ok) {
         const leftLen = approximatePrintedIntCharCount(left);
         const rightLen = approximatePrintedIntCharCount(right);
@@ -1828,7 +1855,8 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
     case BinOpUShr: {
       // "10 >>> 1" => "5"
       // "-1 >>> 0" => "-1 >>> 0" (since "-1>>>0" is shorter than "4294967295")
-      const [left, right, ok] = extractNumericValues(binary.left, binary.right);
+      const $d20 = extractNumericValues(binary.left, binary.right);
+      const left = $d20[0], right = $d20[1], ok = $d20[2];
       if (ok) {
         const leftLen = approximatePrintedIntCharCount(left);
         const rightLen = approximatePrintedIntCharCount(right);
@@ -1854,11 +1882,13 @@ export function shouldFoldBinaryOperatorWhenMinifying(binary) {
 export function foldBinaryOperator(loc, e) {
   switch (e.op) {
     case BinOpAdd: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d21 = extractNumericValues(e.left, e.right);
+      const left = $d21[0], right = $d21[1], ok = $d21[2];
       if (ok) {
         return new Expr(new ENumber(left + right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d22 = extractStringValues(e.left, e.right);
+      const ls = $d22[0], rs = $d22[1], ok2 = $d22[2];
       if (ok2) {
         return new Expr(new EString(joinStrings(ls, rs)), loc);
       }
@@ -1866,7 +1896,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpSub: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d23 = extractNumericValues(e.left, e.right);
+      const left = $d23[0], right = $d23[1], ok = $d23[2];
       if (ok) {
         return new Expr(new ENumber(left - right), loc);
       }
@@ -1874,7 +1905,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpMul: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d24 = extractNumericValues(e.left, e.right);
+      const left = $d24[0], right = $d24[1], ok = $d24[2];
       if (ok) {
         return new Expr(new ENumber(left * right), loc);
       }
@@ -1882,7 +1914,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpDiv: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d25 = extractNumericValues(e.left, e.right);
+      const left = $d25[0], right = $d25[1], ok = $d25[2];
       if (ok) {
         return new Expr(new ENumber(left / right), loc);
       }
@@ -1890,7 +1923,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpRem: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d26 = extractNumericValues(e.left, e.right);
+      const left = $d26[0], right = $d26[1], ok = $d26[2];
       if (ok) {
         return new Expr(new ENumber(goMathMod(left, right)), loc);
       }
@@ -1898,7 +1932,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpPow: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d27 = extractNumericValues(e.left, e.right);
+      const left = $d27[0], right = $d27[1], ok = $d27[2];
       if (ok) {
         return new Expr(new ENumber(goMathPow(left, right)), loc);
       }
@@ -1906,7 +1941,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpShl: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d28 = extractNumericValues(e.left, e.right);
+      const left = $d28[0], right = $d28[1], ok = $d28[2];
       if (ok) {
         return new Expr(new ENumber(toInt32(left) << (toUint32(right) & 31)), loc);
       }
@@ -1914,7 +1950,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpShr: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d29 = extractNumericValues(e.left, e.right);
+      const left = $d29[0], right = $d29[1], ok = $d29[2];
       if (ok) {
         return new Expr(new ENumber(toInt32(left) >> (toUint32(right) & 31)), loc);
       }
@@ -1922,7 +1959,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpUShr: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d30 = extractNumericValues(e.left, e.right);
+      const left = $d30[0], right = $d30[1], ok = $d30[2];
       if (ok) {
         return new Expr(new ENumber(toUint32(left) >>> (toUint32(right) & 31)), loc);
       }
@@ -1930,7 +1968,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpBitwiseAnd: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d31 = extractNumericValues(e.left, e.right);
+      const left = $d31[0], right = $d31[1], ok = $d31[2];
       if (ok) {
         return new Expr(new ENumber(toInt32(left) & toInt32(right)), loc);
       }
@@ -1938,7 +1977,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpBitwiseOr: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d32 = extractNumericValues(e.left, e.right);
+      const left = $d32[0], right = $d32[1], ok = $d32[2];
       if (ok) {
         return new Expr(new ENumber(toInt32(left) | toInt32(right)), loc);
       }
@@ -1946,7 +1986,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpBitwiseXor: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d33 = extractNumericValues(e.left, e.right);
+      const left = $d33[0], right = $d33[1], ok = $d33[2];
       if (ok) {
         return new Expr(new ENumber(toInt32(left) ^ toInt32(right)), loc);
       }
@@ -1954,11 +1995,13 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpLt: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d34 = extractNumericValues(e.left, e.right);
+      const left = $d34[0], right = $d34[1], ok = $d34[2];
       if (ok) {
         return new Expr(new EBoolean(left < right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d35 = extractStringValues(e.left, e.right);
+      const ls = $d35[0], rs = $d35[1], ok2 = $d35[2];
       if (ok2) {
         return new Expr(new EBoolean(stringCompareUCS2(ls, rs) < 0), loc);
       }
@@ -1966,11 +2009,13 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpGt: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d36 = extractNumericValues(e.left, e.right);
+      const left = $d36[0], right = $d36[1], ok = $d36[2];
       if (ok) {
         return new Expr(new EBoolean(left > right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d37 = extractStringValues(e.left, e.right);
+      const ls = $d37[0], rs = $d37[1], ok2 = $d37[2];
       if (ok2) {
         return new Expr(new EBoolean(stringCompareUCS2(ls, rs) > 0), loc);
       }
@@ -1978,11 +2023,13 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpLe: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d38 = extractNumericValues(e.left, e.right);
+      const left = $d38[0], right = $d38[1], ok = $d38[2];
       if (ok) {
         return new Expr(new EBoolean(left <= right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d39 = extractStringValues(e.left, e.right);
+      const ls = $d39[0], rs = $d39[1], ok2 = $d39[2];
       if (ok2) {
         return new Expr(new EBoolean(stringCompareUCS2(ls, rs) <= 0), loc);
       }
@@ -1990,11 +2037,13 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpGe: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d40 = extractNumericValues(e.left, e.right);
+      const left = $d40[0], right = $d40[1], ok = $d40[2];
       if (ok) {
         return new Expr(new EBoolean(left >= right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d41 = extractStringValues(e.left, e.right);
+      const ls = $d41[0], rs = $d41[1], ok2 = $d41[2];
       if (ok2) {
         return new Expr(new EBoolean(stringCompareUCS2(ls, rs) >= 0), loc);
       }
@@ -2003,11 +2052,13 @@ export function foldBinaryOperator(loc, e) {
 
     case BinOpLooseEq:
     case BinOpStrictEq: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d42 = extractNumericValues(e.left, e.right);
+      const left = $d42[0], right = $d42[1], ok = $d42[2];
       if (ok) {
         return new Expr(new EBoolean(left === right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d43 = extractStringValues(e.left, e.right);
+      const ls = $d43[0], rs = $d43[1], ok2 = $d43[2];
       if (ok2) {
         return new Expr(new EBoolean(stringCompareUCS2(ls, rs) === 0), loc);
       }
@@ -2016,11 +2067,13 @@ export function foldBinaryOperator(loc, e) {
 
     case BinOpLooseNe:
     case BinOpStrictNe: {
-      const [left, right, ok] = extractNumericValues(e.left, e.right);
+      const $d44 = extractNumericValues(e.left, e.right);
+      const left = $d44[0], right = $d44[1], ok = $d44[2];
       if (ok) {
         return new Expr(new EBoolean(left !== right), loc);
       }
-      const [ls, rs, ok2] = extractStringValues(e.left, e.right);
+      const $d45 = extractStringValues(e.left, e.right);
+      const ls = $d45[0], rs = $d45[1], ok2 = $d45[2];
       if (ok2) {
         return new Expr(new EBoolean(stringCompareUCS2(ls, rs) !== 0), loc);
       }
@@ -2028,7 +2081,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpLogicalAnd: {
-      const [boolean, sideEffects, ok] = toBooleanWithSideEffects(e.left.data);
+      const $d46 = toBooleanWithSideEffects(e.left.data);
+      const boolean = $d46[0], sideEffects = $d46[1], ok = $d46[2];
       if (ok) {
         if (!boolean) {
           return e.left;
@@ -2040,7 +2094,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpLogicalOr: {
-      const [boolean, sideEffects, ok] = toBooleanWithSideEffects(e.left.data);
+      const $d47 = toBooleanWithSideEffects(e.left.data);
+      const boolean = $d47[0], sideEffects = $d47[1], ok = $d47[2];
       if (ok) {
         if (boolean) {
           return e.left;
@@ -2052,7 +2107,8 @@ export function foldBinaryOperator(loc, e) {
     }
 
     case BinOpNullishCoalescing: {
-      const [isNullOrUndefined, sideEffects, ok] = toNullOrUndefinedWithSideEffects(e.left.data);
+      const $d48 = toNullOrUndefinedWithSideEffects(e.left.data);
+      const isNullOrUndefined = $d48[0], sideEffects = $d48[1], ok = $d48[2];
       if (ok) {
         if (!isNullOrUndefined) {
           return e.left;
@@ -2380,7 +2436,8 @@ export function valuesLookTheSame(left, right) {
       break;
   }
 
-  const [equal, ok] = checkEqualityIfNoSideEffects(left, right, StrictEquality);
+  const $d49 = checkEqualityIfNoSideEffects(left, right, StrictEquality);
+  const equal = $d49[0], ok = $d49[1];
   return ok && equal;
 }
 
@@ -2475,14 +2532,16 @@ function foldAdditionPreProcess(expr) {
       // "[] + x" => "'' + x"
       // "[1,2] + x" => "'1,2' + x"
       const items = [];
-      for (const item of e.items) {
+      for (let $i10 = 0, $a10 = e.items; $i10 < $a10.length; $i10++) {
+        const item = $a10[$i10];
         let itemData = item.data;
         const ik = itemData.k;
         if (ik === E_UNDEFINED || ik === E_NULL) {
           items.push("");
           continue;
         }
-        const [str, ok] = toStringWithoutSideEffects(itemData);
+        const $d50 = toStringWithoutSideEffects(itemData);
+        const str = $d50[0], ok = $d50[1];
         if (ok) {
           itemData = new EString(str);
         }
@@ -2526,7 +2585,8 @@ export function foldStringAddition(left, right, kind) {
   if (kind !== StringAdditionWithNestedLeft) {
     const rk = right.data.k;
     if (rk === E_STRING || rk === E_TEMPLATE) {
-      const [str, ok] = toStringWithoutSideEffects(left.data);
+      const $d51 = toStringWithoutSideEffects(left.data);
+      const str = $d51[0], ok = $d51[1];
       if (ok) {
         left = new Expr(new EString(str), left.loc);
       }
@@ -2537,7 +2597,8 @@ export function foldStringAddition(left, right, kind) {
   switch (l.k) {
     case E_STRING: {
       // "'x' + 0" => "'x' + '0'"
-      const [str, ok] = toStringWithoutSideEffects(right.data);
+      const $d52 = toStringWithoutSideEffects(right.data);
+      const str = $d52[0], ok = $d52[1];
       if (ok) {
         right = new Expr(new EString(str), right.loc);
       }
@@ -2566,7 +2627,8 @@ export function foldStringAddition(left, right, kind) {
     case E_TEMPLATE:
       if (l.tagOrNil === null) {
         // "`${x}` + 0" => "`${x}` + '0'"
-        const [str, ok] = toStringWithoutSideEffects(right.data);
+        const $d53 = toStringWithoutSideEffects(right.data);
+        const str = $d53[0], ok = $d53[1];
         if (ok) {
           right = new Expr(new EString(str), right.loc);
         }
@@ -2630,13 +2692,15 @@ export function inlinePrimitivesIntoTemplate(loc, e) {
   let headCooked = e.headCooked;
   const parts = [];
 
-  for (const original of e.parts) {
+  for (let $i11 = 0, $a11 = e.parts; $i11 < $a11.length; $i11++) {
+    const original = $a11[$i11];
     const part = original.clone(); // Go copies the struct
     const value = part.value.data;
     if (value.k === E_INLINED_ENUM) {
       part.value = value.value;
     }
-    const [str, ok] = toStringWithoutSideEffects(part.value.data);
+    const $d54 = toStringWithoutSideEffects(part.value.data);
+    const str = $d54[0], ok = $d54[1];
     if (ok) {
       part.value = new Expr(new EString(str), part.value.loc);
     }
@@ -2671,9 +2735,9 @@ export function toNullOrUndefinedWithSideEffects(data) {
   const e = data;
   switch (e.k) {
     case E_ANNOTATION: {
-      const result = toNullOrUndefinedWithSideEffects(e.value.data);
+      let result = toNullOrUndefinedWithSideEffects(e.value.data);
       if ((e.flags & CanBeRemovedIfUnusedFlag) !== 0) {
-        result[1] = NoSideEffects;
+        result = [result[0], NoSideEffects, result[2]]; // (results may be shared)
       }
       return result;
     }
@@ -2776,7 +2840,8 @@ export function toNullOrUndefinedWithSideEffects(data) {
           return [false, CouldHaveSideEffects, true];
 
         case BinOpComma: {
-          const [isNullOrUndefined, , ok] = toNullOrUndefinedWithSideEffects(e.right.data);
+          const $d55 = toNullOrUndefinedWithSideEffects(e.right.data);
+          const isNullOrUndefined = $d55[0], ok = $d55[2];
           if (ok) {
             return [isNullOrUndefined, CouldHaveSideEffects, true];
           }
@@ -2786,8 +2851,11 @@ export function toNullOrUndefinedWithSideEffects(data) {
       break;
   }
 
-  return [false, NoSideEffects, false];
+  return NULL_OR_UNDEFINED_UNKNOWN; // [false, NoSideEffects, false]
 }
+
+// (Shared: callers only read the results)
+const NULL_OR_UNDEFINED_UNKNOWN = Object.freeze([false, NoSideEffects, false]);
 
 // Returns [boolean, sideEffects, ok]
 export function toBooleanWithSideEffects(data) {
@@ -2795,9 +2863,9 @@ export function toBooleanWithSideEffects(data) {
   const e = data;
   switch (e.k) {
     case E_ANNOTATION: {
-      const result = toBooleanWithSideEffects(e.value.data);
+      let result = toBooleanWithSideEffects(e.value.data);
       if ((e.flags & CanBeRemovedIfUnusedFlag) !== 0) {
-        result[1] = NoSideEffects;
+        result = [result[0], NoSideEffects, result[2]]; // (results may be shared)
       }
       return result;
     }
@@ -2816,7 +2884,8 @@ export function toBooleanWithSideEffects(data) {
       return [e.value !== 0 && e.value === e.value, NoSideEffects, true];
 
     case E_BIG_INT: {
-      const [equal, ok] = checkEqualityBigInt(e.value, "0");
+      const $d56 = checkEqualityBigInt(e.value, "0");
+      const equal = $d56[0], ok = $d56[1];
       return [!equal, NoSideEffects, ok];
     }
 
@@ -2847,7 +2916,8 @@ export function toBooleanWithSideEffects(data) {
           return [true, CouldHaveSideEffects, true];
 
         case UnOpNot: {
-          const [boolean, sideEffects, ok] = toBooleanWithSideEffects(e.value.data);
+          const $d57 = toBooleanWithSideEffects(e.value.data);
+          const boolean = $d57[0], sideEffects = $d57[1], ok = $d57[2];
           if (ok) {
             return [!boolean, sideEffects, true];
           }
@@ -2860,7 +2930,8 @@ export function toBooleanWithSideEffects(data) {
       switch (e.op) {
         case BinOpLogicalOr: {
           // "anything || truthy" is truthy
-          const [boolean, , ok] = toBooleanWithSideEffects(e.right.data);
+          const $d58 = toBooleanWithSideEffects(e.right.data);
+          const boolean = $d58[0], ok = $d58[2];
           if (ok && boolean) {
             return [true, CouldHaveSideEffects, true];
           }
@@ -2869,7 +2940,8 @@ export function toBooleanWithSideEffects(data) {
 
         case BinOpLogicalAnd: {
           // "anything && falsy" is falsy
-          const [boolean, , ok] = toBooleanWithSideEffects(e.right.data);
+          const $d59 = toBooleanWithSideEffects(e.right.data);
+          const boolean = $d59[0], ok = $d59[2];
           if (ok && !boolean) {
             return [false, CouldHaveSideEffects, true];
           }
@@ -2878,7 +2950,8 @@ export function toBooleanWithSideEffects(data) {
 
         case BinOpComma: {
           // "anything, truthy/falsy" is truthy/falsy
-          const [boolean, , ok] = toBooleanWithSideEffects(e.right.data);
+          const $d60 = toBooleanWithSideEffects(e.right.data);
+          const boolean = $d60[0], ok = $d60[2];
           if (ok) {
             return [boolean, CouldHaveSideEffects, true];
           }
@@ -2888,8 +2961,11 @@ export function toBooleanWithSideEffects(data) {
       break;
   }
 
-  return [false, CouldHaveSideEffects, false];
+  return BOOLEAN_UNKNOWN; // [false, CouldHaveSideEffects, false]
 }
+
+// (Shared: callers only read the results)
+const BOOLEAN_UNKNOWN = Object.freeze([false, CouldHaveSideEffects, false]);
 
 Object.assign(HelperContext.prototype, {
   // Simplify syntax when we know it's used inside a boolean context
@@ -2923,7 +2999,8 @@ Object.assign(HelperContext.prototype, {
           case BinOpStrictNe:
           case BinOpLooseEq:
           case BinOpLooseNe: {
-            const [r, ok] = extractNumericValue(right.data);
+            const $d61 = extractNumericValue(right.data);
+            const r = $d61[0], ok = $d61[1];
             if (ok && r === 0 && isInt32OrUint32(left.data)) {
               // If the left is guaranteed to be an integer (e.g. not NaN,
               // Infinity, or a non-numeric value) then a test against zero
@@ -2945,7 +3022,8 @@ Object.assign(HelperContext.prototype, {
             left = ctx.simplifyBooleanExpr(left);
             right = ctx.simplifyBooleanExpr(right);
 
-            const [boolean, sideEffects, ok] = toBooleanWithSideEffects(right.data);
+            const $d62 = toBooleanWithSideEffects(right.data);
+            const boolean = $d62[0], sideEffects = $d62[1], ok = $d62[2];
             if (ok && boolean && sideEffects === NoSideEffects) {
               // "if (anything && truthyNoSideEffects)" => "if (anything)"
               return left;
@@ -2958,7 +3036,8 @@ Object.assign(HelperContext.prototype, {
             left = ctx.simplifyBooleanExpr(left);
             right = ctx.simplifyBooleanExpr(right);
 
-            const [boolean, sideEffects, ok] = toBooleanWithSideEffects(right.data);
+            const $d63 = toBooleanWithSideEffects(right.data);
+            const boolean = $d63[0], sideEffects = $d63[1], ok = $d63[2];
             if (ok && !boolean && sideEffects === NoSideEffects) {
               // "if (anything || falsyNoSideEffects)" => "if (anything)"
               return left;
@@ -2979,7 +3058,8 @@ Object.assign(HelperContext.prototype, {
         const no = ctx.simplifyBooleanExpr(e.no);
 
         {
-          const [boolean, sideEffects, ok] = toBooleanWithSideEffects(yes.data);
+          const $d64 = toBooleanWithSideEffects(yes.data);
+          const boolean = $d64[0], sideEffects = $d64[1], ok = $d64[2];
           if (ok && sideEffects === NoSideEffects) {
             if (boolean) {
               // "if (anything1 ? truthyNoSideEffects : anything2)" => "if (anything1 || anything2)"
@@ -2992,7 +3072,8 @@ Object.assign(HelperContext.prototype, {
         }
 
         {
-          const [boolean, sideEffects, ok] = toBooleanWithSideEffects(no.data);
+          const $d65 = toBooleanWithSideEffects(no.data);
+          const boolean = $d65[0], sideEffects = $d65[1], ok = $d65[2];
           if (ok && sideEffects === NoSideEffects) {
             if (boolean) {
               // "if (anything1 ? anything2 : truthyNoSideEffects)" => "if (!anything1 || anything2)"
@@ -3012,7 +3093,8 @@ Object.assign(HelperContext.prototype, {
 
       default: {
         // "!![]" => "true"
-        const [boolean, sideEffects, ok] = toBooleanWithSideEffects(expr.data);
+        const $d66 = toBooleanWithSideEffects(expr.data);
+        const boolean = $d66[0], sideEffects = $d66[1], ok = $d66[2];
         if (ok && (sideEffects === NoSideEffects || ctx.exprCanBeRemovedIfUnused(expr))) {
           return new Expr(new EBoolean(boolean), expr.loc);
         }
@@ -3082,7 +3164,8 @@ Object.assign(HelperContext.prototype, {
             return false;
           }
 
-          for (const decl of s.decls) {
+          for (let $i12 = 0, $a12 = s.decls; $i12 < $a12.length; $i12++) {
+            const decl = $a12[$i12];
             // Check that the bindings are side-effect free
             const binding = decl.binding.data;
             switch (binding.k) {
@@ -3095,7 +3178,8 @@ Object.assign(HelperContext.prototype, {
                 // initializer is an array, since we assume the iterator is then
                 // the built-in side-effect free array iterator.
                 if (decl.valueOrNil !== null && decl.valueOrNil.data.k === E_ARRAY) {
-                  for (const item of binding.items) {
+                  for (let $i13 = 0, $a13 = binding.items; $i13 < $a13.length; $i13++) {
+                    const item = $a13[$i13];
                     if (item.defaultValueOrNil !== null && !ctx.exprCanBeRemovedIfUnused(item.defaultValueOrNil)) {
                       return false;
                     }
@@ -3207,7 +3291,8 @@ Object.assign(HelperContext.prototype, {
       return false;
     }
 
-    for (const property of class_.properties) {
+    for (let $i14 = 0, $a14 = class_.properties; $i14 < $a14.length; $i14++) {
+      const property = $a14[$i14];
       if (property.kind === PropertyClassStaticBlock) {
         if (!ctx.stmtsCanBeRemovedIfUnused(property.classStaticBlock.block.stmts, 0)) {
           return false;
@@ -3227,7 +3312,8 @@ Object.assign(HelperContext.prototype, {
         if (property.valueOrNil !== null) {
           const fn = property.valueOrNil.data;
           if (fn.k === E_FUNCTION) {
-            for (const arg of fn.fn.args) {
+            for (let $i15 = 0, $a15 = fn.fn.args; $i15 < $a15.length; $i15++) {
+              const arg = $a15[$i15];
               if (arg.decorators.length > 0) {
                 return false;
               }
@@ -3391,7 +3477,8 @@ Object.assign(HelperContext.prototype, {
         return true;
 
       case E_OBJECT:
-        for (const property of e.properties) {
+        for (let $i16 = 0, $a16 = e.properties; $i16 < $a16.length; $i16++) {
+          const property = $a16[$i16];
           // The key must still be evaluated if it's computed or a spread
           if (property.kind === PropertySpread) {
             return false;
@@ -3411,7 +3498,8 @@ Object.assign(HelperContext.prototype, {
         // A call that has been marked "__PURE__" can be removed if all arguments
         // can be removed. The annotation causes us to ignore the target.
         if (canCallBeRemoved) {
-          for (const arg of e.args) {
+          for (let $i17 = 0, $a17 = e.args; $i17 < $a17.length; $i17++) {
+            const arg = $a17[$i17];
             if (!ctx.exprCanBeRemovedIfUnused(arg)) {
               return false;
             }
@@ -3425,7 +3513,8 @@ Object.assign(HelperContext.prototype, {
         // A constructor call that has been marked "__PURE__" can be removed if all
         // arguments can be removed. The annotation causes us to ignore the target.
         if (e.canBeUnwrappedIfUnused) {
-          for (const arg of e.args) {
+          for (let $i18 = 0, $a18 = e.args; $i18 < $a18.length; $i18++) {
+            const arg = $a18[$i18];
             if (!ctx.exprCanBeRemovedIfUnused(arg)) {
               return false;
             }
@@ -3519,7 +3608,8 @@ Object.assign(HelperContext.prototype, {
         // effects and results in some kind of primitive, since all primitives
         // have a "ToString" operation with no side effects.
         if (e.tagOrNil === null || e.canBeUnwrappedIfUnused) {
-          for (const part of e.parts) {
+          for (let $i19 = 0, $a19 = e.parts; $i19 < $a19.length; $i19++) {
+            const part = $a19[$i19];
             if (!ctx.exprCanBeRemovedIfUnused(part.value) || knownPrimitiveType(part.value.data) === PrimitiveUnknown) {
               return false;
             }
@@ -3647,7 +3737,8 @@ export function inlineSpreadsOfArrayLiterals(values) {
     if (spread.k === E_SPREAD) {
       const array = spread.value.data;
       if (array.k === E_ARRAY) {
-        for (const item of array.items) {
+        for (let $i20 = 0, $a20 = array.items; $i20 < $a20.length; $i20++) {
+          const item = $a20[$i20];
           if (item.data.k === E_MISSING) {
             results.push(new Expr(EUndefinedShared, item.loc));
           } else {
@@ -3972,13 +4063,15 @@ export function forEachIdentifierBinding(binding, callback) {
       break;
 
     case B_ARRAY:
-      for (const item of b.items) {
+      for (let $i21 = 0, $a21 = b.items; $i21 < $a21.length; $i21++) {
+        const item = $a21[$i21];
         forEachIdentifierBinding(item.binding, callback);
       }
       break;
 
     case B_OBJECT:
-      for (const property of b.properties) {
+      for (let $i22 = 0, $a22 = b.properties; $i22 < $a22.length; $i22++) {
+        const property = $a22[$i22];
         forEachIdentifierBinding(property.value, callback);
       }
       break;

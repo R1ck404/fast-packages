@@ -158,6 +158,7 @@ import {
   WrapESM,
   EMPTY_ARRAY,
   writableSymbolUses,
+  markSymbolUsesShared,
   writableSymbol,
   writableSymbolChain,
   sortedResolvedExportAliases,
@@ -168,7 +169,7 @@ import {
 import { assign, assignStmt, joinWithComma, convertBindingToExpr, forEachIdentifierBindingInDecls } from "./js_ast_helpers.mjs";
 import { isIdentifier, isIdentifierES5AndESNext } from "./js_ident.mjs";
 import { Keywords } from "./js_lexer.mjs";
-import { print as printJS, Options as PrinterOptions } from "./js_printer.mjs";
+import { print as printJS, Options as PrinterOptions, PrintResult, INLINE_SCRIPT_FEATURE } from "./js_printer.mjs";
 import { computeReservedNames, newNumberRenamer } from "./renamer.mjs";
 import {
   LineColumnOffset,
@@ -271,6 +272,8 @@ class linkerContext {
     // export part, for parts whose statements are built lazily (see
     // createExportsForFile)
     this.lazyNSExportStmts = new Map();
+    // JS-only: source index -> the arguments of that builder
+    this.lazyNSExportArgs = new Map();
   }
 }
 
@@ -539,7 +542,8 @@ Object.assign(linkerContext.prototype, {
       const commentSuffix = "";
 
       // Path substitution for the chunk itself
-      const [outputContentsJoiner, outputSourceMapShifts] = c.substituteFinalPaths(chunk.intermediateOutput);
+      const $d215 = c.substituteFinalPaths(chunk.intermediateOutput);
+      const outputContentsJoiner = $d215[0], outputSourceMapShifts = $d215[1];
 
       // Generate the optional legal comments file for this chunk
       if (chunk.externalLegalComments.length > 0) {
@@ -750,7 +754,8 @@ Object.assign(linkerContext.prototype, {
       // method, whatever it is, will need to invoke the wrapper. Note that
       // this can include entry points (e.g. an entry point that imports a file
       // that imports that entry point).
-      for (const record of repr.ast.importRecords) {
+      for (let $i75 = 0, $a75 = repr.ast.importRecords; $i75 < $a75.length; $i75++) {
+        const record = $a75[$i75];
         if (record.sourceIndex >= 0) {
           const otherRepr = files[record.sourceIndex].inputFile.repr;
           if (otherRepr.ast.exportsKind === ExportsCommonJS) {
@@ -826,6 +831,18 @@ Object.assign(linkerContext.prototype, {
       const repr = files[sourceIndex].inputFile.repr;
       if (!(repr instanceof JSRepr)) continue;
 
+      // JS-only: for the cached runtime AST the result of this step is the same
+      // in every transform (see sharedStep5Memo)
+      let memo = null;
+      const memoizable = files[sourceIndex].inputFile.astIsShared && sharedStep5IsMemoizable(repr);
+      if (memoizable) {
+        memo = sharedStep5Memos.get(repr.ast.namedExports);
+        if (memo !== undefined && !globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__) {
+          restoreSharedStep5(c, sourceIndex, repr, memo);
+          continue;
+        }
+      }
+
       // Now that all exports have been resolved, sort and filter them to create
       // something we can iterate over later. (The port sorts first and then
       // filters in sorted order, which gives the same result because the
@@ -879,6 +896,16 @@ Object.assign(linkerContext.prototype, {
       c.createExportsForFile(sourceIndex);
 
       c.computeDependenciesForFileParts(sourceIndex, repr);
+
+      if (memoizable) {
+        const snapshot = snapshotSharedStep5(c, sourceIndex, repr);
+        if (memo === undefined) {
+          sharedStep5Memos.set(repr.ast.namedExports, snapshot);
+        } else if (!sharedStep5SnapshotsEqual(memo, snapshot)) {
+          // (Test hook: the memo must match a fresh computation)
+          throw new globalThis.Error("fast-esbuild: step 5 memo mismatch");
+        }
+      }
     }
 
     // Step 6: Bind imports to exports. This adds non-local dependencies on the
@@ -932,7 +959,8 @@ Object.assign(linkerContext.prototype, {
 
         const namedImport = repr.ast.namedImports.get(importRef);
         if (namedImport !== undefined) {
-          for (const partIndex of namedImport.localPartsWithUses) {
+          for (let $i76 = 0, $a76 = namedImport.localPartsWithUses; $i76 < $a76.length; $i76++) {
+            const partIndex = $a76[$i76];
             const part = repr.ast.parts[partIndex];
 
             // Depend on the file containing the imported symbol
@@ -1013,7 +1041,8 @@ Object.assign(linkerContext.prototype, {
         let runtimeRequireUses = 0;
 
         // Imports of wrapped files must depend on the wrapper
-        for (const importRecordIndex of part.importRecordIndices) {
+        for (let $i77 = 0, $a77 = part.importRecordIndices; $i77 < $a77.length; $i77++) {
+          const importRecordIndex = $a77[$i77];
           const record = repr.ast.importRecords[importRecordIndex];
 
           // Don't follow external imports (this includes import() expressions)
@@ -1117,7 +1146,8 @@ Object.assign(linkerContext.prototype, {
         // If there's an ES6 export star statement of a non-ES6 module, then we're
         // going to need the "__reExport" symbol from the runtime
         let reExportUses = 0;
-        for (const importRecordIndex of repr.ast.exportStarImportRecords) {
+        for (let $i78 = 0, $a78 = repr.ast.exportStarImportRecords; $i78 < $a78.length; $i78++) {
+          const importRecordIndex = $a78[$i78];
           const record = repr.ast.importRecords[importRecordIndex];
 
           // Is this export star evaluated at run time?
@@ -1436,6 +1466,8 @@ Object.assign(linkerContext.prototype, {
       if (lazy) {
         part.stmts = EMPTY_ARRAY;
         c.lazyNSExportStmts.set(sourceIndex, build);
+        // (Recorded for sharedStep5Memo)
+        c.lazyNSExportArgs.set(sourceIndex, [aliases, exportRefs, exportRefsAreImports, needsExportsVariable, exportRef, assignModuleExports]);
       } else {
         part.stmts = build();
       }
@@ -1640,7 +1672,8 @@ Object.assign(linkerContext.prototype, {
       c.cycleDetector.length = 0;
 
       const importRef = makeRef(sourceIndex, innerIndex);
-      let [result, reExports] = c.matchImportWithExport(new importTracker(sourceIndex, 0, importRef), []);
+      const $d216 = c.matchImportWithExport(new importTracker(sourceIndex, 0, importRef), []);
+      let result = $d216[0], reExports = $d216[1];
       if (reExports === null) reExports = EMPTY_ARRAY;
       switch (result.kind) {
         case matchImportIgnore:
@@ -1721,7 +1754,8 @@ Object.assign(linkerContext.prototype, {
       c.cycleDetector.push(tracker);
 
       // Resolve the import by one step
-      const [nextTracker, status, potentiallyAmbiguousExportStarRefs] = c.advanceImportTracker(tracker);
+      const $d217 = c.advanceImportTracker(tracker);
+      const nextTracker = $d217[0], status = $d217[1], potentiallyAmbiguousExportStarRefs = $d217[2];
       switch (status) {
         case importCommonJS:
         case importCommonJSWithoutExports:
@@ -1923,7 +1957,8 @@ Object.assign(linkerContext.prototype, {
     }
 
     // All dependencies must also be wrapped
-    for (const record of repr.ast.importRecords) {
+    for (let $i79 = 0, $a79 = repr.ast.importRecords; $i79 < $a79.length; $i79++) {
+      const record = $a79[$i79];
       if (record.sourceIndex >= 0) {
         c.recursivelyWrapDependencies(record.sourceIndex);
       }
@@ -1944,7 +1979,8 @@ Object.assign(linkerContext.prototype, {
     visited.add(sourceIndex);
 
     // Scan over the export star graph
-    for (const importRecordIndex of repr.ast.exportStarImportRecords) {
+    for (let $i80 = 0, $a80 = repr.ast.exportStarImportRecords; $i80 < $a80.length; $i80++) {
+      const importRecordIndex = $a80[$i80];
       const record = repr.ast.importRecords[importRecordIndex];
 
       // This file has dynamic exports if the exported imports are from a file
@@ -1975,7 +2011,8 @@ Object.assign(linkerContext.prototype, {
     sourceIndexStack.push(sourceIndex);
     const repr = c.graph.files[sourceIndex].inputFile.repr;
 
-    for (const importRecordIndex of repr.ast.exportStarImportRecords) {
+    for (let $i81 = 0, $a81 = repr.ast.exportStarImportRecords; $i81 < $a81.length; $i81++) {
+      const importRecordIndex = $a81[$i81];
       const record = repr.ast.importRecords[importRecordIndex];
       if (!(record.sourceIndex >= 0)) {
         // This will be resolved at run time instead
@@ -2211,15 +2248,18 @@ Object.assign(linkerContext.prototype, {
       }
 
       // Traverse into all imported files
-      for (const record of repr.ast.importRecords) {
+      for (let $i82 = 0, $a82 = repr.ast.importRecords; $i82 < $a82.length; $i82++) {
+        const record = $a82[$i82];
         if (record.sourceIndex >= 0 && !c.isExternalDynamicImport(record, sourceIndex)) {
           c.markFileReachableForCodeSplitting(record.sourceIndex, entryPointBit, distanceFromEntryPoint);
         }
       }
 
       // Traverse into all dependencies of all parts in this file
-      for (const part of repr.ast.parts) {
-        for (const dependency of part.dependencies) {
+      for (let $i83 = 0, $a83 = repr.ast.parts; $i83 < $a83.length; $i83++) {
+        const part = $a83[$i83];
+        for (let $i84 = 0, $a84 = part.dependencies; $i84 < $a84.length; $i84++) {
+          const dependency = $a84[$i84];
           if (dependency.sourceIndex !== sourceIndex) {
             c.markFileReachableForCodeSplitting(dependency.sourceIndex, entryPointBit, distanceFromEntryPoint);
           }
@@ -2251,7 +2291,8 @@ Object.assign(linkerContext.prototype, {
         let canBeRemovedIfUnused = part.canBeRemovedIfUnused;
 
         // Also include any statement-level imports
-        for (const importRecordIndex of part.importRecordIndices) {
+        for (let $i85 = 0, $a85 = part.importRecordIndices; $i85 < $a85.length; $i85++) {
+          const importRecordIndex = $a85[$i85];
           const record = repr.ast.importRecords[importRecordIndex];
           if (record.kind !== ImportStmt) continue;
 
@@ -2313,7 +2354,8 @@ Object.assign(linkerContext.prototype, {
     c.markFileLiveForTreeShaking(sourceIndex);
 
     // Also include any dependencies
-    for (const dep of part.dependencies) {
+    for (let $i86 = 0, $a86 = part.dependencies; $i86 < $a86.length; $i86++) {
+      const dep = $a86[$i86];
       c.markPartLiveForTreeShaking(dep.sourceIndex, dep.partIndex);
     }
   },
@@ -2333,14 +2375,16 @@ Object.assign(linkerContext.prototype, {
       const repr = file.inputFile.repr;
 
       // Iterate over each part in the file in order
-      for (const part of repr.ast.parts) {
+      for (let $i87 = 0, $a87 = repr.ast.parts; $i87 < $a87.length; $i87++) {
+        const part = $a87[$i87];
         // Traverse any files imported by this part. Note that CommonJS calls
         // to "require()" count as imports too, sort of as if the part has an
         // ESM "import" statement in it. This may seem weird because ESM imports
         // are a compile-time concept while CommonJS imports are a run-time
         // concept. But we don't want to manipulate <style> tags at run-time so
         // this is the only way to do it.
-        for (const importRecordIndex of part.importRecordIndices) {
+        for (let $i88 = 0, $a88 = part.importRecordIndices; $i88 < $a88.length; $i88++) {
+          const importRecordIndex = $a88[$i88];
           const record = repr.ast.importRecords[importRecordIndex];
           if (record.sourceIndex >= 0) {
             visit(record.sourceIndex);
@@ -2442,7 +2486,8 @@ Object.assign(linkerContext.prototype, {
     // Determine the order of JS files (and parts) within the chunk ahead of time
     for (const chunk of sortedChunks) {
       const chunkRepr = chunk.chunkRepr;
-      const [js, jsParts] = c.findImportedPartsInJSOrder(chunk);
+      const $d218 = c.findImportedPartsInJSOrder(chunk);
+      const js = $d218[0], jsParts = $d218[1];
       chunkRepr.filesInChunkInOrder = js;
       chunkRepr.partsInChunkInOrder = jsParts;
     }
@@ -2529,7 +2574,8 @@ Object.assign(linkerContext.prototype, {
           const isPartInThisChunk = isFileInThisChunk && part.isLive;
 
           // Also traverse any files imported by this part
-          for (const importRecordIndex of part.importRecordIndices) {
+          for (let $i89 = 0, $a89 = part.importRecordIndices; $i89 < $a89.length; $i89++) {
+            const importRecordIndex = $a89[$i89];
             const record = repr.ast.importRecords[importRecordIndex];
             if (record.sourceIndex >= 0 && (record.kind === ImportStmt || isPartInThisChunk)) {
               if (c.isExternalDynamicImport(record, sourceIndex)) {
@@ -2924,6 +2970,235 @@ function canEscapeIdentifier(name) {
 // js_printer.Options with the fields that both linker call sites set. Fields
 // that Go leaves at their zero value are set explicitly (nil maps become empty
 // Maps, which behave identically for lookups).
+// JS-only: step 5 of scanImportsAndExports for the cached runtime AST.
+// createExportsForFile and computeDependenciesForFileParts only depend on the
+// file itself for a file that imports nothing, has no export stars, is not
+// wrapped and has no extra parts or overlay (the runtime), plus on
+// "needsExportsVariable", which is part of the key. Their results (the sorted
+// aliases, the namespace export part, and every part's symbol uses and
+// dependencies) are memoized per shared AST and copied into later links.
+// (Test hook: with __FAST_ESBUILD_VERIFY_RUNTIME_CACHE__ the step always runs
+// and must produce what the memo says.)
+const sharedStep5Memos = new WeakMap(); // shared namedExports -> snapshot
+
+function sharedStep5IsMemoizable(repr) {
+  const meta = repr.meta;
+  const ast = repr.ast;
+  return (
+    meta.wrap === WrapNone &&
+    meta.wrapperPartIndex < 0 &&
+    !meta.forceIncludeExportsForEntryPoint &&
+    meta.importsToBind.size === 0 &&
+    meta.isProbablyTypeScriptType.size === 0 &&
+    meta.topLevelSymbolToPartsOverlay === null &&
+    ast.namedExports !== null &&
+    meta.resolvedExports.size === ast.namedExports.size &&
+    ast.exportStarImportRecords.length === 0 &&
+    ast.namedImports.size === 0
+  );
+}
+
+function snapshotSharedStep5(c, sourceIndex, repr) {
+
+  const parts = repr.ast.parts;
+  const symbolUses = new Array(parts.length);
+  const deps = new Array(parts.length);
+  for (let i = 0; i < parts.length; i++) {
+    symbolUses[i] = parts[i].symbolUses;
+    // (These maps are now shared with later links: writes must copy them)
+    markSymbolUsesShared(parts[i].symbolUses);
+    deps[i] = parts[i].dependencies.slice();
+  }
+  const nsArgs = c.lazyNSExportArgs.get(sourceIndex) ?? null;
+  return {
+    needsExportsVariable: repr.meta.needsExportsVariable,
+    partsLength: parts.length,
+    aliases: repr.meta.sortedAndFilteredExportAliases,
+    nsArgs,
+    part0DeclaredSymbols: nsArgs !== null ? parts[NSExportPartIndex].declaredSymbols : null,
+    symbolUses,
+    deps,
+    usesExportsRef: repr.ast.usesExportsRef,
+    needsExportSymbolFromRuntime: repr.meta.needsExportSymbolFromRuntime,
+  };
+}
+
+function restoreSharedStep5(c, sourceIndex, repr, memo) {
+  const parts = repr.ast.parts;
+  if (memo.needsExportsVariable !== repr.meta.needsExportsVariable || memo.partsLength !== parts.length) {
+    bail(); // (never happens for the runtime; see sharedStep5IsMemoizable)
+  }
+  repr.meta.sortedAndFilteredExportAliases = memo.aliases;
+  if (memo.nsArgs !== null) {
+    // (See createExportsForFile)
+    const part = new Part();
+    part.stmts = EMPTY_ARRAY;
+    part.declaredSymbols = memo.part0DeclaredSymbols;
+    part.canBeRemovedIfUnused = true;
+    part.forceTreeShaking = true;
+    parts[NSExportPartIndex] = part;
+    const args = memo.nsArgs;
+    c.lazyNSExportStmts.set(sourceIndex, () => c.buildNSExportStmts(repr, args[0], args[1], args[2], args[3], args[4], args[5]));
+    c.lazyNSExportArgs.set(sourceIndex, args);
+  }
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    part.symbolUses = memo.symbolUses[i];
+    part.dependencies = memo.deps[i].slice();
+  }
+  if (memo.usesExportsRef) repr.ast.usesExportsRef = true;
+  if (memo.needsExportSymbolFromRuntime) repr.meta.needsExportSymbolFromRuntime = true;
+}
+
+function symbolUsesEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const [ref, use] of a) {
+    const other = b.get(ref);
+    if (other === undefined || other.countEstimate !== use.countEstimate) return false;
+  }
+  return true;
+}
+
+function sharedStep5SnapshotsEqual(a, b) {
+  if (
+    a.needsExportsVariable !== b.needsExportsVariable ||
+    a.partsLength !== b.partsLength ||
+    a.usesExportsRef !== b.usesExportsRef ||
+    a.needsExportSymbolFromRuntime !== b.needsExportSymbolFromRuntime ||
+    a.aliases.join("\0") !== b.aliases.join("\0") ||
+    (a.nsArgs === null) !== (b.nsArgs === null)
+  ) {
+    return false;
+  }
+  if (a.nsArgs !== null && JSON.stringify(a.nsArgs) !== JSON.stringify(b.nsArgs)) return false;
+  if (a.part0DeclaredSymbols !== null && JSON.stringify(a.part0DeclaredSymbols) !== JSON.stringify(b.part0DeclaredSymbols)) return false;
+  for (let i = 0; i < a.partsLength; i++) {
+    if (!symbolUsesEqual(a.symbolUses[i], b.symbolUses[i])) return false;
+    const da = a.deps[i];
+    const db = b.deps[i];
+    if (da.length !== db.length) return false;
+    for (let j = 0; j < da.length; j++) {
+      if (da[j].sourceIndex !== db[j].sourceIndex || da[j].partIndex !== db[j].partIndex) return false;
+    }
+  }
+  return true;
+}
+
+// JS-only: the printed code of the runtime helpers (the live parts of the
+// runtime file) is cached across transforms. The printer's output is a pure
+// function of the statements it prints, the printer options, and the names
+// the renamer returns for the symbols it prints. For the shared runtime AST
+// the statements only depend on which parts are live and on the options (the
+// runtime is never wrapped, never an entry point and imports nothing), so an
+// entry is keyed by those and remembers every (ref, name) pair the renamer
+// returned while printing. It is only reused if the renamer returns the same
+// names now: user code can make runtime names collide (e.g. "__defProp2", or
+// a nested "key2" next to a top-level "key").
+const runtimePrintCache = new WeakMap(); // runtime Source -> Map<string, entry>
+
+class recordingRenamer {
+  constructor(r) {
+    this.r = r;
+    this.names = new Map(); // ref -> name
+  }
+  nameForSymbol(ref) {
+    const name = this.r.nameForSymbol(ref);
+    this.names.set(ref, name);
+    return name;
+  }
+}
+
+function clonePrintResult(pr) {
+  let chunk = pr.sourceMapChunk;
+  if (chunk !== null) {
+    chunk = new SourceMapChunk(
+      new MappingsBuffer(chunk.buffer.data, chunk.buffer.firstNameOffset),
+      chunk.quotedNames === null ? null : chunk.quotedNames.slice(),
+      chunk.endState.clone(),
+      chunk.finalGeneratedColumn,
+      chunk.shouldIgnore,
+    );
+  }
+  return new PrintResult(pr.js, pr.extractedLegalComments.slice(), pr.jsonMetadataImports.slice(), chunk);
+}
+
+function printRuntimeCached(c, file, partRange, tree, r, o) {
+  const repr = file.inputFile.repr;
+  // (Anything unusual is printed without the cache)
+  if (
+    o.lineLimit !== 0 ||
+    o.minifyWhitespace ||
+    o.minifyIdentifiers ||
+    o.minifySyntax ||
+    (o.unsupportedFeatures !== 0 && o.unsupportedFeatures !== INLINE_SCRIPT_FEATURE) ||
+    o.indent > 7 ||
+    o.outputFormat > 7 ||
+    o.legalComments > 7 ||
+    o.sourceMap > 7 ||
+    c.options.mode > 7 ||
+    repr.meta.wrap !== WrapNone ||
+    repr.meta.wrapperPartIndex >= 0
+  ) {
+    return printJS(tree, c.graph.symbols, r, o);
+  }
+  const optionsKey =
+    o.indent |
+    (o.outputFormat << 3) |
+    (o.legalComments << 6) |
+    (o.sourceMap << 9) |
+    (c.options.mode << 12) |
+    (o.asciiOnly ? 1 << 15 : 0) |
+    (o.addSourceMappings ? 1 << 16 : 0) |
+    (o.unsupportedFeatures !== 0 ? 1 << 17 : 0);
+  const parts = repr.ast.parts;
+  const begin = partRange.partIndexBegin;
+  const end = partRange.partIndexEnd;
+
+  let perSource = runtimePrintCache.get(file.inputFile.source);
+  if (perSource === undefined) {
+    perSource = [];
+    runtimePrintCache.set(file.inputFile.source, perSource);
+  }
+  entries: for (let e = 0; e < perSource.length; e++) {
+    const entry = perSource[e];
+    if (entry.optionsKey !== optionsKey || entry.begin !== begin || entry.end !== end) continue;
+    const live = entry.live;
+    for (let i = begin; i < end; i++) {
+      if (parts[i].isLive !== live[i - begin]) continue entries;
+    }
+    const refs = entry.refs;
+    const names = entry.names;
+    for (let i = 0; i < refs.length; i++) {
+      if (r.nameForSymbol(refs[i]) !== names[i]) continue entries;
+    }
+    const cached = clonePrintResult(entry.result);
+    // (Test hook: check the cached result against a fresh print)
+    if (globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__) {
+      const fresh = printJS(tree, c.graph.symbols, r, o);
+      if (fresh.js !== cached.js || JSON.stringify(fresh.sourceMapChunk) !== JSON.stringify(cached.sourceMapChunk)) {
+        throw new globalThis.Error("fast-esbuild: runtime print cache mismatch");
+      }
+    }
+    return cached;
+  }
+
+  const recorder = new recordingRenamer(r);
+  const result = printJS(tree, c.graph.symbols, recorder, o);
+  const live = [];
+  for (let i = begin; i < end; i++) live.push(parts[i].isLive);
+  if (perSource.length >= 32) perSource.length = 0;
+  perSource.push({
+    optionsKey,
+    begin,
+    end,
+    live,
+    refs: [...recorder.names.keys()],
+    names: [...recorder.names.values()],
+    result: clonePrintResult(result),
+  });
+  return result;
+}
+
 function makePrinterOptions(c, indent) {
   const o = new PrinterOptions();
   o.requireOrImportMetaForSource = null;
@@ -2977,7 +3252,8 @@ Object.assign(linkerContext.prototype, {
     // The top-level directive must come first (the non-wrapped case is handled
     // by the chunk generation code, although only for the entry point)
     if (repr.meta.wrap !== WrapNone && !file.isEntryPoint()) {
-      for (const directive of repr.ast.directives) {
+      for (let $i90 = 0, $a90 = repr.ast.directives; $i90 < $a90.length; $i90++) {
+        const directive = $a90[$i90];
         stmtList_.insideWrapperPrefix.push(new Stmt(new SDirective(directive), 0));
       }
     }
@@ -3093,7 +3369,8 @@ Object.assign(linkerContext.prototype, {
             if (s.k === S_LOCAL) {
               // Convert the declarations to assignments
               let value = null;
-              for (const decl of s.decls) {
+              for (let $i91 = 0, $a91 = s.decls; $i91 < $a91.length; $i91++) {
+                const decl = $a91[$i91];
                 const binding = convertBindingToExpr(decl.binding, wrapIdentifier);
                 if (decl.valueOrNil !== null) {
                   value = joinWithComma(value, assign(binding, decl.valueOrNil));
@@ -3174,7 +3451,11 @@ Object.assign(linkerContext.prototype, {
     const treePart = new Part();
     treePart.stmts = stmts;
     tree.parts = [treePart];
-    result.setPrintResult(printJS(tree, c.graph.symbols, r, printOptions));
+    if (partRange.sourceIndex === RUNTIME_SOURCE_INDEX && file.inputFile.astIsShared) {
+      result.setPrintResult(printRuntimeCached(c, file, partRange, tree, r, printOptions));
+    } else {
+      result.setPrintResult(printJS(tree, c.graph.symbols, r, printOptions));
+    }
     result.sourceIndex = partRange.sourceIndex;
   },
 
@@ -3288,7 +3569,8 @@ Object.assign(linkerContext.prototype, {
           }
 
           // Add annotations for re-exports: "{...require('./foo')}"
-          for (const importRecordIndex of repr.ast.exportStarImportRecords) {
+          for (let $i92 = 0, $a92 = repr.ast.exportStarImportRecords; $i92 < $a92.length; $i92++) {
+            const importRecordIndex = $a92[$i92];
             const record = repr.ast.importRecords[importRecordIndex];
             if (!(record.sourceIndex >= 0)) {
               moduleExports.push(new Property(null, null, new Expr(new ERequireString(importRecordIndex), 0), null, [], 0, 0, PropertySpread));
@@ -3477,8 +3759,10 @@ Object.assign(linkerContext.prototype, {
         // add those symbols to the top-level scope to avoid causing name
         // collisions. This code special-cases only those symbols.
         if (formatKeepESMImportExportSyntax(c.options.outputFormat)) {
-          for (const part of repr.ast.parts) {
-            for (const stmt of part.stmts) {
+          for (let $i93 = 0, $a93 = repr.ast.parts; $i93 < $a93.length; $i93++) {
+            const part = $a93[$i93];
+            for (let $i94 = 0, $a94 = part.stmts; $i94 < $a94.length; $i94++) {
+              const stmt = $a94[$i94];
               const s = stmt.data;
               switch (s.k) {
                 case S_IMPORT:
@@ -3488,7 +3772,8 @@ Object.assign(linkerContext.prototype, {
                       r.addTopLevelSymbol(s.defaultName.ref);
                     }
                     if (s.items !== null) {
-                      for (const item of s.items) {
+                      for (let $i95 = 0, $a95 = s.items; $i95 < $a95.length; $i95++) {
+                        const item = $a95[$i95];
                         r.addTopLevelSymbol(item.name.ref);
                       }
                     }
@@ -3504,7 +3789,8 @@ Object.assign(linkerContext.prototype, {
                 case S_EXPORT_FROM:
                   if (!(repr.ast.importRecords[s.importRecordIndex].sourceIndex >= 0)) {
                     r.addTopLevelSymbol(s.namespaceRef);
-                    for (const item of s.items) {
+                    for (let $i96 = 0, $a96 = s.items; $i96 < $a96.length; $i96++) {
+                      const item = $a96[$i96];
                       r.addTopLevelSymbol(item.name.ref);
                     }
                   }
@@ -3537,9 +3823,11 @@ Object.assign(linkerContext.prototype, {
       }
 
       // Rename each top-level symbol declaration in this chunk
-      for (const part of repr.ast.parts) {
+      for (let $i97 = 0, $a97 = repr.ast.parts; $i97 < $a97.length; $i97++) {
+        const part = $a97[$i97];
         if (part.isLive) {
-          for (const declared of part.declaredSymbols) {
+          for (let $i98 = 0, $a98 = part.declaredSymbols; $i98 < $a98.length; $i98++) {
+            const declared = $a98[$i98];
             if (declared.isTopLevel) {
               r.addTopLevelSymbol(declared.ref);
             }
@@ -3646,7 +3934,8 @@ Object.assign(linkerContext.prototype, {
     // modules because all ES modules are automatically in strict mode)
     if (chunk.isEntryPoint) {
       const repr = c.graph.files[chunk.sourceIndex].inputFile.repr;
-      for (const directive of repr.ast.directives) {
+      for (let $i99 = 0, $a99 = repr.ast.directives; $i99 < $a99.length; $i99++) {
+        const directive = $a99[$i99];
         if (directive !== "use strict" || c.options.outputFormat !== FormatESModule) {
           const quoted = quoteForJSON(directive, c.options.asciiOnly) + ";" + newline;
           if (trackOffset) prevOffset.advanceString(quoted);
@@ -4253,8 +4542,10 @@ Object.assign(linkerContext.prototype, {
     if (!(repr instanceof JSRepr)) return;
     let hasImportOrExport = false;
 
-    for (const part of repr.ast.parts) {
-      for (const stmt of part.stmts) {
+    for (let $i100 = 0, $a100 = repr.ast.parts; $i100 < $a100.length; $i100++) {
+      const part = $a100[$i100];
+      for (let $i101 = 0, $a101 = part.stmts; $i101 < $a101.length; $i101++) {
+        const stmt = $a101[$i101];
         const s = stmt.data;
         switch (s.k) {
           case S_IMPORT:

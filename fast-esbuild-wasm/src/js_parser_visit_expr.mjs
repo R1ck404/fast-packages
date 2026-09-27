@@ -615,7 +615,8 @@ function visitExprInOutImpl(p, expr, in_) {
 
     case E_REG_EXP: {
       // "/pattern/flags" => "new RegExp('pattern', 'flags')"
-      const [pattern, flags, ok] = isUnsupportedRegularExpressionImpl(p, expr.loc, e.value);
+      const $d128 = isUnsupportedRegularExpressionImpl(p, expr.loc, e.value);
+      const pattern = $d128[0], flags = $d128[1], ok = $d128[2];
       if (ok) {
         const args = [new Expr(new EString(pattern), expr.loc + 1)];
         if (flags !== "") {
@@ -861,9 +862,12 @@ function visitEIdentifier(p, expr, e, in_) {
   if (p.isStrictMode() && StrictModeReservedWords.has(name)) {
     p.markStrictModeFeature(reservedWord, rangeOfIdentifier(p.source, expr.loc), name);
   }
-  const result = p.findSymbol(expr.loc, name);
-  e.mustKeepDueToWithStmt = result.isInsideWithScope;
-  e.ref = result.ref;
+  const found = p.findSymbol(expr.loc, name);
+  // (findSymbol reuses its result object: copy the fields)
+  const resultRef = found.ref;
+  const resultIsInsideWithScope = found.isInsideWithScope;
+  e.mustKeepDueToWithStmt = resultIsInsideWithScope;
+  e.ref = resultRef;
 
   // Handle referencing a class name within that class's computed property
   // key. This is not allowed, and must fail at run-time:
@@ -873,7 +877,7 @@ function visitEIdentifier(p, expr, e, in_) {
   //     static [Foo.foo] = 'foo'
   //   }
   //
-  if (p.symbols[refInner(result.ref)].kind === SymbolClassInComputedPropertyKey) {
+  if (p.symbols[refInner(resultRef)].kind === SymbolClassInComputedPropertyKey) {
     p.log.addID(MsgID_JS_ClassNameWillThrow, Warning);
     const value = p.callRuntime(expr.loc, "__earlyAccess", [new Expr(new EString(name), expr.loc)]);
     lastOut = EXPR_OUT_DEFAULT;
@@ -882,14 +886,14 @@ function visitEIdentifier(p, expr, e, in_) {
 
   // Handle assigning to a constant
   if (in_.assignTarget !== AssignTargetNone) {
-    switch (p.symbols[refInner(result.ref)].kind) {
+    switch (p.symbols[refInner(resultRef)].kind) {
       case SymbolConst:
         // Make this an error when bundling because we may need to convert this
         // "const" into a "var" during bundling. Also make this an error when
         // the constant is inlined because we will otherwise generate code with
         // a syntax error.
         if (
-          (p.constValues != null && p.constValues.has(result.ref)) ||
+          (p.constValues != null && p.constValues.has(resultRef)) ||
           p.options.mode === ModeBundle ||
           (p.currentScope.parent === null && p.willWrapModuleInTryCatchForUsing)
         ) {
@@ -900,7 +904,7 @@ function visitEIdentifier(p, expr, e, in_) {
         break;
 
       case SymbolInjected:
-        if (p.injectedSymbolSources != null && p.injectedSymbolSources.has(result.ref)) {
+        if (p.injectedSymbolSources != null && p.injectedSymbolSources.has(resultRef)) {
           p.log.addErrorWithNotes(); // Cannot assign to %q because it's an import from an injected file
         }
         break;
@@ -909,7 +913,7 @@ function visitEIdentifier(p, expr, e, in_) {
 
   // Substitute user-specified defines for unbound or injected symbols
   let methodCallMustBeReplacedWithUndefined = false;
-  if (symbolKindIsUnboundOrInjected(p.symbols[refInner(e.ref)].kind) && !result.isInsideWithScope && e !== p.deleteTarget) {
+  if (symbolKindIsUnboundOrInjected(p.symbols[refInner(e.ref)].kind) && !resultIsInsideWithScope && e !== p.deleteTarget) {
     const data = p.options.defines.identifierDefines.get(name);
     if (data !== undefined) {
       if (data.defineExpr !== null) {
@@ -939,10 +943,30 @@ function visitEIdentifier(p, expr, e, in_) {
   const value = p.handleIdentifier(
     expr.loc,
     e,
-    new identifierOpts(in_.assignTarget, isCallTarget, isDeleteTarget, false, true /* wasOriginallyIdentifier */),
+    handleIdentifierOptsFor(in_.assignTarget, isCallTarget, isDeleteTarget),
+    expr,
   );
   lastOut = methodCallMustBeReplacedWithUndefined ? OUT_METHOD_CALL_MUST_BE_REPLACED_WITH_UNDEFINED : EXPR_OUT_DEFAULT;
   return value;
+}
+
+// identifierOpts{AssignTarget, IsCallTarget, IsDeleteTarget,
+// WasOriginallyIdentifier: true} for visitEIdentifier. handleIdentifier only
+// reads its options, so one instance per combination is shared.
+// (Built on first use: the parser modules import each other.)
+let HANDLE_IDENTIFIER_OPTS = null;
+function handleIdentifierOptsFor(assignTarget, isCallTarget, isDeleteTarget) {
+  if (HANDLE_IDENTIFIER_OPTS === null) {
+    HANDLE_IDENTIFIER_OPTS = [];
+    for (let a = 0; a < 3; a++) {
+      for (let c = 0; c < 2; c++) {
+        for (let d = 0; d < 2; d++) {
+          HANDLE_IDENTIFIER_OPTS.push(new identifierOpts(a, c === 1, d === 1, false, true /* wasOriginallyIdentifier */));
+        }
+      }
+    }
+  }
+  return HANDLE_IDENTIFIER_OPTS[assignTarget * 4 + (isCallTarget ? 2 : 0) + (isDeleteTarget ? 1 : 0)];
 }
 
 function visitEJSXElement(p, expr, e) {
@@ -987,7 +1011,8 @@ function visitEJSXElement(p, expr, e) {
   }
 
   // Visit properties
-  for (const property of e.properties) {
+  for (let $i47 = 0, $a47 = e.properties; $i47 < $a47.length; $i47++) {
+    const property = $a47[$i47];
     if (property.kind === PropertySpread) {
       // (hasSpread is only used when minifying)
     } else {
@@ -1070,7 +1095,8 @@ function visitEJSXElement(p, expr, e) {
     // Even for runtime="automatic", <div {...props} key={key} /> is special cased to createElement
     // See https://github.com/babel/babel/blob/e482c763466ba3f44cb9e3467583b78b7f030b4a/packages/babel-plugin-transform-react-jsx/src/create-plugin.ts#L352
     let seenPropsSpread = false;
-    for (const property of e.properties) {
+    for (let $i48 = 0, $a48 = e.properties; $i48 < $a48.length; $i48++) {
+      const property = $a48[$i48];
       if (seenPropsSpread && property.kind === PropertyField) {
         const str = property.key !== null ? property.key.data : null;
         if (str !== null && str.k === E_STRING && str.value === "key") {
@@ -1140,7 +1166,8 @@ function visitEJSXElement(p, expr, e) {
     // configuration error.
     let hasKey = false;
     let keyProperty = new Expr(EUndefinedShared, expr.loc);
-    for (const property of e.properties) {
+    for (let $i49 = 0, $a49 = e.properties; $i49 < $a49.length; $i49++) {
+      const property = $a49[$i49];
       const str = property.key !== null ? property.key.data : null;
       if (str !== null && str.k === E_STRING) {
         const propName = str.value;
@@ -1326,10 +1353,12 @@ function visitETemplate(p, expr, e) {
     // The value of "this" must be manually preserved for private member
     // accesses inside template tag expressions such as "this.#foo``".
     // The private member "this.#foo" must see the value of "this".
-    const [target, loc, private_] = p.extractPrivateIndex(e.tagOrNil);
+    const $d129 = p.extractPrivateIndex(e.tagOrNil);
+    const target = $d129[0], loc = $d129[1], private_ = $d129[2];
     if (private_ != null) {
       // "foo.#bar`123`" => "__privateGet(_a = foo, #bar).bind(_a)`123`"
-      const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(target.loc, 2, target, valueCouldBeMutated);
+      const $d130 = p.captureValueWithPossibleSideEffects(target.loc, 2, target, valueCouldBeMutated);
+      const targetFunc = $d130[0], targetWrapFunc = $d130[1];
       e.tagOrNil = targetWrapFunc(
         new Expr(
           new ECall(
@@ -1373,7 +1402,8 @@ function visitETemplate(p, expr, e) {
     if (containsClosingScriptTag(e.headRaw)) {
       shouldLowerTemplateLiteral = true;
     } else {
-      for (const part of e.parts) {
+      for (let $i50 = 0, $a50 = e.parts; $i50 < $a50.length; $i50++) {
+        const part = $a50[$i50];
         if (containsClosingScriptTag(part.tailRaw)) {
           shouldLowerTemplateLiteral = true;
           break;
@@ -1398,7 +1428,7 @@ function visitEBinary(p, expr, e, in_) {
   // iteration on the heap instead of recursion on the call stack to avoid
   // stack overflow for deeply-nested ASTs. See the comment before the
   // definition of "binaryExprVisitor" for details.
-  let v = new binaryExprVisitor(e, expr.loc, in_);
+  let v = acquireBinaryExprVisitor(p, e, expr.loc, in_, expr);
 
   // Everything uses a single stack to reduce allocation overhead. This stack
   // should almost always be very small, and almost all visits should reuse
@@ -1444,8 +1474,9 @@ function visitEBinary(p, expr, e, in_) {
     // on the heap) when there are nested binary expressions. A single binary
     // expression doesn't add anything to the stack.
     stack.push(v);
-    v = new binaryExprVisitor(leftBinary, left.loc, leftIn);
+    v = acquireBinaryExprVisitor(p, leftBinary, left.loc, leftIn, left);
   }
+  p.binaryExprVisitorPool.push(v); // (done with it)
 
   // Process all binary operations from the deepest-visited node back toward
   // our original top-level binary operation.
@@ -1457,9 +1488,28 @@ function visitEBinary(p, expr, e, in_) {
     const v2 = stack.pop();
     v2.e.left = expr;
     expr = v2.visitRightAndFinish(p);
+    p.binaryExprVisitorPool.push(v2); // (done with it)
   }
 
   return expr;
+}
+
+// JS-only: binaryExprVisitor objects are reused (Go keeps them on the stack).
+// A visitor is only used by the visitEBinary call that acquired it (from its
+// start until its visitRightAndFinish has returned), so it can go back to the
+// pool then.
+function acquireBinaryExprVisitor(p, e, loc, in_, expr) {
+  const pool = p.binaryExprVisitorPool;
+  if (pool.length === 0) return new binaryExprVisitor(e, loc, in_, EXPR_IN_DEFAULT, false, false, expr);
+  const v = pool.pop();
+  v.e = e;
+  v.loc = loc;
+  v.in = in_;
+  v.leftIn = EXPR_IN_DEFAULT;
+  v.isStmtExpr = false;
+  v.oldSilenceWarningAboutThisBeingUndefined = false;
+  v.expr = expr;
+  return v;
 }
 
 // Sets lastOut
@@ -1563,7 +1613,8 @@ function visitEDot(p, expr, e, in_) {
   const containsOptionalChain =
     e.optionalChain === OptionalChainStart || (e.optionalChain === OptionalChainContinue && out.childContainsOptionalChain);
   if (containsOptionalChain && !in_.hasChainParent) {
-    const [value, valueOut] = p.lowerOptionalChain(expr, in_, out);
+    const $d131 = p.lowerOptionalChain(expr, in_, out);
+    const value = $d131[0], valueOut = $d131[1];
     lastOut = valueOut;
     return value;
   }
@@ -1588,7 +1639,7 @@ function visitEDot(p, expr, e, in_) {
     false,
   );
   if (e.optionalChain === OptionalChainNone) {
-    const [value, ok] = p.maybeRewritePropertyAccess(
+    const rewritten = p.maybeRewritePropertyAccess(
       expr.loc,
       in_.assignTarget,
       isDeleteTarget,
@@ -1599,9 +1650,9 @@ function visitEDot(p, expr, e, in_) {
       isTemplateTag,
       false,
     );
-    if (ok) {
+    if (rewritten[1]) {
       lastOut = newOut;
-      return value;
+      return rewritten[0];
     }
   }
   lastOut = newOut;
@@ -1742,7 +1793,8 @@ function visitEIndex(p, expr, e, in_) {
   const containsOptionalChain =
     e.optionalChain === OptionalChainStart || (e.optionalChain === OptionalChainContinue && out.childContainsOptionalChain);
   if (containsOptionalChain && !in_.hasChainParent) {
-    const [value, valueOut] = p.lowerOptionalChain(expr, in_, out);
+    const $d132 = p.lowerOptionalChain(expr, in_, out);
+    const value = $d132[0], valueOut = $d132[1];
     lastOut = valueOut;
     return value;
   }
@@ -1759,7 +1811,7 @@ function visitEIndex(p, expr, e, in_) {
     const str = e.index.data;
     if (str.k === E_STRING && e.optionalChain === OptionalChainNone) {
       const preferQuotedKey = true; // !p.options.minifySyntax
-      const [value, ok] = p.maybeRewritePropertyAccess(
+      const rewritten = p.maybeRewritePropertyAccess(
         expr.loc,
         in_.assignTarget,
         isDeleteTarget,
@@ -1770,9 +1822,9 @@ function visitEIndex(p, expr, e, in_) {
         isTemplateTag,
         preferQuotedKey,
       );
-      if (ok) {
+      if (rewritten[1]) {
         lastOut = newOut;
-        return value;
+        return rewritten[0];
       }
     }
   }
@@ -1791,7 +1843,8 @@ function visitEUnary(p, expr, e, in_) {
       e.value = visitExprInOutImpl(p, e.value, inForAssignTarget(opCodeUnaryAssignTarget(e.op)));
 
       // Compile-time "typeof" evaluation
-      const [typeof_, ok] = typeofWithoutSideEffects(e.value.data);
+      const $d133 = typeofWithoutSideEffects(e.value.data);
+      const typeof_ = $d133[0], ok = $d133[1];
       if (ok) {
         lastOut = EXPR_OUT_DEFAULT;
         return new Expr(new EString(typeof_), expr.loc);
@@ -1834,7 +1887,8 @@ function visitEUnary(p, expr, e, in_) {
       // Lower optional chaining if present since we're guaranteed to be the
       // end of the chain
       if (out.childContainsOptionalChain) {
-        const [result, resultOut] = p.lowerOptionalChain(expr, in_, out);
+        const $d134 = p.lowerOptionalChain(expr, in_, out);
+        const result = $d134[0], resultOut = $d134[1];
         lastOut = resultOut;
         return result;
       }
@@ -1849,7 +1903,8 @@ function visitEUnary(p, expr, e, in_) {
         case UnOpNot: {
           // (minifySyntax only: SimplifyBooleanExpr)
 
-          const [boolean, sideEffects, ok] = toBooleanWithSideEffects(e.value.data);
+          const $d135 = toBooleanWithSideEffects(e.value.data);
+          const boolean = $d135[0], sideEffects = $d135[1], ok = $d135[2];
           if (ok && sideEffects === NoSideEffects) {
             lastOut = EXPR_OUT_DEFAULT;
             return new Expr(new EBoolean(!boolean), expr.loc);
@@ -1883,7 +1938,8 @@ function visitEUnary(p, expr, e, in_) {
         }
 
         case UnOpPos: {
-          const [number, ok] = toNumberWithoutSideEffects(e.value.data);
+          const $d136 = toNumberWithoutSideEffects(e.value.data);
+          const number = $d136[0], ok = $d136[1];
           if (ok) {
             lastOut = EXPR_OUT_DEFAULT;
             return new Expr(new ENumber(number), expr.loc);
@@ -1892,7 +1948,8 @@ function visitEUnary(p, expr, e, in_) {
         }
 
         case UnOpNeg: {
-          const [number, ok] = toNumberWithoutSideEffects(e.value.data);
+          const $d137 = toNumberWithoutSideEffects(e.value.data);
+          const number = $d137[0], ok = $d137[1];
           if (ok) {
             lastOut = EXPR_OUT_DEFAULT;
             return new Expr(new ENumber(-number), expr.loc);
@@ -1903,7 +1960,8 @@ function visitEUnary(p, expr, e, in_) {
         case UnOpCpl:
           if (p.shouldFoldTypeScriptConstantExpressions /* || minifySyntax */) {
             // Minification folds complement operations since they are unlikely to result in larger output
-            const [number, ok] = toNumberWithoutSideEffects(e.value.data);
+            const $d138 = toNumberWithoutSideEffects(e.value.data);
+            const number = $d138[0], ok = $d138[1];
             if (ok) {
               lastOut = EXPR_OUT_DEFAULT;
               return new Expr(new ENumber(~toInt32(number)), expr.loc);
@@ -1918,7 +1976,8 @@ function visitEUnary(p, expr, e, in_) {
         case UnOpPreInc:
         case UnOpPostDec:
         case UnOpPostInc: {
-          const [target, loc, private_] = p.extractPrivateIndex(e.value);
+          const $d139 = p.extractPrivateIndex(e.value);
+          const target = $d139[0], loc = $d139[1], private_ = $d139[2];
           if (private_ != null) {
             const value = p.lowerPrivateSetUnOp(target, loc, private_, e.op);
             lastOut = EXPR_OUT_DEFAULT;
@@ -1950,7 +2009,8 @@ function visitEIf(p, e, in_) {
   const childIn = inForMangleStrings(in_.shouldMangleStringsAsProps);
 
   // Fold constants
-  const [boolean, , ok] = toBooleanWithSideEffects(e.test.data);
+  const $d140 = toBooleanWithSideEffects(e.test.data);
+  const boolean = $d140[0], ok = $d140[2];
   if (!ok) {
     e.yes = visitExprInOutImpl(p, e.yes, childIn);
     e.no = visitExprInOutImpl(p, e.no, childIn);
@@ -2060,7 +2120,8 @@ function visitEObject(p, expr, e, in_) {
   // (innerClassNameRef is only generated when lowering async methods, which
   // never happens in the fast path, so it always stays ast.InvalidRef)
 
-  for (const property of e.properties) {
+  for (let $i51 = 0, $a51 = e.properties; $i51 < $a51.length; $i51++) {
+    const property = $a51[$i51];
     if (property.kind !== PropertySpread) {
       let key = property.key;
       const mangled = key.data;
@@ -2203,7 +2264,8 @@ function visitEImportCall(p, expr, e) {
             const value = prop.valueOrNil !== null ? prop.valueOrNil.data : null;
             if (value !== null && value.k === E_OBJECT) {
               let entries = [];
-              for (const p2 of value.properties) {
+              for (let $i52 = 0, $a52 = value.properties; $i52 < $a52.length; $i52++) {
+                const p2 = $a52[$i52];
                 if (p2.kind === PropertyField && (p2.flags & PropertyIsComputed) === 0) {
                   const key = p2.key.data;
                   if (key.k === E_STRING) {
@@ -2622,7 +2684,8 @@ function visitECall(p, expr, e, in_) {
   const containsOptionalChain =
     e.optionalChain === OptionalChainStart || (e.optionalChain === OptionalChainContinue && out.childContainsOptionalChain);
   if (containsOptionalChain && !in_.hasChainParent) {
-    const [value, valueOut] = p.lowerOptionalChain(expr, in_, out);
+    const $d141 = p.lowerOptionalChain(expr, in_, out);
+    const value = $d141[0], valueOut = $d141[1];
     lastOut = valueOut;
     return value;
   }
@@ -2630,10 +2693,12 @@ function visitECall(p, expr, e, in_) {
   // If this is a plain call expression (instead of an optional chain), lower
   // private member access in the call target now if there is one
   if (!containsOptionalChain) {
-    const [target2, loc, private_] = p.extractPrivateIndex(e.target);
+    const $d142 = p.extractPrivateIndex(e.target);
+    const target2 = $d142[0], loc = $d142[1], private_ = $d142[2];
     if (private_ != null) {
       // "foo.#bar(123)" => "__privateGet(_a = foo, #bar).call(_a, 123)"
-      const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(target2.loc, 2, target2, valueCouldBeMutated);
+      const $d143 = p.captureValueWithPossibleSideEffects(target2.loc, 2, target2, valueCouldBeMutated);
+      const targetFunc = $d143[0], targetWrapFunc = $d143[1];
       const value = targetWrapFunc(
         new Expr(
           new ECall(
@@ -2858,7 +2923,8 @@ Object.assign(binaryExprVisitor.prototype, {
     // Mark the control flow as dead if the branch is never taken
     switch (e.op) {
       case BinOpLogicalOr: {
-        const [boolean, , ok] = toBooleanWithSideEffects(e.left.data);
+        const $d144 = toBooleanWithSideEffects(e.left.data);
+        const boolean = $d144[0], ok = $d144[2];
         if (ok && boolean) {
           // "true || dead"
           const old = p.isControlFlowDead;
@@ -2872,7 +2938,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpLogicalAnd: {
-        const [boolean, , ok] = toBooleanWithSideEffects(e.left.data);
+        const $d145 = toBooleanWithSideEffects(e.left.data);
+        const boolean = $d145[0], ok = $d145[2];
         if (ok && !boolean) {
           // "false && dead"
           const old = p.isControlFlowDead;
@@ -2886,7 +2953,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpNullishCoalescing: {
-        const [isNullOrUndefined, , ok] = toNullOrUndefinedWithSideEffects(e.left.data);
+        const $d146 = toNullOrUndefinedWithSideEffects(e.left.data);
+        const isNullOrUndefined = $d146[0], ok = $d146[2];
         if (ok && !isNullOrUndefined) {
           // "notNullOrUndefined ?? dead"
           const old = p.isControlFlowDead;
@@ -2941,7 +3009,8 @@ Object.assign(binaryExprVisitor.prototype, {
         break;
 
       case BinOpLooseEq: {
-        const [result, ok] = checkEqualityIfNoSideEffects(e.left.data, e.right.data, LooseEquality);
+        const $d147 = checkEqualityIfNoSideEffects(e.left.data, e.right.data, LooseEquality);
+        const result = $d147[0], ok = $d147[1];
         if (ok) {
           return new Expr(new EBoolean(result), v.loc);
         }
@@ -2956,7 +3025,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpStrictEq: {
-        const [result, ok] = checkEqualityIfNoSideEffects(e.left.data, e.right.data, StrictEquality);
+        const $d148 = checkEqualityIfNoSideEffects(e.left.data, e.right.data, StrictEquality);
+        const result = $d148[0], ok = $d148[1];
         if (ok) {
           return new Expr(new EBoolean(result), v.loc);
         }
@@ -2971,7 +3041,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpLooseNe: {
-        const [result, ok] = checkEqualityIfNoSideEffects(e.left.data, e.right.data, LooseEquality);
+        const $d149 = checkEqualityIfNoSideEffects(e.left.data, e.right.data, LooseEquality);
+        const result = $d149[0], ok = $d149[1];
         if (ok) {
           return new Expr(new EBoolean(!result), v.loc);
         }
@@ -2986,7 +3057,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpStrictNe: {
-        const [result, ok] = checkEqualityIfNoSideEffects(e.left.data, e.right.data, StrictEquality);
+        const $d150 = checkEqualityIfNoSideEffects(e.left.data, e.right.data, StrictEquality);
+        const result = $d150[0], ok = $d150[1];
         if (ok) {
           return new Expr(new EBoolean(!result), v.loc);
         }
@@ -3001,7 +3073,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpNullishCoalescing: {
-        const [isNullOrUndefined, sideEffects, ok] = toNullOrUndefinedWithSideEffects(e.left.data);
+        const $d151 = toNullOrUndefinedWithSideEffects(e.left.data);
+        const isNullOrUndefined = $d151[0], sideEffects = $d151[1], ok = $d151[2];
         if (ok) {
           // Warn about potential bugs
           if (!isPrimitiveLiteral(e.left.data)) {
@@ -3026,7 +3099,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpLogicalOr: {
-        const [boolean, sideEffects, ok] = toBooleanWithSideEffects(e.left.data);
+        const $d152 = toBooleanWithSideEffects(e.left.data);
+        const boolean = $d152[0], sideEffects = $d152[1], ok = $d152[2];
         if (ok) {
           // Warn about potential bugs
           if (e === p.suspiciousLogicalOperatorInsideArrow) {
@@ -3053,7 +3127,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpLogicalAnd: {
-        const [boolean, sideEffects, ok] = toBooleanWithSideEffects(e.left.data);
+        const $d153 = toBooleanWithSideEffects(e.left.data);
+        const boolean = $d153[0], sideEffects = $d153[1], ok = $d153[2];
         if (ok) {
           // Warn about potential bugs
           if (e === p.suspiciousLogicalOperatorInsideArrow) {
@@ -3105,7 +3180,8 @@ Object.assign(binaryExprVisitor.prototype, {
       // All assignment operators below here
 
       case BinOpAssign: {
-        const [target, loc, private_] = p.extractPrivateIndex(e.left);
+        const $d154 = p.extractPrivateIndex(e.left);
+        const target = $d154[0], loc = $d154[1], private_ = $d154[2];
         if (private_ != null) {
           return p.lowerPrivateSet(target, loc, private_, e.right);
         }
@@ -3124,7 +3200,8 @@ Object.assign(binaryExprVisitor.prototype, {
           if (v.isStmtExpr) {
             mode = objRestReturnValueIsUnused;
           }
-          const [result, ok] = p.lowerAssign(e.left, e.right, mode);
+          const $d155 = p.lowerAssign(e.left, e.right, mode);
+          const result = $d155[0], ok = $d155[1];
           if (ok) {
             return result;
           }
@@ -3290,7 +3367,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpNullishCoalescingAssign: {
-        const [value, ok] = p.lowerNullishCoalescingAssignmentOperator(v.loc, e);
+        const $d156 = p.lowerNullishCoalescingAssignmentOperator(v.loc, e);
+        const value = $d156[0], ok = $d156[1];
         if (ok) {
           return value;
         }
@@ -3298,7 +3376,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpLogicalAndAssign: {
-        const [value, ok] = p.lowerLogicalAssignmentOperator(v.loc, e, BinOpLogicalAnd);
+        const $d157 = p.lowerLogicalAssignmentOperator(v.loc, e, BinOpLogicalAnd);
+        const value = $d157[0], ok = $d157[1];
         if (ok) {
           return value;
         }
@@ -3306,7 +3385,8 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpLogicalOrAssign: {
-        const [value, ok] = p.lowerLogicalAssignmentOperator(v.loc, e, BinOpLogicalOr);
+        const $d158 = p.lowerLogicalAssignmentOperator(v.loc, e, BinOpLogicalOr);
+        const value = $d158[0], ok = $d158[1];
         if (ok) {
           return value;
         }
@@ -3316,7 +3396,7 @@ Object.assign(binaryExprVisitor.prototype, {
 
     // (minifySyntax only: "(a, b) + c" => "a, b + c")
 
-    return new Expr(e, v.loc);
+    return v.expr !== null && v.expr.data === e && v.expr.loc === v.loc ? v.expr : new Expr(e, v.loc);
   },
 });
 
@@ -3588,7 +3668,8 @@ export const visitExprMethods = {
 
                 case E_ARRAY: {
                   let allEntriesAreArrays = true;
-                  for (const item of arg.items) {
+                  for (let $i53 = 0, $a53 = arg.items; $i53 < $a53.length; $i53++) {
+                    const item = $a53[$i53];
                     if (item.data.k !== E_ARRAY) {
                       // "new Map([x])" is impure because "x[0]" could have side effects
                       allEntriesAreArrays = false;
@@ -3614,7 +3695,9 @@ export const visitExprMethods = {
     }
   },
 
-  handleIdentifier(loc, e, opts) {
+  // (JS-only: "origExpr", if given, is an Expr with this loc and data "e". It
+  // is returned instead of an equal new Expr: Exprs are immutable values.)
+  handleIdentifier(loc, e, opts, origExpr = null) {
     const p = this;
     const ref = e.ref;
 
@@ -3726,6 +3809,9 @@ export const visitExprMethods = {
       p.symbols[refInner(e.ref)].flags |= CouldPotentiallyBeMutated;
     }
 
+    if (origExpr !== null && origExpr.data === e && origExpr.loc === loc) {
+      return origExpr;
+    }
     return new Expr(e, loc);
   },
 

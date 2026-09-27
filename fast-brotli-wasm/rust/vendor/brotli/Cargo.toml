@@ -1,0 +1,31 @@
+# Vendored from brotli 5.0.0 (crates.io, dropbox/rust-brotli), the version
+# brotli-wasm 3.0.1 is built with. Local changes are marked "fast-brotli-wasm".
+[package]
+name = "brotli"
+version = "5.0.0"
+edition = "2015"
+license = "BSD-3-Clause OR MIT"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dependencies]
+alloc-no-stdlib = { path = "../alloc-no-stdlib" }
+alloc-stdlib = { path = "../alloc-stdlib", optional = true }
+brotli-decompressor = { path = "../brotli-decompressor", default-features = false }
+
+[features]
+default = ["std"]
+std = ["alloc-stdlib", "brotli-decompressor/std"]
+benchmark = []
+disable-timer = []
+external-literal-probability = []
+ffi-api = []
+pass-through-ffi-panics = []
+seccomp = []
+simd = []
+validation = []
+vector_scratch_space = []
+# fast-brotli-wasm: benchmark helpers (not in the release build)
+fast-bench = []

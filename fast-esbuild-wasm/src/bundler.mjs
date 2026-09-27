@@ -127,8 +127,10 @@ function mockRel(base, target) {
 
   // Find the common parent directory
   for (;;) {
-    const [bHead, bTail] = splitOnSlash(base);
-    const [tHead, tTail] = splitOnSlash(target);
+    const $d219 = splitOnSlash(base);
+    const bHead = $d219[0], bTail = $d219[1];
+    const $d220 = splitOnSlash(target);
+    const tHead = $d220[0], tTail = $d220[1];
     if (bHead !== tHead) break;
     base = bTail;
     target = tTail;
@@ -273,7 +275,8 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
   // considers to be the root of the source tree. If that happens, strip the
   // parent folder to avoid including it in the generated name.
   // ("AbsOutputBase" is still empty when the stdin file is parsed.)
-  const [relative0, ok0] = mockRel(options.absOutputBase || "", pathForIdentifierName);
+  const $d221 = mockRel(options.absOutputBase || "", pathForIdentifierName);
+  const relative0 = $d221[0], ok0 = $d221[1];
   if (ok0) {
     let relative = relative0;
     for (;;) {
@@ -300,7 +303,8 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
     bail(); // (plugins and the file system are only used when bundling)
   }
 
-  const [, base, ext] = platformIndependentPathDirBaseExt(source.keyPath.text);
+  const $d222 = platformIndependentPathDirBaseExt(source.keyPath.text);
+  const base = $d222[1], ext = $d222[2];
 
   // The special "default" loader determines the loader from the file path
   if (loader === LoaderDefault) {
@@ -321,7 +325,8 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
   switch (loader) {
     case LoaderJS:
     case LoaderEmpty: {
-      const [ast, ok] = parse(log, source, parserOptions());
+      const $d223 = parse(log, source, parserOptions());
+      const ast = $d223[0], ok = $d223[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
         inputFile.sideEffects.kind = NoSideEffects_EmptyAST;
@@ -336,7 +341,8 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
       const o = parserOptions();
       o.jsx = options.jsx.clone();
       o.jsx.parse = true;
-      const [ast, ok] = parse(log, source, o);
+      const $d224 = parse(log, source, o);
+      const ast = $d224[0], ok = $d224[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
         inputFile.sideEffects.kind = NoSideEffects_EmptyAST;
@@ -351,7 +357,8 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
     case LoaderTSNoAmbiguousLessThan: {
       const o = parserOptions();
       o.ts = new TSOptions(options.ts.config, true, loader === LoaderTSNoAmbiguousLessThan);
-      const [ast, ok] = parse(log, source, o);
+      const $d225 = parse(log, source, o);
+      const ast = $d225[0], ok = $d225[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
         inputFile.sideEffects.kind = NoSideEffects_EmptyAST;
@@ -367,7 +374,8 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
       o.ts = new TSOptions(options.ts.config, true, options.ts.noAmbiguousLessThan);
       o.jsx = options.jsx.clone();
       o.jsx.parse = true;
-      const [ast, ok] = parse(log, source, o);
+      const $d226 = parse(log, source, o);
+      const ast = $d226[0], ok = $d226[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
         inputFile.sideEffects.kind = NoSideEffects_EmptyAST;
@@ -459,7 +467,8 @@ class runtimeCache {
     // Always do tree shaking for the runtime because we never want to
     // include unnecessary runtime code
     runtimeOptions.treeShaking = true;
-    const [runtimeAST, ok] = parse(log, source, optionsFromConfig(runtimeOptions));
+    const $d227 = parse(log, source, optionsFromConfig(runtimeOptions));
+    const runtimeAST = $d227[0], ok = $d227[1];
     // (errors in the runtime would throw BAIL from the log)
 
     // Cache for next time
@@ -823,7 +832,8 @@ class scanner {
       if (result.ok && result.tlaCheck.parent >= 0) {
         const repr = result.file.inputFile.repr;
         if (repr instanceof JSRepr) {
-          for (const record of repr.ast.importRecords) {
+          for (let $i0 = 0, $a0 = repr.ast.importRecords; $i0 < $a0.length; $i0++) {
+            const record = $a0[$i0];
             // Require of a top-level await chain is forbidden
             if (record.kind === ImportRequire && record.sourceIndex >= 0 && s.results[record.sourceIndex].tlaCheck.parent >= 0) {
               s.log.addErrorWithNotes();
@@ -861,7 +871,8 @@ function scanBundle(call, log, options) {
 
   // Always start by parsing the runtime file
   {
-    const [source, ast, ok] = globalRuntimeCache.parseRuntime(options);
+    const $d228 = globalRuntimeCache.parseRuntime(options);
+    const source = $d228[0], ast = $d228[1], ok = $d228[2];
     const repr = new JSRepr();
     repr.ast = ast;
     const inputFile = new InputFile(repr, null, [], "", new SideEffects(), source, LoaderNone, true);
@@ -907,7 +918,8 @@ export function transformBundle(configOptions, log) {
     const bundle = scanBundle(TransformCall, log, configOptions);
 
     // Compile the bundle
-    const [results] = bundle.compile(log, null, null, link);
+    const $d229 = bundle.compile(log, null, null, link);
+    const results = $d229[0];
 
     // Return the results
     let code = "";

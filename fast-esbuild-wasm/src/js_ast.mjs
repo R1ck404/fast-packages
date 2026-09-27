@@ -1423,11 +1423,14 @@ export class Scope {
     this.isAfterConstLocalPrefix = isAfterConstLocalPrefix;
     this.strictMode = strictMode;
     this.kind = kind;
+    // JS-only: see NumberRenamer.assignNamesByScope
+    this.renamerStamp = 0;
   }
   recursiveSetStrictMode(kind) {
     if (this.strictMode === SloppyMode) {
       this.strictMode = kind;
-      for (const child of this.children) child.recursiveSetStrictMode(kind);
+      const children = this.children;
+      for (let i = 0; i < children.length; i++) children[i].recursiveSetStrictMode(kind);
     }
   }
 }
@@ -1725,11 +1728,13 @@ export class SymbolCallUse {
 // derived from the file name (e.g. "require_react").
 export function generateNonUniqueNameFromPath(path) {
   // Get the file name without the extension
-  let [dir, base] = platformIndependentPathDirBaseExt(path);
+  const $d235 = platformIndependentPathDirBaseExt(path);
+  let dir = $d235[0], base = $d235[1];
 
   // If the name is "index", use the directory name instead.
   if (base === "index") {
-    const [, dirBase] = platformIndependentPathDirBaseExt(dir);
+    const $d236 = platformIndependentPathDirBaseExt(dir);
+    const dirBase = $d236[1];
     if (dirBase !== "") base = dirBase;
   }
 

@@ -556,13 +556,16 @@ export class exprOut {
 export const EXPR_OUT_DEFAULT = Object.freeze(new exprOut());
 
 export class binaryExprVisitor {
-  constructor(e = null, loc = 0, in_ = EXPR_IN_DEFAULT, leftIn = EXPR_IN_DEFAULT, isStmtExpr = false, oldSilenceWarningAboutThisBeingUndefined = false) {
+  constructor(e = null, loc = 0, in_ = EXPR_IN_DEFAULT, leftIn = EXPR_IN_DEFAULT, isStmtExpr = false, oldSilenceWarningAboutThisBeingUndefined = false, expr = null) {
     this.e = e; // *EBinary
     this.loc = loc;
     this.in = in_;
     this.leftIn = leftIn;
     this.isStmtExpr = isStmtExpr;
     this.oldSilenceWarningAboutThisBeingUndefined = oldSilenceWarningAboutThisBeingUndefined;
+    // JS-only: the visited Expr (its data is "e" and its loc "loc"), returned
+    // instead of an equal new Expr at the end (Exprs are immutable values)
+    this.expr = expr;
   }
 }
 

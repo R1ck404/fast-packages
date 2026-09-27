@@ -1,6 +1,8 @@
 // esbuild-wasm benchmark. Usage: node bench/esbuild.bench.mjs <impl>
 //   impl: wasm (esbuild-wasm browser build, worker:false — Nodepod's engine)
 //       | native (reference ceiling) | fast (fast-esbuild-wasm)
+//       | prev (snapshot of the package in .scratch/esbuild-prev/fast-esbuild-wasm,
+//         for A/B runs; e.g. git archive HEAD fast-esbuild-wasm + esbuild.wasm)
 import { runSuite } from "./harness.mjs";
 import { loadJs, readText, nm, root } from "./corpus.mjs";
 import { readFileSync, readdirSync } from "node:fs";
@@ -22,9 +24,10 @@ async function loadImpl(name) {
     return esbuild;
   }
   if (name === "native") return await import("esbuild");
-  if (name === "fast") {
+  if (name === "fast" || name === "prev") {
+    // prev: a snapshot of the package before the current round of changes
     const t0 = performance.now();
-    const esbuild = await import("../fast-esbuild-wasm/index.mjs");
+    const esbuild = await import(name === "fast" ? "../fast-esbuild-wasm/index.mjs" : "../.scratch/esbuild-prev/fast-esbuild-wasm/index.mjs");
     await esbuild.initialize({});
     process.stdout.write("INIT " + (performance.now() - t0).toFixed(1) + "\n");
     return esbuild;
@@ -70,7 +73,10 @@ cases.push({
 });
 
 // TypeScript: Nodepod's own sources
-const srcDir = join(root, "../../src");
+// (Nodepod's src: the repo used to live inside the Nodepod checkout; now it
+// sits next to it)
+import { existsSync } from "node:fs";
+const srcDir = [join(root, "../../src"), join(root, "../Nodepod/src")].find((d) => existsSync(join(d, "script-engine.ts"))) ?? join(root, "../../src");
 const tsFiles = ["script-engine.ts", "memory-volume.ts", "syntax-transforms.ts", "module-transformer.ts"]
   .map((f) => {
     try {

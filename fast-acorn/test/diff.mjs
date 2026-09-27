@@ -15,7 +15,7 @@ const withNodepod = args.includes("--nodepod");
 const here = fileURLToPath(new URL(".", import.meta.url));
 const dirs = args.includes("--dir")
   ? [args[args.indexOf("--dir") + 1]]
-  : [join(here, "../../node_modules"), join(here, "../../../../../Nodepod/node_modules/.pnpm")];
+  : [join(here, "../../node_modules"), join(here, "../../../Nodepod/node_modules/.pnpm")];
 
 function collect(dir, out, seen) {
   let entries;
@@ -53,6 +53,34 @@ console.log(`${files.length} files`);
 
 const replacer = (k, v) => (typeof v === "bigint" ? { $bigint: v.toString() } : v instanceof RegExp ? { $re: String(v) } : v);
 const ser = (ast) => JSON.stringify(ast, replacer);
+// object identity structure: which nodes, arrays, loc/Position objects and
+// range arrays are shared (acorn shares e.g. a token's Position between all
+// nodes starting/ending there, and the Identifier of `export { a }`)
+function shareSig(ast) {
+  const ids = new Map();
+  let next = 0;
+  const out = [];
+  const id = (o) => {
+    if (o === undefined || o === null) return -1;
+    let i = ids.get(o);
+    if (i === undefined) ids.set(o, (i = next++));
+    return i;
+  };
+  (function walk(n) {
+    if (!n || typeof n !== "object") return;
+    if (Array.isArray(n)) {
+      out.push("a" + id(n));
+      for (const x of n) walk(x);
+      return;
+    }
+    if (typeof n.type !== "string") return;
+    out.push("n" + id(n));
+    if (n.loc) out.push(id(n.loc), id(n.loc.start), id(n.loc.end));
+    if (n.range) out.push(id(n.range));
+    for (const k in n) if (k !== "loc" && k !== "range") walk(n[k]);
+  })(ast);
+  return out.join(",");
+}
 
 let ok = 0, bails = 0, bothFail = 0, falseAccept = 0, mismatch = 0, shown = 0;
 const bailSamples = [];
@@ -111,6 +139,11 @@ function check(file, code, opts0) {
   if (a !== b) {
     mismatch++;
     if (shown++ < 15) console.log(`MISMATCH ${file} ${JSON.stringify(opts)}\n   ${firstDiff(a, b)}`);
+    return;
+  }
+  if (shareSig(ref) !== shareSig(fast)) {
+    mismatch++;
+    if (shown++ < 15) console.log(`SHARING ${file} ${JSON.stringify(opts)}`);
     return;
   }
   if (!(fast instanceof VNode)) {

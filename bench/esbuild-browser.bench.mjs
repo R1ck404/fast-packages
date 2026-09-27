@@ -2,6 +2,7 @@
 // Nodepod runs it: browser build, default worker mode, wasm streamed from URL.
 // Usage: node bench/esbuild-browser.bench.mjs <impl>
 //   impl: wasm (esbuild-wasm 0.28.2 browser build) | fast (fast-esbuild-wasm)
+//       | prev (snapshot in .scratch/esbuild-prev/fast-esbuild-wasm, for A/B runs)
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname, normalize } from "node:path";
@@ -9,7 +10,9 @@ import { chromium } from "playwright-core";
 import { root } from "./corpus.mjs";
 
 const impl = process.argv[2] || "wasm";
-const repoSrc = join(root, "../../src");
+// (Nodepod's src: the repo used to live inside the Nodepod checkout; now it
+// sits next to it)
+const repoSrc = [join(root, "../../src"), join(root, "../Nodepod/src")].find((d) => existsSync(join(d, "script-engine.ts"))) ?? join(root, "../../src");
 const mime = { ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".html": "text/html", ".ts": "text/plain", ".json": "application/json" };
 
 const server = createServer((req, res) => {
@@ -31,6 +34,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 const libs = {
   wasm: { script: "/node_modules/esbuild-wasm/lib/browser.js", wasm: "/node_modules/esbuild-wasm/esbuild.wasm" },
   fast: { script: "/fast-esbuild-wasm/lib/browser.js", wasm: "/fast-esbuild-wasm/esbuild.wasm" },
+  prev: { script: "/.scratch/esbuild-prev/fast-esbuild-wasm/lib/browser.js", wasm: "/.scratch/esbuild-prev/fast-esbuild-wasm/esbuild.wasm" },
 }[impl];
 
 const browser = await chromium.launch();

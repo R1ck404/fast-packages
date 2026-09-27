@@ -245,7 +245,8 @@ function goStringsToLower(s) {
 // resolver.go
 function getProperty(json, name) {
   if (json.data instanceof EObject) {
-    for (const prop of json.data.properties) {
+    for (let $i110 = 0, $a110 = json.data.properties; $i110 < $a110.length; $i110++) {
+      const prop = $a110[$i110];
       const key = prop.key.data;
       if (key instanceof EString && key.value === name) {
         return [prop.valueOrNil, prop.key.loc, true];
@@ -303,7 +304,8 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
           bail(); // (applyExtendedConfig: "extends" is only processed when building)
         }
       } else if (valueJSON.data instanceof EArray) {
-        for (const item of valueJSON.data.items) {
+        for (let $i111 = 0, $a111 = valueJSON.data.items; $i111 < $a111.length; $i111++) {
+          const item = $a111[$i111];
           const [str, ok] = getString(item);
           if (ok) {
             const base = extends_(str, source.rangeOfString(item.loc));
@@ -556,7 +558,8 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
           const paths = valueJSON.data;
           result.baseURLForPaths = fileDir;
           result.paths = new TSConfigPaths(new Map(), source);
-          for (const prop of paths.properties) {
+          for (let $i112 = 0, $a112 = paths.properties; $i112 < $a112.length; $i112++) {
+            const prop = $a112[$i112];
             const [key, ok] = getString(prop.key);
             if (ok) {
               if (!isValidTSConfigPathPattern(key, log, source, tracker, prop.key.loc)) {
@@ -568,7 +571,8 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
               // the documentation for examples of how this is used:
               // https://www.typescriptlang.org/docs/handbook/module-resolution.html#path-mapping.
               if (prop.valueOrNil.data instanceof EArray) {
-                for (const item of prop.valueOrNil.data.items) {
+                for (let $i113 = 0, $a113 = prop.valueOrNil.data.items; $i113 < $a113.length; $i113++) {
+                  const item = $a113[$i113];
                   let [str, ok] = getString(item);
                   if (ok) {
                     if (isValidTSConfigPathPattern(str, log, source, tracker, item.loc)) {
@@ -592,7 +596,8 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
   // Warn about compiler options not wrapped in "compilerOptions".
   // For example: https://github.com/evanw/esbuild/issues/3301
   if (json.data instanceof EObject) {
-    loop: for (const prop of json.data.properties) {
+    loop: for (let $i114 = 0, $a114 = json.data.properties; $i114 < $a114.length; $i114++) {
+      const prop = $a114[$i114];
       const keyData = prop.key.data;
       if (keyData instanceof EString) {
         const key = keyData.value; // helpers.UTF16ToString

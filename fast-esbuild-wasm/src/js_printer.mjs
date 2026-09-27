@@ -1,15 +1,16 @@
 // Port of internal/js_printer/js_printer.go. See CONVENTIONS.md.
 //
 // Output buffer: Go appends UTF-8 bytes to p.js and compares len(p.js) with
-// saved positions (stmtStart, prevOpEnd, ...). Here the output is a growable
-// Uint16Array of UTF-16 code units (p.jsBuf, p.jsLen), decoded once at the end
-// with TextDecoder("utf-16le"). This allocates nothing per print() (unlike +=
-// ropes or an array of chunks) and allows reading the last characters back
-// like Go does. Every saved position is a UTF-16 length; positions are only
-// ever compared for equality with the current length, so any consistent unit
-// works. (TextDecoder would turn a lone surrogate into U+FFFD, but the printer
-// never emits raw lone surrogates: strings escape them, and raw source text
-// such as comments or identifiers never contains them.)
+// saved positions (stmtStart, prevOpEnd, ...). Here the output is the same:
+// a growable Uint8Array of UTF-8 bytes (p.jsBuf, p.jsLen), decoded once at the
+// end with TextDecoder("utf-8"), which is very fast for the common ASCII-only
+// output. This allocates nothing per print() (unlike += ropes or an array of
+// chunks) and allows reading the last bytes back like Go does. Every saved
+// position is a byte length, as in Go. (A lone surrogate would be written as
+// its 3 WTF-8 bytes like in Go, which decode to U+FFFD each, like the glue's
+// TextDecoder does for Go's output; the printer never emits raw lone
+// surrogates anyway: strings escape them, and raw source text such as
+// comments or identifiers never contains them.)
 //
 // Supported option subset (print() bails otherwise): MinifySyntax false,
 // LineLimit 0, no metafile, and no
@@ -17,9 +18,9 @@
 // "UnsupportedFeatures.Has(compat.X)" is false). MinifyWhitespace and
 // MinifyIdentifiers are ported (but the fast path only uses false).
 //
-// Source mappings: addSourceMapping passes the UTF-16 output buffer and its
+// Source mappings: addSourceMapping passes the UTF-8 output buffer and its
 // length to the sourcemap.ChunkBuilder, which counts generated columns in
-// UTF-16 code units exactly like Go does on the UTF-8 bytes.
+// UTF-16 code units exactly like Go does.
 import { bail } from "./bail.mjs";
 import { escapeClosingTag, formatFloatG } from "./helpers.mjs";
 import {
@@ -220,8 +221,9 @@ function signbit(x) {
   return x < 0 || (x === 0 && 1 / x < 0);
 }
 
-// Decodes the output buffer (see the comment at the top)
-const utf16Decoder = new TextDecoder("utf-16le");
+// Decodes the output buffer (see the comment at the top). (ignoreBOM: a
+// printed part may in theory start with U+FEFF, which must be kept.)
+const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 // Code points that js_ast.IsIdentifierContinue accepts in the ASCII range
 const identContinueASCII = new Uint8Array(128);
@@ -310,179 +312,139 @@ export function quoteIdentifier(js, name, unsupportedFeatures) {
   return out;
 }
 
-// The body of printUnquotedUTF16 as a pure function returning the escaped
-// text. Runs of characters that are printed verbatim are copied with slice().
-// (LineLimit is always 0 here, so the "wrapLongLines" logic is not ported.)
-function escapeUnquotedUTF16(text, quote, asciiOnly, inlineScriptOK) {
+// The per-character logic of Go's printUnquotedUTF16 (LineLimit is always 0
+// here, so the "wrapLongLines" logic is not ported). "c" is text[i]. Returns
+// the escape sequence to print instead of the character, or null if the
+// character is printed verbatim. escapeNextIsPair tells whether the character
+// was the first half of a surrogate pair (then both code units are consumed).
+let escapeNextIsPair = false;
+
+// Characters below 0x7f that may need an escape (all others are printed
+// verbatim, as in Go's "Common case: just append a single byte")
+const ESCAPE_CANDIDATE = new Uint8Array(0x7f);
+for (const c of [0x00, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0d, 0x1b, 0x22, 0x24, 0x27, 0x2f, 0x5c, 0x60]) ESCAPE_CANDIDATE[c] = 1;
+
+function escapeUnquotedChar(text, at, c, quote, asciiOnly, inlineScriptOK) {
   const n = text.length;
-  let js = "";
-  let start = 0; // Start of the pending run of verbatim characters
-  let i = 0;
+  const i = at + 1; // (Go's "i" after decoding the character)
+  escapeNextIsPair = false;
 
-  while (i < n) {
-    const at = i;
-    const c = text.charCodeAt(i);
-    i++;
-    let esc;
+  switch (c) {
+    // Special-case the null character since it may mess with code written in C
+    // that treats null characters as the end of the string.
+    case 0x00:
+      // We don't want "\x001" to be written as "\01"
+      if (i < n && text.charCodeAt(i) >= 48 && text.charCodeAt(i) <= 57) {
+        return "\\x00";
+      }
+      return "\\0";
 
-    switch (c) {
-      // Special-case the null character since it may mess with code written in C
-      // that treats null characters as the end of the string.
-      case 0x00:
-        // We don't want "\x001" to be written as "\01"
-        if (i < n && text.charCodeAt(i) >= 48 && text.charCodeAt(i) <= 57) {
-          esc = "\\x00";
-        } else {
-          esc = "\\0";
-        }
-        break;
+    // Special-case the bell character since it may cause dumping this file to
+    // the terminal to make a sound, which is undesirable. Note that we can't
+    // use an octal literal to print this shorter since octal literals are not
+    // allowed in strict mode (or in template strings).
+    case 0x07:
+      return "\\x07";
 
-      // Special-case the bell character since it may cause dumping this file to
-      // the terminal to make a sound, which is undesirable. Note that we can't
-      // use an octal literal to print this shorter since octal literals are not
-      // allowed in strict mode (or in template strings).
-      case 0x07:
-        esc = "\\x07";
-        break;
+    case 0x08:
+      return "\\b";
 
-      case 0x08:
-        esc = "\\b";
-        break;
+    case 0x0c:
+      return "\\f";
 
-      case 0x0c:
-        esc = "\\f";
-        break;
+    case 0x0a:
+      if (quote === 0x60) {
+        return null; // A real newline
+      }
+      return "\\n";
 
-      case 0x0a:
-        if (quote === 0x60) {
-          continue; // A real newline
-        }
-        esc = "\\n";
-        break;
+    case 0x0d:
+      return "\\r";
 
-      case 0x0d:
-        esc = "\\r";
-        break;
+    case 0x0b:
+      return "\\v";
 
-      case 0x0b:
-        esc = "\\v";
-        break;
+    case 0x1b:
+      return "\\x1B";
 
-      case 0x1b:
-        esc = "\\x1B";
-        break;
+    case 0x5c:
+      return "\\\\";
 
-      case 0x5c:
-        esc = "\\\\";
-        break;
+    case 0x2f:
+      // Avoid generating the sequence "</script" in JS code
+      if (inlineScriptOK && i >= 2 && text.charCodeAt(i - 2) === 60 && i + 6 <= n && matchesScriptAt(text, i)) {
+        return "\\/";
+      }
+      return null;
 
-      case 0x2f:
-        // Avoid generating the sequence "</script" in JS code
-        if (inlineScriptOK && i >= 2 && text.charCodeAt(i - 2) === 60 && i + 6 <= n && matchesScriptAt(text, i)) {
-          esc = "\\/";
-          break;
-        }
-        continue;
+    case 0x27:
+      return quote === 0x27 ? "\\'" : null;
 
-      case 0x27:
-        if (quote === 0x27) {
-          esc = "\\'";
-          break;
-        }
-        continue;
+    case 0x22:
+      return quote === 0x22 ? '\\"' : null;
 
-      case 0x22:
-        if (quote === 0x22) {
-          esc = '\\"';
-          break;
-        }
-        continue;
+    case 0x60:
+      return quote === 0x60 ? "\\`" : null;
 
-      case 0x60:
-        if (quote === 0x60) {
-          esc = "\\`";
-          break;
-        }
-        continue;
+    case 0x24:
+      if (quote === 0x60 && i < n && text.charCodeAt(i) === 0x7b) {
+        return "\\$";
+      }
+      return null;
 
-      case 0x24:
-        if (quote === 0x60 && i < n && text.charCodeAt(i) === 0x7b) {
-          esc = "\\$";
-          break;
-        }
-        continue;
+    case 0x2028:
+      return BSU + "2028";
 
-      case 0x2028:
-        esc = BSU + "2028";
-        break;
+    case 0x2029:
+      return BSU + "2029";
 
-      case 0x2029:
-        esc = BSU + "2029";
-        break;
-
-      case 0xfeff:
-        esc = BSU + "FEFF";
-        break;
-
-      default:
-        // Common case: just append a single byte
-        if (c <= lastASCII) {
-          continue;
-        }
-
-        // Is this a high surrogate?
-        if (c >= firstHighSurrogate && c <= lastHighSurrogate) {
-          // Is there a next character?
-          if (i < n) {
-            const c2 = text.charCodeAt(i);
-
-            // Is it a low surrogate?
-            if (c2 >= firstLowSurrogate && c2 <= lastLowSurrogate) {
-              const r = (c << 10) + c2 + (0x10000 - (firstHighSurrogate << 10) - firstLowSurrogate);
-              i++;
-
-              // Escape this character if UTF-8 isn't allowed
-              // (compat.UnicodeEscapes is always supported)
-              if (asciiOnly) {
-                esc = unicodeEscapeBraces(r);
-                break;
-              }
-
-              // Otherwise, encode to UTF-8
-              continue;
-            }
-          }
-
-          // Write an unpaired high surrogate
-          esc = hex4(c);
-          break;
-        }
-
-        // Is this an unpaired low surrogate or four-digit hex escape?
-        if ((c >= firstLowSurrogate && c <= lastLowSurrogate) || (asciiOnly && c > 0xff)) {
-          esc = hex4(c);
-          break;
-        }
-
-        // Can this be a two-digit hex escape?
-        if (asciiOnly) {
-          esc = "\\x" + hexChars[c >> 4] + hexChars[c & 15];
-          break;
-        }
-
-        // Otherwise, just encode to UTF-8
-        continue;
-    }
-
-    if (start < at) js += text.slice(start, at);
-    js += esc;
-    start = i;
+    case 0xfeff:
+      return BSU + "FEFF";
   }
 
-  // Every escape moves "start" past 0, so start === 0 means nothing was escaped
-  if (start === 0) return text;
-  if (start < n) js += text.slice(start);
-  return js;
+  // Common case: just append a single byte
+  if (c <= lastASCII) {
+    return null;
+  }
+
+  // Is this a high surrogate?
+  if (c >= firstHighSurrogate && c <= lastHighSurrogate) {
+    // Is there a next character?
+    if (i < n) {
+      const c2 = text.charCodeAt(i);
+
+      // Is it a low surrogate?
+      if (c2 >= firstLowSurrogate && c2 <= lastLowSurrogate) {
+        const r = (c << 10) + c2 + (0x10000 - (firstHighSurrogate << 10) - firstLowSurrogate);
+        escapeNextIsPair = true;
+
+        // Escape this character if UTF-8 isn't allowed
+        // (compat.UnicodeEscapes is always supported)
+        if (asciiOnly) {
+          return unicodeEscapeBraces(r);
+        }
+
+        // Otherwise, encode to UTF-8
+        return null;
+      }
+    }
+
+    // Write an unpaired high surrogate
+    return hex4(c);
+  }
+
+  // Is this an unpaired low surrogate or four-digit hex escape?
+  if ((c >= firstLowSurrogate && c <= lastLowSurrogate) || (asciiOnly && c > 0xff)) {
+    return hex4(c);
+  }
+
+  // Can this be a two-digit hex escape?
+  if (asciiOnly) {
+    return "\\x" + hexChars[c >> 4] + hexChars[c & 15];
+  }
+
+  // Otherwise, just encode to UTF-8
+  return null;
 }
 
 // printQuotedFlags
@@ -529,10 +491,114 @@ function takeOutputBuffer() {
     spareOutputBuffer = null;
     return buf;
   }
-  return new Uint16Array(1 << 14);
+  return new Uint8Array(1 << 15);
 }
 function releaseOutputBuffer(buf) {
-  if (buf !== null && buf.length <= 1 << 21) spareOutputBuffer = buf;
+  if (buf !== null && buf.length <= 1 << 22) spareOutputBuffer = buf;
+}
+
+// A bitset of the locations that have expression comments (the keys of
+// "exprComments"), so that the lookups done for every printed expression are a
+// bit test instead of a Map lookup. The map is complete when printing starts
+// (only the parser adds to it), and the same map is printed part by part, so
+// the bitset is cached per map. null means "no filter" (some key is not a
+// small non-negative integer, which never happens for source locations).
+const exprCommentBitsCache = new WeakMap();
+function exprCommentBitsFor(exprComments) {
+  let entry = exprCommentBitsCache.get(exprComments);
+  if (entry === undefined || entry.size !== exprComments.size) {
+    let max = 0;
+    let ok = true;
+    for (const loc of exprComments.keys()) {
+      if (!(typeof loc === "number" && loc >= 0 && loc <= 0x3fffffff && Math.floor(loc) === loc)) {
+        ok = false;
+        break;
+      }
+      if (loc > max) max = loc;
+    }
+    let bits = null;
+    if (ok) {
+      bits = new Int32Array((max >>> 5) + 1);
+      for (const loc of exprComments.keys()) bits[loc >>> 5] |= 1 << (loc & 31);
+    }
+    entry = { size: exprComments.size, bits };
+    exprCommentBitsCache.set(exprComments, entry);
+  }
+  return entry.bits;
+}
+
+// False if "loc" certainly has no expression comments (see exprCommentBitsFor)
+function mayHaveExprComments(bits, loc) {
+  if (bits === null) return true;
+  const i = loc >>> 5;
+  return i < bits.length && (bits[i] & (1 << (loc & 31))) !== 0;
+}
+
+// Writes the UTF-8 encoding of text[i:end) (a single code point) to buf at
+// "len" and returns the new length
+function encodeUTF8Into(buf, len, text, i, end) {
+  const c = text.charCodeAt(i);
+  if (c < 0x80) {
+    buf[len++] = c;
+  } else if (c < 0x800) {
+    buf[len++] = 0xc0 | (c >> 6);
+    buf[len++] = 0x80 | (c & 63);
+  } else if (end - i === 2) {
+    const r = (c << 10) + text.charCodeAt(i + 1) + (0x10000 - (firstHighSurrogate << 10) - firstLowSurrogate);
+    buf[len++] = 0xf0 | (r >> 18);
+    buf[len++] = 0x80 | ((r >> 12) & 63);
+    buf[len++] = 0x80 | ((r >> 6) & 63);
+    buf[len++] = 0x80 | (r & 63);
+  } else {
+    buf[len++] = 0xe0 | (c >> 12);
+    buf[len++] = 0x80 | ((c >> 6) & 63);
+    buf[len++] = 0x80 | (c & 63);
+  }
+  return len;
+}
+
+// Go: utf8.DecodeLastRune(p[:n]) (the rune only)
+function decodeLastRune(p, n) {
+  if (n === 0) return 0xfffd;
+  let start = n - 1;
+  const c = p[start];
+  if (c < 0x80) return c;
+  let lim = n - 4;
+  if (lim < 0) lim = 0;
+  for (start--; start >= lim; start--) {
+    if ((p[start] & 0xc0) !== 0x80) break;
+  }
+  if (start < 0) start = 0;
+  // utf8.DecodeRune(p[start:n]) must consume exactly n - start bytes
+  const size = n - start;
+  const b0 = p[start];
+  let r;
+  if (b0 >= 0xc2 && b0 <= 0xdf) {
+    if (size !== 2) return 0xfffd;
+    const b1 = p[start + 1];
+    if ((b1 & 0xc0) !== 0x80) return 0xfffd;
+    r = ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+  } else if (b0 >= 0xe0 && b0 <= 0xef) {
+    if (size !== 3) return 0xfffd;
+    const b1 = p[start + 1];
+    const b2 = p[start + 2];
+    const lo = b0 === 0xe0 ? 0xa0 : 0x80;
+    const hi = b0 === 0xed ? 0x9f : 0xbf;
+    if (b1 < lo || b1 > hi || (b2 & 0xc0) !== 0x80) return 0xfffd;
+    r = ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+  } else if (b0 >= 0xf0 && b0 <= 0xf4) {
+    if (size !== 4) return 0xfffd;
+    const b1 = p[start + 1];
+    const b2 = p[start + 2];
+    const b3 = p[start + 3];
+    const lo = b0 === 0xf0 ? 0x90 : 0x80;
+    const hi = b0 === 0xf4 ? 0x8f : 0xbf;
+    if (b1 < lo || b1 > hi || (b2 & 0xc0) !== 0x80 || (b3 & 0xc0) !== 0x80) return 0xfffd;
+    r = ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+  } else {
+    return 0xfffd;
+  }
+  return r;
 }
 
 function isASCII(text) {
@@ -552,12 +618,14 @@ class printer {
     this.callTarget = null; // js_ast.E
     this.exprComments = exprComments; // Map<Loc, string[]> or null
     this.printedExprComments = null; // Set<Loc>
+    this.exprCommentBits = null; // see exprCommentBitsFor
     this.hasLegalComment = null; // Set<string>
     this.extractedLegalComments = [];
     this.jsBuf = takeOutputBuffer(); // Go: js []byte (see the comment at the top)
     this.jsLen = 0; // Go: len(p.js), in UTF-16 code units
     this.jsonMetadataImports = [];
     this.binaryExprStack = []; // []binaryExprVisitor
+    this.binaryExprVisitorPool = []; // JS-only: see acquireBinaryExprVisitor
     this.options = options;
     // sourcemap.ChunkBuilder, only created when it is used (source mappings are
     // added or a source map chunk is generated), else null
@@ -589,24 +657,66 @@ class printer {
     this.hasInlinableCalls = true;
   }
 
-  // Go: p.js = append(p.js, text...)
+  // Go: p.js = append(p.js, text...) (UTF-8 encoded)
   print(text) {
     const n = text.length;
-    const len = this.jsLen;
+    let len = this.jsLen;
     let buf = this.jsBuf;
     if (len + n > buf.length) {
       buf = this.growJS(len + n);
     }
     for (let i = 0; i < n; i++) {
-      buf[len + i] = text.charCodeAt(i);
+      const c = text.charCodeAt(i);
+      if (c >= 0x80) {
+        this.jsLen = len;
+        this.printUTF8From(text, i);
+        return;
+      }
+      buf[len++] = c;
     }
-    this.jsLen = len + n;
+    this.jsLen = len;
+  }
+
+  // Appends the UTF-8 encoding of text[i:] (WTF-8 for a lone surrogate, like
+  // Go's strings)
+  printUTF8From(text, i) {
+    const n = text.length;
+    let len = this.jsLen;
+    let buf = this.jsBuf;
+    // (At most 3 bytes per UTF-16 code unit)
+    if (len + (n - i) * 3 > buf.length) buf = this.growJS(len + (n - i) * 3);
+    while (i < n) {
+      const c = text.charCodeAt(i++);
+      if (c < 0x80) {
+        buf[len++] = c;
+      } else if (c < 0x800) {
+        buf[len++] = 0xc0 | (c >> 6);
+        buf[len++] = 0x80 | (c & 63);
+      } else {
+        if (c >= firstHighSurrogate && c <= lastHighSurrogate && i < n) {
+          const c2 = text.charCodeAt(i);
+          if (c2 >= firstLowSurrogate && c2 <= lastLowSurrogate) {
+            i++;
+            const r = (c << 10) + c2 + (0x10000 - (firstHighSurrogate << 10) - firstLowSurrogate);
+            buf[len++] = 0xf0 | (r >> 18);
+            buf[len++] = 0x80 | ((r >> 12) & 63);
+            buf[len++] = 0x80 | ((r >> 6) & 63);
+            buf[len++] = 0x80 | (r & 63);
+            continue;
+          }
+        }
+        buf[len++] = 0xe0 | (c >> 12);
+        buf[len++] = 0x80 | ((c >> 6) & 63);
+        buf[len++] = 0x80 | (c & 63);
+      }
+    }
+    this.jsLen = len;
   }
 
   growJS(needed) {
     let size = this.jsBuf.length * 2;
     while (size < needed) size *= 2;
-    const buf = new Uint16Array(size);
+    const buf = new Uint8Array(size);
     buf.set(this.jsBuf.subarray(0, this.jsLen));
     this.jsBuf = buf;
     return buf;
@@ -614,9 +724,7 @@ class printer {
 
   // The output as a JS string
   jsText() {
-    // (String.fromCharCode is cheaper than a TextDecoder call for short
-    // outputs; the printer never emits lone surrogates, so both are exact)
-    const text = this.jsLen <= 1024 ? String.fromCharCode.apply(null, this.jsBuf.subarray(0, this.jsLen)) : utf16Decoder.decode(this.jsBuf.subarray(0, this.jsLen));
+    const text = this.jsLen === 0 ? "" : utf8Decoder.decode(this.jsBuf.subarray(0, this.jsLen));
     releaseOutputBuffer(this.jsBuf);
     this.jsBuf = null;
     return text;
@@ -632,26 +740,58 @@ class printer {
     this.print(bytes);
   }
 
-  // Go: utf8.DecodeLastRune(p.js). Returns 0xFFFD for an empty buffer or a
-  // lone surrogate (whose WTF-8 bytes are invalid UTF-8).
+  // Go: utf8.DecodeLastRune(p.js). Returns 0xFFFD for an empty buffer or an
+  // invalid sequence (e.g. the WTF-8 bytes of a lone surrogate).
   lastCodePoint() {
-    const n = this.jsLen;
-    if (n === 0) return 0xfffd;
-    const c = this.jsBuf[n - 1];
-    if (c >= firstHighSurrogate && c <= lastLowSurrogate) {
-      if (c >= firstLowSurrogate && n >= 2) {
-        const h = this.jsBuf[n - 2];
-        if (h >= firstHighSurrogate && h <= lastHighSurrogate) {
-          return (h << 10) + c + (0x10000 - (firstHighSurrogate << 10) - firstLowSurrogate);
-        }
-      }
-      return 0xfffd;
-    }
-    return c;
+    return decodeLastRune(this.jsBuf, this.jsLen);
   }
 
+  // Characters that can never need an escape are copied straight into the
+  // output buffer; all others (see ESCAPE_CANDIDATE) go through the exact
+  // per-character logic of Go's printUnquotedUTF16 (escapeUnquotedChar).
   printUnquotedUTF16(text, quote, flags) {
-    this.print(escapeUnquotedUTF16(text, quote, this.options.asciiOnly, this.inlineScriptOK));
+    const n = text.length;
+    let len = this.jsLen;
+    let buf = this.jsBuf;
+    if (len + n > buf.length) buf = this.growJS(len + n);
+    let i = 0;
+    while (i < n) {
+      const c = text.charCodeAt(i);
+      if (c < 0x7f && ESCAPE_CANDIDATE[c] === 0) {
+        buf[len++] = c;
+        i++;
+        continue;
+      }
+      const esc = escapeUnquotedChar(text, i, c, quote, this.options.asciiOnly, this.inlineScriptOK);
+      if (esc === null) {
+        // Printed verbatim (one code unit, or a surrogate pair)
+        if (c < 0x80) {
+          buf[len++] = c;
+          i++;
+          continue;
+        }
+        // Non-ASCII: UTF-8 encode it (at most 4 bytes for 2 code units, or 3
+        // for one; the n - i bytes reserved for the rest include 1 or 2 of them)
+        const end = i + (escapeNextIsPair ? 2 : 1);
+        if (len + 2 + (n - i) > buf.length) {
+          this.jsLen = len;
+          buf = this.growJS(len + 2 + (n - i));
+        }
+        len = encodeUTF8Into(buf, len, text, i, end);
+        i = end;
+        continue;
+      }
+      i += escapeNextIsPair ? 2 : 1;
+      // The escape is longer than what it replaces: make room for it and the rest
+      const m = esc.length;
+      if (len + m + (n - i) > buf.length) {
+        this.jsLen = len;
+        buf = this.growJS(len + m + (n - i));
+      }
+      for (let k = 0; k < m; k++) buf[len + k] = esc.charCodeAt(k);
+      len += m;
+    }
+    this.jsLen = len;
   }
 
   // JSX tag syntax doesn't support character escapes so non-ASCII identifiers
@@ -808,11 +948,25 @@ class printer {
 
   printIdentifier(name) {
     // (QuoteIdentifier leaves pure-ASCII names unchanged)
-    if (this.options.asciiOnly && !isASCII(name)) {
-      this.print(quoteIdentifier("", name, 0));
-    } else {
+    if (!this.options.asciiOnly) {
       this.print(name);
+      return;
     }
+    // Copy while checking for non-ASCII characters (the length is only
+    // committed if all of them are ASCII)
+    const n = name.length;
+    const len = this.jsLen;
+    let buf = this.jsBuf;
+    if (len + n > buf.length) buf = this.growJS(len + n);
+    for (let i = 0; i < n; i++) {
+      const c = name.charCodeAt(i);
+      if (c > 0x7f) {
+        this.print(quoteIdentifier("", name, 0));
+        return;
+      }
+      buf[len + i] = c;
+    }
+    this.jsLen = len + n;
   }
 
   // This is the same as "printIdentifier(StringToUTF16(bytes))" without any
@@ -926,7 +1080,7 @@ class printer {
 
   willPrintExprCommentsAtLoc(loc) {
     const p = this;
-    if (p.options.minifyWhitespace || p.exprComments === null) return false;
+    if (p.options.minifyWhitespace || p.exprComments === null || !mayHaveExprComments(p.exprCommentBits, loc)) return false;
     const comments = p.exprComments.get(loc);
     return comments !== undefined && comments !== null && !p.printedExprComments.has(loc);
   }
@@ -959,7 +1113,8 @@ class printer {
       case B_ARRAY: {
         let isMultiLine = (b.items.length > 0 && !b.isSingleLine) || p.willPrintExprCommentsAtLoc(b.closeBracketLoc);
         if (!p.options.minifyWhitespace && !isMultiLine) {
-          for (const item of b.items) {
+          for (let $i64 = 0, $a64 = b.items; $i64 < $a64.length; $i64++) {
+            const item = $a64[$i64];
             if (p.willPrintExprCommentsAtLoc(item.loc)) {
               isMultiLine = true;
               break;
@@ -1022,7 +1177,8 @@ class printer {
       case B_OBJECT: {
         let isMultiLine = (b.properties.length > 0 && !b.isSingleLine) || p.willPrintExprCommentsAtLoc(b.closeBraceLoc);
         if (!p.options.minifyWhitespace && !isMultiLine) {
-          for (const property of b.properties) {
+          for (let $i65 = 0, $a65 = b.properties; $i65 < $a65.length; $i65++) {
+            const property = $a65[$i65];
             if (p.willPrintExprCommentsAtLoc(property.loc)) {
               isMultiLine = true;
               break;
@@ -1423,7 +1579,8 @@ class printer {
     p.printNewline();
     p.options.indent++;
 
-    for (const item of class_.properties) {
+    for (let $i66 = 0, $a66 = class_.properties; $i66 < $a66.length; $i66++) {
+      const item = $a66[$i66];
       p.printSemicolonIfNeeded();
       const omitIndent = p.printDecorators(item.decorators, printNewlineAfterDecorator);
       if (!omitIndent) {
@@ -1779,8 +1936,9 @@ class printer {
       quote = 0x60;
     }
 
-    // Go: p.print(c); p.printUnquotedUTF16(data, rune(c[0]), flags); p.print(c)
-    this.print(c + escapeUnquotedUTF16(data, quote, this.options.asciiOnly, this.inlineScriptOK) + c);
+    this.print(c);
+    this.printUnquotedUTF16(data, quote, flags);
+    this.print(c);
   }
 
   // Go uses "defer" for the closing tokens; here they are printed explicitly on
@@ -2184,7 +2342,7 @@ class printer {
   // Print any stored comments that are associated with this location
   printExprCommentsAtLoc(loc) {
     const p = this;
-    if (p.options.minifyWhitespace || p.exprComments === null) {
+    if (p.options.minifyWhitespace || p.exprComments === null || !mayHaveExprComments(p.exprCommentBits, loc)) {
       return;
     }
     const comments = p.exprComments.get(loc);
@@ -2224,7 +2382,7 @@ class printer {
 
   printExprCommentsAfterCloseTokenAtLoc(loc) {
     const p = this;
-    if (p.exprComments === null) {
+    if (p.exprComments === null || !mayHaveExprComments(p.exprCommentBits, loc)) {
       return;
     }
     const comments = p.exprComments.get(loc);
@@ -2565,7 +2723,9 @@ class printer {
         // If this was originally a template literal, print it as one as long as we're not minifying
         // (compat.TemplateLiteral is always supported)
         if (e.preferTemplate && !p.options.minifySyntax) {
-          p.print("`" + escapeUnquotedUTF16(e.value, 0x60, p.options.asciiOnly, p.inlineScriptOK) + "`");
+          p.print("`");
+          p.printUnquotedUTF16(e.value, 0x60, 0);
+          p.print("`");
           break;
         }
 
@@ -2766,7 +2926,8 @@ class printer {
     }
 
     // Print the attributes
-    for (const property of e.properties) {
+    for (let $i67 = 0, $a67 = e.properties; $i67 < $a67.length; $i67++) {
+      const property = $a67[$i67];
       if (e.isTagSingleLine) {
         p.printSpace();
       } else {
@@ -3367,7 +3528,8 @@ class printer {
     const p = this;
     let isMultiLine = (e.properties.length > 0 && !e.isSingleLine) || p.willPrintExprCommentsAtLoc(e.closeBraceLoc);
     if (!p.options.minifyWhitespace && !isMultiLine) {
-      for (const property of e.properties) {
+      for (let $i68 = 0, $a68 = e.properties; $i68 < $a68.length; $i68++) {
+        const property = $a68[$i68];
         if (p.willPrintExprCommentsAtLoc(property.loc)) {
           isMultiLine = true;
           break;
@@ -3513,7 +3675,8 @@ class printer {
     } else {
       p.printUnquotedUTF16(e.headCooked, 0x60, 0);
     }
-    for (const part of e.parts) {
+    for (let $i69 = 0, $a69 = e.parts; $i69 < $a69.length; $i69++) {
+      const part = $a69[$i69];
       p.print("${");
       p.printExpr(part.value, LLowest, 0);
       p.addSourceMapping(part.tailLoc);
@@ -3579,7 +3742,7 @@ class printer {
   // code in the JavaScript parser for details.
   printEBinary(e, level, flags) {
     const p = this;
-    let v = new binaryExprVisitor(e, level, flags);
+    let v = p.acquireBinaryExprVisitor(e, level, flags);
 
     // Use a single stack to reduce allocation overhead
     const stackBottom = p.binaryExprStack.length;
@@ -3587,6 +3750,7 @@ class printer {
     for (;;) {
       // Check whether this node is a special case, and stop if it is
       if (!v.checkAndPrepare(p)) {
+        p.binaryExprVisitorPool.push(v); // (done with it)
         break;
       }
 
@@ -3597,6 +3761,7 @@ class printer {
       if (leftBinary.k !== E_BINARY) {
         p.printExpr(left, v.leftLevel, v.leftFlags);
         v.visitRightAndFinish(p);
+        p.binaryExprVisitorPool.push(v); // (done with it)
         break;
       }
 
@@ -3605,7 +3770,7 @@ class printer {
 
       // Only allocate heap memory on the stack for nested binary expressions
       p.binaryExprStack.push(v);
-      v = new binaryExprVisitor(leftBinary, v.leftLevel, v.leftFlags);
+      v = p.acquireBinaryExprVisitor(leftBinary, v.leftLevel, v.leftFlags);
     }
 
     // Process all binary operations from the deepest-visited node back toward
@@ -3615,10 +3780,28 @@ class printer {
       if (n < stackBottom) {
         break;
       }
-      const v2 = p.binaryExprStack[n];
-      p.binaryExprStack.length = n;
+      const v2 = p.binaryExprStack.pop();
       v2.visitRightAndFinish(p);
+      p.binaryExprVisitorPool.push(v2); // (done with it)
     }
+  }
+
+  // JS-only: binaryExprVisitor objects are reused. A visitor is only used by
+  // the printEBinary call that acquired it (until its visitRightAndFinish has
+  // returned), so it can go back to the pool then.
+  acquireBinaryExprVisitor(e, level, flags) {
+    const pool = this.binaryExprVisitorPool;
+    if (pool.length === 0) return new binaryExprVisitor(e, level, flags);
+    const v = pool.pop();
+    v.e = e;
+    v.level = level;
+    v.flags = flags;
+    v.leftLevel = LLowest;
+    v.leftFlags = 0;
+    v.entry = null;
+    v.wrap = false;
+    v.rightLevel = LLowest;
+    return v;
   }
 
   isUnboundEvalIdentifier(value) {
@@ -3868,7 +4051,8 @@ class printer {
     p.printNewline();
 
     p.options.indent++;
-    for (const stmt of block.stmts) {
+    for (let $i70 = 0, $a70 = block.stmts; $i70 < $a70.length; $i70++) {
+      const stmt = $a70[$i70];
       p.printSemicolonIfNeeded();
       p.printStmt(stmt, canOmitStatement);
     }
@@ -4872,7 +5056,8 @@ class printer {
     p.printNewline();
     p.options.indent++;
 
-    for (const c of s.cases) {
+    for (let $i71 = 0, $a71 = s.cases; $i71 < $a71.length; $i71++) {
+      const c = $a71[$i71];
       p.printSemicolonIfNeeded();
       p.printIndent();
       p.printExprCommentsAtLoc(c.loc);
@@ -5432,6 +5617,7 @@ export function print(tree, symbols, r, options) {
 
   if (p.exprComments !== null) {
     p.printedExprComments = new Set();
+    p.exprCommentBits = exprCommentBitsFor(p.exprComments);
   }
 
   // The parser only sets IsEmptyFunction / IsIdentityFunction when minifying
@@ -5444,7 +5630,8 @@ export function print(tree, symbols, r, options) {
 
   // Add the top-level directive if present
   if (tree.directives !== null) {
-    for (const directive of tree.directives) {
+    for (let $i72 = 0, $a72 = tree.directives; $i72 < $a72.length; $i72++) {
+      const directive = $a72[$i72];
       p.printIndent();
       p.printQuotedUTF8(directive, 0);
       p.print(";");
@@ -5452,8 +5639,10 @@ export function print(tree, symbols, r, options) {
     }
   }
 
-  for (const part of tree.parts) {
-    for (const stmt of part.stmts) {
+  for (let $i73 = 0, $a73 = tree.parts; $i73 < $a73.length; $i73++) {
+    const part = $a73[$i73];
+    for (let $i74 = 0, $a74 = part.stmts; $i74 < $a74.length; $i74++) {
+      const stmt = $a74[$i74];
       p.printStmt(stmt, canOmitStatement);
       p.printSemicolonIfNeeded();
     }

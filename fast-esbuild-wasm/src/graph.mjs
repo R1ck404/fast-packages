@@ -13,6 +13,7 @@ import { bail } from "./bail.mjs";
 import { LineColumnTracker } from "./logger.mjs";
 import { InvalidRef, Symbol, newSymbolMap, makeRef, refSource, refInner, followAllSymbols, ImportDynamic } from "./ast.mjs";
 import { Part, Scope, AST, SymbolUse, Dependency } from "./js_ast.mjs";
+import { registerSharedModuleScopeMembers } from "./renamer.mjs";
 
 const RUNTIME_SOURCE_INDEX = 0; // runtime.SourceIndex
 
@@ -95,6 +96,7 @@ export function markASTShared(ast, sourceIndex) {
   symbolMap.symbolsForSource[sourceIndex] = ast.symbols;
   followAllSymbols(symbolMap);
   for (const symbol of ast.symbols) Object.freeze(symbol);
+  registerSharedModuleScopeMembers(ast.moduleScope.members, sourceIndex);
 
   for (const part of ast.parts) sharedSymbolUsesMaps.add(part.symbolUses);
   if (ast.namedExports !== null) {
@@ -143,6 +145,8 @@ export function writableSymbol(symbols, ref) {
   if (Object.isFrozen(symbol)) {
     symbol = symbol.clone();
     array[inner] = symbol;
+    if (symbols.sharedWritten === null) symbols.sharedWritten = [];
+    symbols.sharedWritten[refSource(ref)] = true;
   }
   return symbol;
 }
@@ -155,6 +159,12 @@ export function writableSymbolChain(symbols, ref) {
     if (symbol.link === InvalidRef) return;
     ref = symbol.link;
   }
+}
+
+// Marks a symbol uses map as shared between links (writableSymbolUses copies
+// it before writing to it)
+export function markSymbolUsesShared(symbolUses) {
+  sharedSymbolUsesMaps.add(symbolUses);
 }
 
 // Returns "part.symbolUses", first replacing it with a private copy if it is
@@ -531,7 +541,8 @@ export class LinkerGraph {
     repr.ast.parts.push(part);
 
     // Invariant: the parts for all top-level symbols can be found in the file-level map
-    for (const declaredSymbol of part.declaredSymbols) {
+    for (let $i1 = 0, $a1 = part.declaredSymbols; $i1 < $a1.length; $i1++) {
+      const declaredSymbol = $a1[$i1];
       if (declaredSymbol.isTopLevel) {
         // Check for an existing overlay
         let overlay = repr.meta.topLevelSymbolToPartsOverlay;
@@ -673,7 +684,8 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
 
       // Add dynamic imports as additional entry points if code splitting is active
       if (codeSplitting) {
-        for (const record of ast.importRecords) {
+        for (let $i2 = 0, $a2 = ast.importRecords; $i2 < $a2.length; $i2++) {
+          const record = $a2[$i2];
           if (record.sourceIndex >= 0 && record.kind === ImportDynamic) {
             bail(); // (code splitting only)
           }

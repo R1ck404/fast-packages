@@ -42,6 +42,12 @@ warning or error bails).
 * `node test/diff.mjs` — differential test vs esbuild 0.28.2 on every JS/TS
   file of a large node_modules corpus under several option sets
   (preserve, Nodepod's esm->cjs options, esm, iife, ts, ts->cjs, jsx, tsx).
+  `--dir <path> --no-nm` runs it on other source trees (e.g. TS/TSX
+  projects) without their node_modules.
+* `node test/fuzz.mjs [--n N --seed S]` — randomized programs aimed at the
+  printer and lexer edge cases (string/template escapes, surrogates, U+2028,
+  "</script", charset ascii/utf8, source maps over non-ASCII text, JSX text)
+  plus user code whose names collide with the runtime helpers, vs esbuild.
 * `node test/bailreasons.mjs` — reports inputs where esbuild succeeds without
   warnings but the engine still bails (should be none).
 * `node test/smoke.mjs` — targeted feature snippets with full output diffs.

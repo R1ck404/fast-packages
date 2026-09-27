@@ -485,7 +485,8 @@ export const lowerMethods = {
               //
               thisArg = new Expr(EThisShared, loc);
             } else {
-              const [targetFunc, wrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, e.target, valueDefinitelyNotMutated);
+              const $d69 = p.captureValueWithPossibleSideEffects(loc, 2, e.target, valueDefinitelyNotMutated);
+              const targetFunc = $d69[0], wrapFunc = $d69[1];
               expr = new Expr(new EDot(targetFunc(), e.name, e.nameLoc), loc);
               thisArg = targetFunc();
               targetWrapFunc = wrapFunc;
@@ -502,7 +503,8 @@ export const lowerMethods = {
               // See the comment above about a similar special case for EDot
               thisArg = new Expr(EThisShared, loc);
             } else {
-              const [targetFunc, wrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, e.target, valueDefinitelyNotMutated);
+              const $d70 = p.captureValueWithPossibleSideEffects(loc, 2, e.target, valueDefinitelyNotMutated);
+              const targetFunc = $d70[0], wrapFunc = $d70[1];
               targetWrapFunc = wrapFunc;
 
               // Capture the value of "this" if the target of the starting call
@@ -526,7 +528,8 @@ export const lowerMethods = {
     // to capture it if it doesn't have any side effects (e.g. it's just a bare
     // identifier). Skipping the capture reduces code size and matches the output
     // of the TypeScript compiler.
-    const [exprFunc, exprWrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, expr, valueDefinitelyNotMutated);
+    const $d71 = p.captureValueWithPossibleSideEffects(loc, 2, expr, valueDefinitelyNotMutated);
+    const exprFunc = $d71[0], exprWrapFunc = $d71[1];
     expr = exprFunc();
     let result = exprFunc();
 
@@ -682,7 +685,8 @@ export const lowerMethods = {
     switch (left.k) {
       case E_DOT:
         if (left.optionalChain === OptionalChainNone) {
-          const [referenceFunc, wrapFunc] = p.captureValueWithPossibleSideEffects(value.loc, 2, left.target, valueDefinitelyNotMutated);
+          const $d72 = p.captureValueWithPossibleSideEffects(value.loc, 2, left.target, valueDefinitelyNotMutated);
+          const referenceFunc = $d72[0], wrapFunc = $d72[1];
           return wrapFunc(
             callback(
               new Expr(new EDot(referenceFunc(), left.name, left.nameLoc), value.loc),
@@ -694,8 +698,10 @@ export const lowerMethods = {
 
       case E_INDEX:
         if (left.optionalChain === OptionalChainNone) {
-          const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(value.loc, 2, left.target, valueDefinitelyNotMutated);
-          const [indexFunc, indexWrapFunc] = p.captureValueWithPossibleSideEffects(value.loc, 2, left.index, valueDefinitelyNotMutated);
+          const $d73 = p.captureValueWithPossibleSideEffects(value.loc, 2, left.target, valueDefinitelyNotMutated);
+          const targetFunc = $d73[0], targetWrapFunc = $d73[1];
+          const $d74 = p.captureValueWithPossibleSideEffects(value.loc, 2, left.index, valueDefinitelyNotMutated);
+          const indexFunc = $d74[0], indexWrapFunc = $d74[1];
           return targetWrapFunc(
             indexWrapFunc(
               callback(new Expr(new EIndex(targetFunc(), indexFunc()), value.loc), new Expr(new EIndex(targetFunc(), indexFunc()), value.loc)),
@@ -722,10 +728,12 @@ export const lowerMethods = {
 
   lowerExponentiationAssignmentOperator(loc, e) {
     const p = this;
-    const [target, privateLoc, private_] = p.extractPrivateIndex(e.left);
+    const $d75 = p.extractPrivateIndex(e.left);
+    const target = $d75[0], privateLoc = $d75[1], private_ = $d75[2];
     if (private_ !== null) {
       // "a.#b **= c" => "__privateSet(a, #b, __pow(__privateGet(a, #b), c))"
-      const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+      const $d76 = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+      const targetFunc = $d76[0], targetWrapFunc = $d76[1];
       return targetWrapFunc(
         p.lowerPrivateSet(targetFunc(), privateLoc, private_, p.callRuntime(loc, "__pow", [p.lowerPrivateGet(targetFunc(), privateLoc, private_), e.right])),
       );
@@ -740,14 +748,16 @@ export const lowerMethods = {
   // Returns [Expr, bool]
   lowerNullishCoalescingAssignmentOperator(loc, e) {
     const p = this;
-    const [target, privateLoc, private_] = p.extractPrivateIndex(e.left);
+    const $d77 = p.extractPrivateIndex(e.left);
+    const target = $d77[0], privateLoc = $d77[1], private_ = $d77[2];
     if (private_ !== null) {
       // (compat.NullishCoalescing is always supported in the fast path, so the
       // "(_a = __privateGet(a, #b)) != null ? _a : __privateSet(a, #b, c)" form
       // is never generated)
 
       // "a.#b ??= c" => "__privateGet(a, #b) ?? __privateSet(a, #b, c)"
-      const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+      const $d78 = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+      const targetFunc = $d78[0], targetWrapFunc = $d78[1];
       return [
         targetWrapFunc(
           new Expr(
@@ -766,11 +776,13 @@ export const lowerMethods = {
   // Returns [Expr, bool]
   lowerLogicalAssignmentOperator(loc, e, op) {
     const p = this;
-    const [target, privateLoc, private_] = p.extractPrivateIndex(e.left);
+    const $d79 = p.extractPrivateIndex(e.left);
+    const target = $d79[0], privateLoc = $d79[1], private_ = $d79[2];
     if (private_ !== null) {
       // "a.#b &&= c" => "__privateGet(a, #b) && __privateSet(a, #b, c)"
       // "a.#b ||= c" => "__privateGet(a, #b) || __privateSet(a, #b, c)"
-      const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+      const $d80 = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+      const targetFunc = $d80[0], targetWrapFunc = $d80[1];
       return [
         targetWrapFunc(
           new Expr(new EBinary(p.lowerPrivateGet(targetFunc(), privateLoc, private_), p.lowerPrivateSet(targetFunc(), privateLoc, private_, e.right), op), loc),
@@ -787,7 +799,8 @@ export const lowerMethods = {
     const p = this;
     // "x ?? y" => "x != null ? x : y"
     // "x() ?? y()" => "_a = x(), _a != null ? _a : y"
-    const [leftFunc, wrapFunc] = p.captureValueWithPossibleSideEffects(loc, 2, left, valueDefinitelyNotMutated);
+    const $d81 = p.captureValueWithPossibleSideEffects(loc, 2, left, valueDefinitelyNotMutated);
+    const leftFunc = $d81[0], wrapFunc = $d81[1];
     return wrapFunc(new Expr(new EIf(new Expr(new EBinary(leftFunc(), new Expr(ENullShared, loc), BinOpLooseNe), loc), leftFunc(), right), loc));
   },
 
@@ -839,7 +852,8 @@ export const lowerMethods = {
       expr = joinWithComma(expr, assign(left, right));
     };
 
-    const [initWrapFunc, ok] = p.lowerObjectRestHelper(rootExpr, rootInit, assignFn, tempRefNeedsDeclare, mode);
+    const $d82 = p.lowerObjectRestHelper(rootExpr, rootInit, assignFn, tempRefNeedsDeclare, mode);
+    const initWrapFunc = $d82[0], ok = $d82[1];
     if (ok) {
       if (initWrapFunc !== null) {
         expr = initWrapFunc(expr);
@@ -858,7 +872,8 @@ export const lowerMethods = {
   lowerObjectRestToDecls(rootExpr, rootInit, decls) {
     const p = this;
     const assignFn = (left, right) => {
-      const [binding, log] = p.convertExprToBinding(left, new invalidLog());
+      const $d83 = p.convertExprToBinding(left, new invalidLog());
+      const binding = $d83[0], log = $d83[1];
       if (log.invalidTokens.length > 0) {
         bail(); // panic("Internal error")
       }
@@ -944,7 +959,8 @@ export const lowerMethods = {
       //   * Side effects must happen inline instead of at the end
       //   * Passing a "Symbol" instance should throw
       //
-      for (const part of e.parts) {
+      for (let $i29 = 0, $a29 = e.parts; $i29 < $a29.length; $i29++) {
+        const part = $a29[$i29];
         let args;
         if (part.tailCooked !== null && part.tailCooked.length > 0) {
           args = [part.value, new Expr(new EString(part.tailCooked), part.tailLoc)];
@@ -976,7 +992,8 @@ export const lowerMethods = {
     raw.push(new Expr(new EString(e.headRaw), e.headLoc));
 
     // Handle the tail
-    for (const part of e.parts) {
+    for (let $i30 = 0, $a30 = e.parts; $i30 < $a30.length; $i30++) {
+      const part = $a30[$i30];
       args.push(part.value);
       if (part.tailCooked === null) {
         cooked.push(new Expr(EUndefinedShared, part.tailLoc));
@@ -1026,7 +1043,8 @@ export const lowerMethods = {
 
   maybeLowerSetBinOp(left, op, right) {
     const p = this;
-    const [target, loc, private_] = p.extractPrivateIndex(left);
+    const $d84 = p.extractPrivateIndex(left);
+    const target = $d84[0], loc = $d84[1], private_ = $d84[2];
     if (private_ !== null) {
       return p.lowerPrivateSetBinOp(target, loc, private_, op, right);
     }
@@ -1170,7 +1188,8 @@ export const lowerMethods = {
   lowerPrivateSetBinOp(target, loc, private_, op, value) {
     const p = this;
     // "target.#private += 123" => "__privateSet(target, #private, __privateGet(target, #private) + 123)"
-    const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(target.loc, 2, target, valueDefinitelyNotMutated);
+    const $d85 = p.captureValueWithPossibleSideEffects(target.loc, 2, target, valueDefinitelyNotMutated);
+    const targetFunc = $d85[0], targetWrapFunc = $d85[1];
     return targetWrapFunc(
       p.lowerPrivateSet(targetFunc(), loc, private_, new Expr(new EBinary(p.lowerPrivateGet(targetFunc(), loc, private_), value, op), value.loc)),
     );
@@ -1220,7 +1239,8 @@ export const lowerMethods = {
     const e = expr.data;
     switch (e.k) {
       case E_SPREAD: {
-        const [value, ok] = p.lowerSuperPropertyOrPrivateInAssign(e.value);
+        const $d86 = p.lowerSuperPropertyOrPrivateInAssign(e.value);
+        const value = $d86[0], ok = $d86[1];
         if (ok) {
           e.value = value;
           didLower = true;
@@ -1281,7 +1301,8 @@ export const lowerMethods = {
       case E_ARRAY: {
         const items = e.items;
         for (let i = 0; i < items.length; i++) {
-          const [item, ok] = p.lowerSuperPropertyOrPrivateInAssign(items[i]);
+          const $d87 = p.lowerSuperPropertyOrPrivateInAssign(items[i]);
+          const item = $d87[0], ok = $d87[1];
           if (ok) {
             e.items[i] = item;
             didLower = true;
@@ -1295,7 +1316,8 @@ export const lowerMethods = {
         for (let i = 0; i < properties.length; i++) {
           const property = properties[i];
           if (property.valueOrNil !== null) {
-            const [value, ok] = p.lowerSuperPropertyOrPrivateInAssign(property.valueOrNil);
+            const $d88 = p.lowerSuperPropertyOrPrivateInAssign(property.valueOrNil);
+            const value = $d88[0], ok = $d88[1];
             if (ok) {
               e.properties[i].valueOrNil = value;
               didLower = true;
@@ -1390,7 +1412,8 @@ export const lowerMethods = {
     // "super.foo += bar" => "__superSet(Class, this, 'foo', __superGet(Class, this, 'foo') + bar)"
     // "super[foo] += bar" => "__superSet(Class, this, foo, __superGet(Class, this, foo) + bar)"
     // "super[foo()] += bar" => "__superSet(Class, this, _a = foo(), __superGet(Class, this, _a) + bar)"
-    const [targetFunc, targetWrapFunc] = p.captureValueWithPossibleSideEffects(property.loc, 2, property, valueDefinitelyNotMutated);
+    const $d89 = p.captureValueWithPossibleSideEffects(property.loc, 2, property, valueDefinitelyNotMutated);
+    const targetFunc = $d89[0], targetWrapFunc = $d89[1];
     return targetWrapFunc(p.lowerSuperPropertySet(loc, targetFunc(), new Expr(new EBinary(p.lowerSuperPropertyGet(loc, targetFunc()), value, op), value.loc)));
   },
 
@@ -1461,9 +1484,11 @@ export const lowerMethods = {
     // also still evolving so trying to optimize it now is also potentially
     // premature.
     if (class_.shouldLowerStandardDecorators) {
-      for (const prop of class_.properties) {
+      for (let $i31 = 0, $a31 = class_.properties; $i31 < $a31.length; $i31++) {
+        const prop = $a31[$i31];
         if (prop.decorators.length > 0) {
-          for (const prop2 of class_.properties) {
+          for (let $i32 = 0, $a32 = class_.properties; $i32 < $a32.length; $i32++) {
+            const prop2 = $a32[$i32];
             const private_ = keyPrivate(prop2.key);
             if (private_ !== null) {
               p.symbols[refInner(private_.ref)].flags |= PrivateSymbolMustBeLowered;
@@ -1508,7 +1533,8 @@ export const lowerMethods = {
     //   }
     //   _foo = new WeakMap();
     //
-    for (const prop of class_.properties) {
+    for (let $i33 = 0, $a33 = class_.properties; $i33 < $a33.length; $i33++) {
+      const prop = $a33[$i33];
       if (prop.kind === PropertyClassStaticBlock) {
         // (compat.ClassStaticBlocks is always supported in the fast path)
         continue;
@@ -1590,7 +1616,8 @@ export const lowerMethods = {
         if (class_.extendsOrNil !== null) {
           if (prop.key !== null && prop.key.data.k === E_STRING && prop.key.data.value === "constructor") {
             if (prop.valueOrNil !== null && prop.valueOrNil.data.k === E_FUNCTION) {
-              for (const arg of prop.valueOrNil.data.fn.args) {
+              for (let $i34 = 0, $a34 = prop.valueOrNil.data.fn.args; $i34 < $a34.length; $i34++) {
+                const arg = $a34[$i34];
                 if (arg.isTypeScriptCtorField) {
                   result.shimSuperCtorCalls = true;
                   break;
@@ -1763,7 +1790,8 @@ export const lowerMethods = {
         const s = stmt.data;
         switch (s.k) {
           case S_EXPR: {
-            const [b, loc, c, a] = findFirstTopLevelSuperCall(s.value, superCtorRef);
+            const $d90 = findFirstTopLevelSuperCall(s.value, superCtorRef);
+            const b = $d90[0], loc = $d90[1], c = $d90[2], a = $d90[3];
             if (c !== null) {
               before = b;
               callLoc = loc;
@@ -1778,7 +1806,8 @@ export const lowerMethods = {
 
           case S_RETURN:
             if (s.valueOrNil !== null) {
-              const [b, loc, c, a] = findFirstTopLevelSuperCall(s.valueOrNil, superCtorRef);
+              const $d91 = findFirstTopLevelSuperCall(s.valueOrNil, superCtorRef);
+              const b = $d91[0], loc = $d91[1], c = $d91[2], a = $d91[3];
               if (c !== null && a !== null) {
                 before = b;
                 callLoc = loc;
@@ -1790,7 +1819,8 @@ export const lowerMethods = {
             break;
 
           case S_THROW: {
-            const [b, loc, c, a] = findFirstTopLevelSuperCall(s.value, superCtorRef);
+            const $d92 = findFirstTopLevelSuperCall(s.value, superCtorRef);
+            const b = $d92[0], loc = $d92[1], c = $d92[2], a = $d92[3];
             if (c !== null && a !== null) {
               before = b;
               callLoc = loc;
@@ -1802,7 +1832,8 @@ export const lowerMethods = {
           }
 
           case S_IF: {
-            const [b, loc, c, a] = findFirstTopLevelSuperCall(s.test, superCtorRef);
+            const $d93 = findFirstTopLevelSuperCall(s.test, superCtorRef);
+            const b = $d93[0], loc = $d93[1], c = $d93[2], a = $d93[3];
             if (c !== null && a !== null) {
               before = b;
               callLoc = loc;
@@ -1814,7 +1845,8 @@ export const lowerMethods = {
           }
 
           case S_SWITCH: {
-            const [b, loc, c, a] = findFirstTopLevelSuperCall(s.test, superCtorRef);
+            const $d94 = findFirstTopLevelSuperCall(s.test, superCtorRef);
+            const b = $d94[0], loc = $d94[1], c = $d94[2], a = $d94[3];
             if (c !== null && a !== null) {
               before = b;
               callLoc = loc;
@@ -1828,7 +1860,8 @@ export const lowerMethods = {
           case S_FOR:
             if (s.initOrNil !== null && s.initOrNil.data.k === S_EXPR) {
               const expr = s.initOrNil.data;
-              const [b, loc, c, a] = findFirstTopLevelSuperCall(expr.value, superCtorRef);
+              const $d95 = findFirstTopLevelSuperCall(expr.value, superCtorRef);
+              const b = $d95[0], loc = $d95[1], c = $d95[2], a = $d95[3];
               if (c !== null) {
                 before = b;
                 callLoc = loc;
@@ -1914,14 +1947,16 @@ export function bindingHasObjectRest(binding) {
   const b = binding.data;
   switch (b.k) {
     case B_ARRAY:
-      for (const item of b.items) {
+      for (let $i35 = 0, $a35 = b.items; $i35 < $a35.length; $i35++) {
+        const item = $a35[$i35];
         if (bindingHasObjectRest(item.binding)) {
           return true;
         }
       }
       break;
     case B_OBJECT:
-      for (const property of b.properties) {
+      for (let $i36 = 0, $a36 = b.properties; $i36 < $a36.length; $i36++) {
+        const property = $a36[$i36];
         if (property.isSpread || bindingHasObjectRest(property.value)) {
           return true;
         }
@@ -1941,14 +1976,16 @@ export function exprHasObjectRest(expr) {
       }
       break;
     case E_ARRAY:
-      for (const item of e.items) {
+      for (let $i37 = 0, $a37 = e.items; $i37 < $a37.length; $i37++) {
+        const item = $a37[$i37];
         if (exprHasObjectRest(item)) {
           return true;
         }
       }
       break;
     case E_OBJECT:
-      for (const property of e.properties) {
+      for (let $i38 = 0, $a38 = e.properties; $i38 < $a38.length; $i38++) {
+        const property = $a38[$i38];
         if (property.kind === PropertySpread || exprHasObjectRest(property.valueOrNil)) {
           return true;
         }
@@ -2233,14 +2270,16 @@ export function findFirstTopLevelSuperCall(expr, superCtorRef) {
   // Also search down comma operator chains for a super call
   if (e.k === E_BINARY && e.op === BinOpComma) {
     {
-      const [before, loc, call, after] = findFirstTopLevelSuperCall(e.left, superCtorRef);
+      const $d96 = findFirstTopLevelSuperCall(e.left, superCtorRef);
+      const before = $d96[0], loc = $d96[1], call = $d96[2], after = $d96[3];
       if (call !== null) {
         return [before, loc, call, joinWithComma(after, e.right)];
       }
     }
 
     {
-      const [before, loc, call, after] = findFirstTopLevelSuperCall(e.right, superCtorRef);
+      const $d97 = findFirstTopLevelSuperCall(e.right, superCtorRef);
+      const before = $d97[0], loc = $d97[1], call = $d97[2], after = $d97[3];
       if (call !== null) {
         return [joinWithComma(e.left, before), loc, call, after];
       }
@@ -2579,7 +2618,8 @@ Object.assign(lowerClassContext.prototype, {
 
         // Initialize TypeScript constructor parameter fields
         if (p.options.ts.parse) {
-          for (const arg of ctx.ctor.fn.args) {
+          for (let $i39 = 0, $a39 = ctx.ctor.fn.args; $i39 < $a39.length; $i39++) {
+            const arg = $a39[$i39];
             if (arg.isTypeScriptCtorField) {
               if (arg.binding.data.k === B_IDENTIFIER) {
                 const id = arg.binding.data;
@@ -2932,16 +2972,19 @@ Object.assign(lowerClassContext.prototype, {
   processProperties(p, loweringInfo, result) {
     const ctx = this;
     let properties = [];
-    const [propertyKeyTempRefs, decoratorTempRefs] = ctx.hoistComputedProperties(p, loweringInfo);
+    const $d98 = ctx.hoistComputedProperties(p, loweringInfo);
+    const propertyKeyTempRefs = $d98[0], decoratorTempRefs = $d98[1];
 
     // Save the initializer index for each field and accessor element
     if (ctx.class.shouldLowerStandardDecorators) {
       const counts = [0, 0, 0, 0];
 
       // Count how many initializers there are in each section
-      for (const prop of ctx.class.properties) {
+      for (let $i40 = 0, $a40 = ctx.class.properties; $i40 < $a40.length; $i40++) {
+        const prop = $a40[$i40];
         if (prop.decorators.length > 0) {
-          const [i, ok] = fieldOrAccessorOrder(prop.kind, prop.flags);
+          const $d99 = fieldOrAccessorOrder(prop.kind, prop.flags);
+          const i = $d99[0], ok = $d99[1];
           if (ok) {
             counts[i]++;
           } else if ((prop.flags & PropertyIsStatic) !== 0) {
@@ -2961,7 +3004,8 @@ Object.assign(lowerClassContext.prototype, {
         for (let propIndex = 0; propIndex < props.length; propIndex++) {
           const prop = props[propIndex];
           if (prop.decorators.length > 0) {
-            const [i, ok] = fieldOrAccessorOrder(prop.kind, prop.flags);
+            const $d100 = fieldOrAccessorOrder(prop.kind, prop.flags);
+            const i = $d100[0], ok = $d100[1];
             if (ok) {
               ctx.decoratorPropertyToInitializerMap.set(propIndex, indices[i]);
               indices[i]++;
@@ -3027,7 +3071,8 @@ Object.assign(lowerClassContext.prototype, {
           const args = fn.fn.args;
           for (let i = 0; i < args.length; i++) {
             const arg = args[i];
-            for (const decorator of arg.decorators) {
+            for (let $i41 = 0, $a41 = arg.decorators; $i41 < $a41.length; $i41++) {
+              const decorator = $a41[$i41];
               // Generate a call to "__decorateParam()" for this parameter decorator
               const newDecorator = new Decorator(
                 p.callRuntime(decorator.value.loc, "__decorateParam", [new Expr(new ENumber(i), decorator.value.loc), decorator.value]),
@@ -3294,7 +3339,8 @@ Object.assign(lowerClassContext.prototype, {
     let isAllExprs = [];
 
     // Are all statements in the block expression statements?
-    loop: for (const stmt of block.block.stmts) {
+    loop: for (let $i42 = 0, $a42 = block.block.stmts; $i42 < $a42.length; $i42++) {
+      const stmt = $a42[$i42];
       const s = stmt.data;
       switch (s.k) {
         case S_EMPTY:

@@ -519,7 +519,8 @@ export const parse2Methods = {
               if (isPropertyAccess(left)) {
                 kind = TargetWasOriginallyPropertyAccess;
               }
-              const [args, closeParenLoc, isMultiLine] = p.parseCallArgs();
+              const $d108 = p.parseCallArgs();
+              const args = $d108[0], closeParenLoc = $d108[1], isMultiLine = $d108[2];
               left = new Expr(new ECall(left, args, closeParenLoc, optionalStart, kind, isMultiLine), left.loc);
               break;
             }
@@ -542,7 +543,8 @@ export const parse2Methods = {
               if (isPropertyAccess(left)) {
                 kind = TargetWasOriginallyPropertyAccess;
               }
-              const [args, closeParenLoc, isMultiLine] = p.parseCallArgs();
+              const $d109 = p.parseCallArgs();
+              const args = $d109[0], closeParenLoc = $d109[1], isMultiLine = $d109[2];
               left = new Expr(new ECall(left, args, closeParenLoc, optionalStart, kind, isMultiLine), left.loc);
               break;
             }
@@ -580,7 +582,8 @@ export const parse2Methods = {
             p.log.addError(); // Template literals cannot have an optional chain as a tag
           }
           const headLoc = p.lexer.loc();
-          const [headCooked, headRaw] = p.lexer.cookedAndRawTemplateContents();
+          const $d110 = p.lexer.cookedAndRawTemplateContents();
+          const headCooked = $d110[0], headRaw = $d110[1];
           p.lexer.next();
           left = new Expr(new ETemplate(left, headRaw, headCooked, [], headLoc, 0, false, isPropertyAccess(left)), left.loc);
           break;
@@ -591,8 +594,10 @@ export const parse2Methods = {
             p.log.addError(); // Template literals cannot have an optional chain as a tag
           }
           const headLoc = p.lexer.loc();
-          const [headCooked, headRaw] = p.lexer.cookedAndRawTemplateContents();
-          const [parts] = p.parseTemplateParts(true /* includeRaw */);
+          const $d111 = p.lexer.cookedAndRawTemplateContents();
+          const headCooked = $d111[0], headRaw = $d111[1];
+          const $d112 = p.parseTemplateParts(true /* includeRaw */);
+          const parts = $d112[0];
           left = new Expr(new ETemplate(left, headRaw, headCooked, parts, headLoc, 0, false, isPropertyAccess(left)), left.loc);
           break;
         }
@@ -635,7 +640,8 @@ export const parse2Methods = {
           if (isPropertyAccess(left)) {
             kind = TargetWasOriginallyPropertyAccess;
           }
-          const [args, closeParenLoc, isMultiLine] = p.parseCallArgs();
+          const $d113 = p.parseCallArgs();
+          const args = $d113[0], closeParenLoc = $d113[1], isMultiLine = $d113[2];
           left = new Expr(new ECall(left, args, closeParenLoc, oldOptionalChain, kind, isMultiLine), left.loc);
           optionalChain = oldOptionalChain;
           break;
@@ -1243,7 +1249,7 @@ export const parse2Methods = {
         p.topLevelAwaitKeyword = tokenRange;
       }
       let value = null;
-      if (p.lexer.token === TIdentifier && p.lexer.raw() === "using") {
+      if (p.lexer.isContextualKeyword("using")) { // (Go: TIdentifier && p.lexer.Raw() == "using")
         const usingLoc = p.saveExprCommentsHere();
         const usingRange = p.lexer.range();
         p.lexer.next();
@@ -1367,7 +1373,8 @@ export const parse2Methods = {
     }
 
     // The tag is an identifier
-    let [tagRange, tagName] = p.parseJSXNamespacedName();
+    const $d114 = p.parseJSXNamespacedName();
+    let tagRange = $d114[0], tagName = $d114[1];
 
     // Certain identifiers are strings
     const c0 = tagName.charCodeAt(0);
@@ -1410,7 +1417,8 @@ export const parse2Methods = {
     }
 
     // Parse the tag
-    const [startRange, startText, startTagOrNil] = p.parseJSXTag();
+    const $d115 = p.parseJSXTag();
+    const startRange = $d115[0], startText = $d115[1], startTagOrNil = $d115[2];
 
     // The tag may have TypeScript type arguments: "<Foo<T>/>"
     if (p.options.ts.parse) {
@@ -1434,7 +1442,8 @@ export const parse2Methods = {
         switch (p.lexer.token) {
           case TIdentifier: {
             // Parse the key
-            const [keyRange, keyName] = p.parseJSXNamespacedName();
+            const $d116 = p.parseJSXNamespacedName();
+            const keyRange = $d116[0], keyName = $d116[1];
             let key;
             if (p.isMangledProp(keyName) && !keyName.includes(":")) {
               key = new Expr(new ENameOfSymbol(p.storeNameInRef(keyName)), keyRange.loc);
@@ -1682,7 +1691,8 @@ export const parse2Methods = {
       const tailLoc = p.lexer.loc();
       p.lexer.rescanCloseBraceAsTemplateToken();
       if (includeRaw) {
-        const [tailCooked, tailRaw] = p.lexer.cookedAndRawTemplateContents();
+        const $d117 = p.lexer.cookedAndRawTemplateContents();
+        const tailCooked = $d117[0], tailRaw = $d117[1];
         parts.push(new TemplatePart(value, tailRaw, tailCooked, tailLoc));
       } else {
         parts.push(new TemplatePart(value, "", p.lexer.stringLiteral(), tailLoc));
@@ -1815,7 +1825,8 @@ export const parse2Methods = {
 
     // The alias may now be a string (see https://github.com/tc39/ecma262/pull/2154)
     if (p.lexer.token === TStringLiteral) {
-      const [alias, , ok] = utf16ToStringWithValidation(p.lexer.stringLiteral());
+      const $d118 = utf16ToStringWithValidation(p.lexer.stringLiteral());
+      const alias = $d118[0], ok = $d118[2];
       if (!ok) {
         p.log.addError(); // This alias is invalid because it contains the unpaired Unicode surrogate
       }
@@ -2562,7 +2573,8 @@ export const parse2Methods = {
 
       // This property may turn out to be a type in TypeScript, which should be ignored
       // (Go passes "opts" by value)
-      const [property, ok] = p.parseProperty(p.saveExprCommentsHere(), PropertyField, opts.clone(), null);
+      const $d119 = p.parseProperty(p.saveExprCommentsHere(), PropertyField, opts.clone(), null);
+      const property = $d119[0], ok = $d119[1];
       if (ok) {
         properties.push(property);
 
@@ -2809,7 +2821,8 @@ export const parse2Methods = {
     // Only allow omitting the body if we're parsing TypeScript
     data.allowMissingBodyForTypeScript = p.options.ts.parse;
 
-    const [fn, hadBody] = p.parseFn(name, RANGE_ZERO, 0, data);
+    const $d120 = p.parseFn(name, RANGE_ZERO, 0, data);
+    const fn = $d120[0], hadBody = $d120[1];
 
     // Don't output anything if it's just a forward declaration of a function
     if (opts.isTypeScriptDeclare || !hadBody) {
@@ -2987,7 +3000,8 @@ export const parse2Methods = {
           break;
 
         case TOpenParen: {
-          const [args, closeParenLoc, isMultiLine] = p.parseCallArgs();
+          const $d121 = p.parseCallArgs();
+          const args = $d121[0], closeParenLoc = $d121[1], isMultiLine = $d121[2];
           memberExpr = new Expr(
             new ECall(memberExpr, args, closeParenLoc, OptionalChainNone, TargetWasOriginallyPropertyAccess, isMultiLine),
             memberExpr.loc,
@@ -3022,10 +3036,16 @@ export const parse2Methods = {
 
   parseStmt(opts) {
     const p = this;
-    opts = opts.clone(); // Go passes "opts" by value and mutates it below
+    // Go passes "opts" by value and mutates it below. (JS-only: it is cloned on
+    // the first mutation instead of up front, as most statements never mutate it)
+    let ownsOpts = false;
     const loc = p.lexer.loc();
 
     if ((p.lexer.hasCommentBefore & NoSideEffectsCommentBefore) !== 0) {
+      if (!ownsOpts) {
+        opts = opts.clone();
+        ownsOpts = true;
+      }
       opts.hasNoSideEffectsComment = true;
     }
 
@@ -3056,12 +3076,20 @@ export const parse2Methods = {
           case TFunction:
           case TVar:
           case TAt:
+            if (!ownsOpts) {
+              opts = opts.clone();
+              ownsOpts = true;
+            }
             opts.isExport = true;
             return p.parseStmt(opts);
 
           case TImport:
             // "export import foo = bar"
             if (p.options.ts.parse && (opts.isModuleScope || opts.isNamespaceScope)) {
+              if (!ownsOpts) {
+                opts = opts.clone();
+                ownsOpts = true;
+              }
               opts.isExport = true;
               return p.parseStmt(opts);
             }
@@ -3073,11 +3101,19 @@ export const parse2Methods = {
             if (!p.options.ts.parse) {
               p.lexer.unexpected();
             }
+            if (!ownsOpts) {
+              opts = opts.clone();
+              ownsOpts = true;
+            }
             opts.isExport = true;
             return p.parseStmt(opts);
 
           case TIdentifier: {
             if (p.lexer.isContextualKeyword("let")) {
+              if (!ownsOpts) {
+                opts = opts.clone();
+                ownsOpts = true;
+              }
               opts.isExport = true;
               return p.parseStmt(opts);
             }
@@ -3100,6 +3136,10 @@ export const parse2Methods = {
                 throw LEXER_PANIC;
               }
               p.lexer.expect(TFunction);
+              if (!ownsOpts) {
+                opts = opts.clone();
+                ownsOpts = true;
+              }
               opts.isExport = true;
               return p.parseFnStmt(loc, opts, true /* isAsync */, asyncRange);
             }
@@ -3128,13 +3168,29 @@ export const parse2Methods = {
                   // "export abstract class Foo {}"
                   // "export module Foo {}"
                   // "export interface Foo {}"
+                  if (!ownsOpts) {
+                    opts = opts.clone();
+                    ownsOpts = true;
+                  }
                   opts.isExport = true;
                   return p.parseStmt(opts);
 
                 case "declare":
                   // "export declare class Foo {}"
+                  if (!ownsOpts) {
+                    opts = opts.clone();
+                    ownsOpts = true;
+                  }
                   opts.isExport = true;
+                  if (!ownsOpts) {
+                    opts = opts.clone();
+                    ownsOpts = true;
+                  }
                   opts.lexicalDecl = lexicalDeclAllowAll;
+                  if (!ownsOpts) {
+                    opts = opts.clone();
+                    ownsOpts = true;
+                  }
                   opts.isTypeScriptDeclare = true;
                   return p.parseStmt(opts);
               }
@@ -3154,6 +3210,10 @@ export const parse2Methods = {
 
             // Also pick up comments after the "default" keyword
             if ((p.lexer.hasCommentBefore & NoSideEffectsCommentBefore) !== 0) {
+              if (!ownsOpts) {
+                opts = opts.clone();
+                ownsOpts = true;
+              }
               opts.hasNoSideEffectsComment = true;
             }
 
@@ -3322,11 +3382,13 @@ export const parse2Methods = {
               p.lexer.unexpected();
             }
 
-            const [items, isSingleLine] = p.parseExportClause();
+            const $d122 = p.parseExportClause();
+            const items = $d122[0], isSingleLine = $d122[1];
             if (p.lexer.isContextualKeyword("from")) {
               // "export {} from 'path'"
               p.lexer.next();
-              const [pathLoc, pathText, assertOrWith, flags] = p.parsePath();
+              const $d123 = p.parsePath();
+              const pathLoc = $d123[0], pathText = $d123[1], assertOrWith = $d123[2], flags = $d123[3];
               const importRecordIndex = p.addImportRecord(ImportStmt, EvaluationPhase, pathLoc, pathText, assertOrWith, flags);
               const name = "import_" + generateNonUniqueNameFromPath(pathText);
               const namespaceRef = p.storeNameInRef(name);
@@ -3392,6 +3454,10 @@ export const parse2Methods = {
         //   "@decorator export declare class Foo {}"
         //   "@decorator export declare abstract class Foo {}"
         //
+        if (!ownsOpts) {
+          opts = opts.clone();
+          ownsOpts = true;
+        }
         opts.deferredDecorators = new deferredDecorators(decorators);
 
         let stmt = p.parseStmt(opts);
@@ -3769,7 +3835,8 @@ export const parse2Methods = {
               const initOpts = new parseStmtOpts(null, lexicalDeclAllowAll);
               initOpts.isForLoopInit = true;
               initOpts.isForAwaitLoopInit = awaitRange.len > 0;
-              const [expr, stmt, decls2] = p.parseExprOrLetOrUsingStmt(initOpts);
+              const $d124 = p.parseExprOrLetOrUsingStmt(initOpts);
+              const expr = $d124[0], stmt = $d124[1], decls2 = $d124[2];
               decls = decls2;
               if (stmt !== null) {
                 badLetRange = RANGE_ZERO;
@@ -3920,7 +3987,8 @@ export const parse2Methods = {
               return null;
             }
 
-            const [items, isSingleLine] = p.parseImportClause();
+            const $d125 = p.parseImportClause();
+            const items = $d125[0], isSingleLine = $d125[1];
             stmt.items = items;
             stmt.isSingleLine = isSingleLine;
             p.lexer.expectContextualKeyword("from");
@@ -3995,6 +4063,10 @@ export const parse2Methods = {
                     if (p.lexer.token === TEquals) {
                       // "import type foo = require('bar');"
                       // "import type foo = bar.baz;"
+                      if (!ownsOpts) {
+                        opts = opts.clone();
+                        ownsOpts = true;
+                      }
                       opts.isTypeScriptDeclare = true;
                       return p.parseTypeScriptImportEqualsStmt(loc, opts, nameLoc, nameSubstring);
                     } else if (p.lexer.token === TStringLiteral && nameSubstring === "from") {
@@ -4052,7 +4124,8 @@ export const parse2Methods = {
 
                 case TOpenBrace: {
                   // "import defaultItem, {item1, item2} from 'path'"
-                  const [items, isSingleLine] = p.parseImportClause();
+                  const $d126 = p.parseImportClause();
+                  const items = $d126[0], isSingleLine = $d126[1];
                   stmt.items = items;
                   stmt.isSingleLine = isSingleLine;
                   break;
@@ -4072,7 +4145,8 @@ export const parse2Methods = {
             return null;
         }
 
-        let [pathLoc, pathText, assertOrWith, flags] = p.parsePath();
+        const $d127 = p.parsePath();
+        let pathLoc = $d127[0], pathText = $d127[1], assertOrWith = $d127[2], flags = $d127[3];
         p.lexer.expectOrInsertSemicolon();
 
         // If TypeScript's "preserveValueImports": true setting is active, TypeScript's
@@ -4223,7 +4297,7 @@ export const parse2Methods = {
 
         // Parse either an async function, an async expression, or a normal expression
         let expr;
-        if (isIdentifier && p.lexer.raw() === "async") {
+        if (isIdentifier && p.lexer.isContextualKeyword("async")) { // (Go: p.lexer.Raw() == "async")
           p.lexer.next();
           if (p.lexer.token === TFunction && !p.lexer.hasNewlineBefore) {
             p.lexer.next();
@@ -4325,7 +4399,15 @@ export const parse2Methods = {
 
                 case "declare":
                   if (!p.lexer.hasNewlineBefore) {
+                    if (!ownsOpts) {
+                      opts = opts.clone();
+                      ownsOpts = true;
+                    }
                     opts.lexicalDecl = lexicalDeclAllowAll;
+                    if (!ownsOpts) {
+                      opts = opts.clone();
+                      ownsOpts = true;
+                    }
                     opts.isTypeScriptDeclare = true;
 
                     // "declare global { ... }"

@@ -1,5 +1,7 @@
 // Native tests (cargo test --target x86_64-pc-windows-msvc). Debug builds
 // have overflow checks, which catch index/accounting bugs in the fast paths.
+// Run single-threaded (the crate uses wasm-style global state):
+//   cargo test --release --target x86_64-pc-windows-msvc -- --test-threads=1
 
 use crate::*;
 
@@ -40,7 +42,7 @@ unsafe fn stream_inflate(data: &[u8], step: usize, fast: bool) -> Vec<u8> {
 
 #[test]
 fn streaming_fast_matches_slow() {
-    let tgz = corpus("lodash-4.17.21.tgz");
+    let tgz = corpus("lodash-es-4.18.1.tgz");
     unsafe {
         let slow = stream_inflate(&tgz, 1000, false);
         for step in [1usize, 7, 100, 1000, 4096, 16384, 1 << 20] {
@@ -106,10 +108,61 @@ fn native_table_build_cost() {
     let mut work = [0u16; 288];
     let n = 20000;
     let t0 = std::time::Instant::now();
-    for _ in 0..n { crate::fasttab::build(&lens, 288, true, &mut t); }
+    let cnt = crate::fasttab::count_lens(&lens[..288]);
+    for _ in 0..n { crate::fasttab::build(&lens, 288, &cnt, true, &mut t); }
     let a = t0.elapsed().as_secs_f64() / n as f64;
     let t0 = std::time::Instant::now();
     for _ in 0..n { let mut b = 10; crate::inftrees::inflate_table(crate::inftrees::LENS, &lens, 288, &mut z, &mut work, &mut b); }
     let b = t0.elapsed().as_secs_f64() / n as f64;
     println!("fasttab::build {:.2} us, inflate_table {:.2} us", a * 1e6, b * 1e6);
+}
+
+#[test]
+fn crc32_sparse_matches_tables() {
+    // xorshift data, many lengths around the thresholds and block sizes
+    let mut x: u32 = 0x1234_5678;
+    let mut data = vec![0u8; 200_000];
+    for b in data.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *b = x as u8;
+    }
+    let mut lens: Vec<usize> = vec![0, 1, 7, 8, 100, 2399, 2400, 2401, 4799, 4800, 7199, 7200, 7201, 7207, 7208, 16384, 16391, 18800, 18807, 19199, 65536, 65537, 100_003, 199_990];
+    for i in 0..300 {
+        lens.push(7000 + i * 97 % 60_000);
+    }
+    for (k, &n) in lens.iter().enumerate() {
+        for off in [0usize, 1, 3, 5] {
+            if off + n > data.len() {
+                continue;
+            }
+            let b = &data[off..off + n];
+            for init in [0u32, 0xffff_ffff, 0x1234_5678 ^ k as u32] {
+                assert_eq!(crate::checksum::crc32(init, b), crate::checksum::crc32_tables(init, b), "len {} off {} init {:x}", n, off, init);
+            }
+        }
+    }
+    // all-zero and all-ones buffers
+    let z = vec![0u8; 50_000];
+    let o = vec![0xffu8; 50_000];
+    assert_eq!(crate::checksum::crc32(0, &z), crate::checksum::crc32_tables(0, &z));
+    assert_eq!(crate::checksum::crc32(7, &o), crate::checksum::crc32_tables(7, &o));
+}
+
+#[test]
+fn chorba_relation() {
+    // y = x^64 mod P (reflected: bit 31 = x^0); the sparse crc32 relies on
+    // 1 + y^89 + y^117 + y^155 + y^300 = 0 (mod P)
+    use crate::checksum::multmodp;
+    let mut x64: u32 = 1 << 31;
+    for _ in 0..64 {
+        x64 = multmodp(1 << 30, x64);
+    }
+    let mut pw = vec![1u32 << 31];
+    for k in 1..=300 {
+        pw.push(multmodp(pw[k - 1], x64));
+    }
+    assert_eq!(pw[0] ^ pw[89] ^ pw[117] ^ pw[155] ^ pw[300], 0);
+    assert_ne!(pw[0] ^ pw[89] ^ pw[117] ^ pw[155] ^ pw[299], 0);
 }

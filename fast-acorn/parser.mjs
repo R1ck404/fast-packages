@@ -8,11 +8,22 @@
 // constructors (monomorphic shapes), O(1) scope-flag lookups and set-backed
 // scopes, no per-call regexps, a precomputed "newline before token" flag.
 //
-// Anything this parser would report as an error is *not* reported here: it
-// throws BAIL and the caller re-runs the original acorn, which then produces
-// the exact SyntaxError (or, should this parser ever be stricter than acorn,
-// the AST). Only configurations with ecmaVersion >= 16 ("latest") and without
-// token/comment callbacks take this path.
+// Errors: "Unexpected token" is raised here exactly as acorn raises it
+// (same message, pos, loc, raisedAt; see unexpected()) when no plugin or
+// onComment callback is involved. Every other error throws BAIL instead and
+// the caller re-runs the original acorn, which then produces the exact
+// SyntaxError (or, should this parser ever be stricter than acorn, the AST).
+// Only configurations with ecmaVersion >= 16 ("latest") and without
+// onToken / onInsertedSemicolon / onTrailingComma callbacks take this path.
+//
+// Modes for Parser.extend() subclasses: JSX (the acorn-jsx 5.3.2 plugin,
+// see jsx-detect.mjs) and a hosted parseFunctionBody override (override.mjs,
+// BodyFacade below).
+//
+// Memory: AST lists are built as exact-size arrays (listFrom), token end
+// Positions are created only when a node needs them (leloc), and the
+// parser keeps acorn's object sharing (a token's Position is shared by all
+// nodes starting/ending there; acorn's own shared empty arrays are used).
 
 import {
   Node,
@@ -23,9 +34,18 @@ import {
   isIdentifierChar,
   lineBreak,
   _RegExpValidationState as RegExpValidationState,
+  _emptyNewArguments,
+  _emptyImportSpecifiers,
+  tokTypes as acornTT,
+  getLineInfo,
 } from "./vendor/acorn.mjs";
+import { XHTMLEntities } from "./jsx-data.mjs";
 
 export const BAIL = { fastAcornBail: true };
+
+// "Unexpected token" errors made by the fast parser itself (see unexpected())
+export const exactErrors = new WeakSet();
+export const errorStats = { exact: 0 };
 function bail() {
   throw BAIL;
 }
@@ -62,13 +82,15 @@ const T_NUM = 0, T_REGEXP = 1, T_STRING = 2, T_NAME = 3, T_PRIVATEID = 4, T_EOF 
   T_LOGICALOR = 28, T_LOGICALAND = 29, T_BITWISEOR = 30, T_BITWISEXOR = 31, T_BITWISEAND = 32,
   T_EQUALITY = 33, T_RELATIONAL = 34, T_BITSHIFT = 35, T_PLUSMIN = 36, T_MODULO = 37, T_STAR = 38,
   T_SLASH = 39, T_STARSTAR = 40, T_COALESCE = 41,
-  T_BREAK = 42, T_CASE = 43, T_CATCH = 44, T_CONTINUE = 45, T_DEBUGGER = 46, T_DEFAULT = 47,
-  T_DO = 48, T_ELSE = 49, T_FINALLY = 50, T_FOR = 51, T_FUNCTION = 52, T_IF = 53, T_RETURN = 54,
-  T_SWITCH = 55, T_THROW = 56, T_TRY = 57, T_VAR = 58, T_CONST = 59, T_WHILE = 60, T_WITH = 61,
-  T_NEW = 62, T_THIS = 63, T_SUPER = 64, T_CLASS = 65, T_EXTENDS = 66, T_EXPORT = 67, T_IMPORT = 68,
-  T_NULL = 69, T_TRUE = 70, T_FALSE = 71, T_IN = 72, T_INSTANCEOF = 73, T_TYPEOF = 74, T_VOID = 75,
-  T_DELETE = 76;
-const T_COUNT = 77;
+  // acorn-jsx token types (only produced in JSX mode)
+  T_JSXNAME = 42, T_JSXTEXT = 43, T_JSXTAGSTART = 44, T_JSXTAGEND = 45,
+  T_BREAK = 46, T_CASE = 47, T_CATCH = 48, T_CONTINUE = 49, T_DEBUGGER = 50, T_DEFAULT = 51,
+  T_DO = 52, T_ELSE = 53, T_FINALLY = 54, T_FOR = 55, T_FUNCTION = 56, T_IF = 57, T_RETURN = 58,
+  T_SWITCH = 59, T_THROW = 60, T_TRY = 61, T_VAR = 62, T_CONST = 63, T_WHILE = 64, T_WITH = 65,
+  T_NEW = 66, T_THIS = 67, T_SUPER = 68, T_CLASS = 69, T_EXTENDS = 70, T_EXPORT = 71, T_IMPORT = 72,
+  T_NULL = 73, T_TRUE = 74, T_FALSE = 75, T_IN = 76, T_INSTANCEOF = 77, T_TYPEOF = 78, T_VOID = 79,
+  T_DELETE = 80;
+const T_COUNT = 81;
 const T_KW_FIRST = T_BREAK;
 
 const F_BEFORE = 1, F_STARTS = 2, F_LOOP = 4, F_ASSIGN = 8, F_PREFIX = 16, F_POSTFIX = 32;
@@ -95,6 +117,7 @@ tdef(T_RELATIONAL, F_BEFORE, 7); tdef(T_BITSHIFT, F_BEFORE, 8);
 tdef(T_PLUSMIN, F_BEFORE | F_PREFIX | F_STARTS, 9); tdef(T_MODULO, F_BEFORE, 10);
 tdef(T_STAR, F_BEFORE, 10); tdef(T_SLASH, F_BEFORE, 10); tdef(T_STARSTAR, F_BEFORE);
 tdef(T_COALESCE, F_BEFORE, 1);
+tdef(T_JSXNAME, 0); tdef(T_JSXTEXT, F_BEFORE); tdef(T_JSXTAGSTART, F_STARTS); tdef(T_JSXTAGEND, 0);
 const KEYWORDS = new Map();
 function kw(t, name, flags, binop) {
   tdef(t, flags, binop);
@@ -148,8 +171,12 @@ for (const [name, mask] of RESTRICTED) {
   R_NAMES.push(name);
   R_MASKS.push(mask);
 }
-// 0 when `name` can never be rejected by the identifier checks
+// 0 when `name` can never be rejected by the identifier checks.
+// (checkUnreserved also sees string-literal module export names, e.g.
+// `import { "a" } from "m"`: no name -- acorn's regexp tests of undefined
+// match nothing there, and the error comes from the checks that follow.)
 function restrictedMask(name) {
+  if (typeof name !== "string") return 0;
   const n = name.length;
   if (n < 2 || n > 10) return 0;
   const c0 = name.charCodeAt(0), c1 = name.charCodeAt(1);
@@ -174,10 +201,12 @@ PUNCT1[58] = T_COLON; PUNCT1[96] = T_BACKQUOTE;
 
 // token contexts (acorn's TokContext objects)
 const C_B_STAT = 0, C_B_EXPR = 1, C_B_TMPL = 2, C_P_STAT = 3, C_P_EXPR = 4, C_Q_TMPL = 5,
-  C_F_STAT = 6, C_F_EXPR = 7, C_F_EXPR_GEN = 8, C_F_GEN = 9;
-const CTX_IS_EXPR = [false, true, false, false, true, true, false, true, true, false];
-const CTX_IS_FUNC = [false, false, false, false, false, false, true, true, true, true];
-const CTX_IS_GEN = [false, false, false, false, false, false, false, false, true, true];
+  C_F_STAT = 6, C_F_EXPR = 7, C_F_EXPR_GEN = 8, C_F_GEN = 9,
+  // acorn-jsx's tc_oTag ("<tag"), tc_cTag ("</tag"), tc_expr ("<tag>...</tag>", preserveSpace)
+  C_J_OTAG = 10, C_J_CTAG = 11, C_J_EXPR = 12;
+const CTX_IS_EXPR = [false, true, false, false, true, true, false, true, true, false, false, false, true];
+const CTX_IS_FUNC = [false, false, false, false, false, false, true, true, true, true, false, false, false];
+const CTX_IS_GEN = [false, false, false, false, false, false, false, false, true, true, false, false, false];
 
 // scopes
 const SCOPE_TOP = 1, SCOPE_FUNCTION = 2, SCOPE_ASYNC = 4, SCOPE_GENERATOR = 8, SCOPE_ARROW = 16,
@@ -264,7 +293,7 @@ function rdeAcquire(p) {
 // order acorn's parse functions assign them).
 
 function extra(n, p, s, sl) {
-  if (p.locations) n.loc = new SourceLocation(p, sl, p.lastTokEndLoc);
+  if (p.locations) n.loc = new SourceLocation(p, sl, p.leloc());
   if (p.directSourceFile) n.sourceFile = p.directSourceFile;
   if (p.ranges) n.range = [s, p.lastTokEnd];
 }
@@ -276,7 +305,7 @@ function defNode(type, fields) {
     // loc/sourceFile/range stored inline so each constructor keeps its own
     // monomorphic store ICs (an out-of-line helper would see every shape)
     `if (p.xtra) {\n` +
-    `  if (p.locations) this.loc = new SourceLocation(p, sl, p.lastTokEndLoc);\n` +
+    `  if (p.locations) this.loc = new SourceLocation(p, sl, p.leloc());\n` +
     `  if (p.directSourceFile) this.sourceFile = p.directSourceFile;\n` +
     `  if (p.ranges) this.range = [s, p.lastTokEnd];\n` +
     `}\n` +
@@ -362,6 +391,23 @@ const NExportNamedDeclaration = defNode("ExportNamedDeclaration", ["declaration"
 const NExportDefaultDeclaration = defNode("ExportDefaultDeclaration", ["declaration"]);
 const NExportAllDeclaration = defNode("ExportAllDeclaration", ["exported", "source", "attributes"]);
 const NExportSpecifier = defNode("ExportSpecifier", ["local", "exported"]);
+// acorn-jsx nodes (key order as acorn-jsx assigns them)
+const NJSXIdentifier = defNode("JSXIdentifier", ["name"]);
+const NJSXNamespacedName = defNode("JSXNamespacedName", ["namespace", "name"]);
+const NJSXMemberExpression = defNode("JSXMemberExpression", ["object", "property"]);
+const NJSXEmptyExpression = defNode("JSXEmptyExpression", []);
+const NJSXExpressionContainer = defNode("JSXExpressionContainer", ["expression"]);
+const NJSXSpreadAttribute = defNode("JSXSpreadAttribute", ["argument"]);
+const NJSXAttribute = defNode("JSXAttribute", ["name", "value"]);
+const NJSXOpeningElement = defNode("JSXOpeningElement", ["attributes", "name", "selfClosing"]);
+const NJSXOpeningFragment = defNode("JSXOpeningFragment", ["attributes", "selfClosing"]);
+const NJSXClosingElement = defNode("JSXClosingElement", ["name"]);
+const NJSXClosingFragment = defNode("JSXClosingFragment", []);
+const NJSXElement = defNode("JSXElement", ["openingElement", "closingElement", "children"]);
+const NJSXFragment = defNode("JSXFragment", ["openingFragment", "closingFragment", "children"]);
+// JSXText comes from acorn's parseLiteral (incl. its "raw ends with n" bigint rule)
+const NJSXText = defNode("JSXText", ["value", "raw"]);
+const NJSXTextBig = defNode("JSXText", ["value", "raw", "bigint"]);
 
 // node with explicit end (finishNodeAt)
 function setEnd(p, n, end, endLoc) {
@@ -373,12 +419,31 @@ function setEnd(p, n, end, endLoc) {
 
 // acorn's copyNode: a shallow copy (loc/range objects shared)
 function copyNode(p, node) {
-  const c = new Node(p.nodeShim, node.start, p.startLoc);
+  const c = new Node(p.nodeShim, node.start, undefined);
   for (const prop in node) c[prop] = node[prop];
   return c;
 }
 
-const empty = [];
+// acorn's own shared empty arrays (`new X` arguments, `import "x"`
+// specifiers): the very same objects, as in every acorn AST
+const emptyNewArguments = _emptyNewArguments;
+const emptyImportSpecifiers = _emptyImportSpecifiers;
+
+// AST lists are collected on a per-parser scratch stack (p.stk / p.sp) and
+// copied into exact-size arrays: an array grown by push() keeps a 17-slot
+// backing store (three times the memory of an exact 1-element array), and
+// ASTs are full of small lists that all survive into the old generation.
+function listFrom(p, base) {
+  const st = p.stk, n = p.sp - base;
+  let r;
+  if (n === 0) r = [];
+  else if (n === 1) r = [st[base]];
+  else if (n === 2) r = [st[base], st[base + 1]];
+  else if (n === 3) r = [st[base], st[base + 1], st[base + 2]];
+  else r = st.slice(base, p.sp);
+  p.sp = base;
+  return r;
+}
 const loopLabel = { kind: "loop" }, switchLabel = { kind: "switch" };
 const FUNC_STATEMENT = 1, FUNC_HANGING_STATEMENT = 2, FUNC_NULLABLE_ID = 4;
 
@@ -406,6 +471,130 @@ function validateRegExp(start, pattern, flags) {
 
 const INVALID_TEMPLATE_ESCAPE = { invalidTemplateEscape: true };
 
+// acorn-jsx's entity helpers
+const hexNumber = /^[\da-fA-F]+$/;
+const decimalNumber = /^\d+$/;
+function jsxQualifiedName(object) {
+  if (!object) return object;
+  if (object.type === "JSXIdentifier") return object.name;
+  if (object.type === "JSXNamespacedName") return object.namespace.name + ":" + object.name.name;
+  if (object.type === "JSXMemberExpression") return jsxQualifiedName(object.object) + "." + jsxQualifiedName(object.property);
+}
+
+// ------------------------------------------------------------ acorn API facade
+// For Parser.extend() subclasses overriding parseFunctionBody (override.mjs):
+// the subclass's method runs with `this` bound to a BodyFacade, which shows
+// the fast parser's state the way acorn's Parser would.
+
+// acorn's TokenType object for each token type
+const TT_OBJ = new Array(T_COUNT).fill(undefined);
+{
+  const names = ["num", "regexp", "string", "name", "privateId", "eof", "bracketL", "bracketR", "braceL", "braceR", "parenL", "parenR",
+    "comma", "semi", "colon", "dot", "question", "questionDot", "arrow", "template", "invalidTemplate", "ellipsis", "backQuote",
+    "dollarBraceL", "eq", "assign", "incDec", "prefix", "logicalOR", "logicalAND", "bitwiseOR", "bitwiseXOR", "bitwiseAND",
+    "equality", "relational", "bitShift", "plusMin", "modulo", "star", "slash", "starstar", "coalesce"];
+  for (let t = 0; t < names.length; t++) TT_OBJ[t] = acornTT[names[t]];
+  for (let t = T_KW_FIRST; t < T_COUNT; t++) TT_OBJ[t] = acornTT["_" + KW_NAME[t]];
+  for (let t = 0; t < T_COUNT; t++) if (t < T_JSXNAME || t >= T_KW_FIRST) if (!TT_OBJ[t]) throw new Error("fast-acorn: token type " + t);
+}
+
+// acorn's finishNodeAt
+function finishNodeAt(p, node, type, pos, loc) {
+  node.type = type;
+  node.end = pos;
+  if (p.options.locations) node.loc.end = loc;
+  if (p.options.ranges) node.range[1] = pos;
+  return node;
+}
+
+export class BodyFacade {
+  constructor(p) {
+    this.p = p;
+    this.fnNode = null;
+  }
+  get type() {
+    return TT_OBJ[this.p.type];
+  }
+  get value() {
+    return this.p.value;
+  }
+  get start() {
+    return this.p.start;
+  }
+  get end() {
+    return this.p.end;
+  }
+  get pos() {
+    return this.p.pos;
+  }
+  get startLoc() {
+    return this.p.startLoc;
+  }
+  get endLoc() {
+    return this.p.eloc();
+  }
+  get lastTokStart() {
+    return this.p.lastTokStart;
+  }
+  get lastTokEnd() {
+    return this.p.lastTokEnd;
+  }
+  get lastTokStartLoc() {
+    return this.p.lastTokStartLoc;
+  }
+  get lastTokEndLoc() {
+    return this.p.leloc();
+  }
+  next(ignoreEscapeSequenceInKeyword) {
+    this.p.next(ignoreEscapeSequenceInKeyword);
+  }
+  startNode() {
+    const p = this.p;
+    return new Node(p.nodeShim, p.start, p.startLoc);
+  }
+  startNodeAt(pos, loc) {
+    return new Node(this.p.nodeShim, pos, loc);
+  }
+  finishNode(node, type) {
+    const p = this.p;
+    return finishNodeAt(p, node, type, p.lastTokEnd, p.leloc());
+  }
+  finishNodeAt(node, type, pos, loc) {
+    return finishNodeAt(this.p, node, type, pos, loc);
+  }
+  exitScope() {
+    this.p.exitScope();
+  }
+  eat(type) {
+    if (TT_OBJ[this.p.type] === type) {
+      this.p.next();
+      return true;
+    }
+    return false;
+  }
+  expect(type) {
+    this.eat(type) || this.unexpected();
+  }
+  // errors: acorn produces them (re-parse)
+  unexpected() {
+    bail();
+  }
+  raise() {
+    bail();
+  }
+  raiseRecoverable() {
+    bail();
+  }
+  // super.parseFunctionBody(node, isArrowFunction, isMethod, forInit): acorn's
+  // parseFunctionBody, i.e. the fast parser's, on the function node
+  superParseFunctionBody(node, isArrowFunction, isMethod, forInit) {
+    if (node !== this.fnNode) bail();
+    const p = this.p;
+    node.body = p.parseFunctionBody(node.params, node.id, isArrowFunction, isMethod, forInit);
+    node.expression = p.fbExpression;
+  }
+}
+
 // ------------------------------------------------------------ the parser
 
 // Read-only per-configuration tables shared by all parser instances (building
@@ -423,15 +612,55 @@ function reservedWordSets(notAllowReserved, isModule) {
   return sets;
 }
 
-// The identifier intern table only deduplicates equal strings, so it can be
-// shared across parses
-const sharedInternTable = new Array(4096);
+
+// acorn (parseExpressionAt with locations): curLine =
+// input.slice(0, lineStart).split(lineBreak).length, i.e. 1 + the number of
+// lineBreak matches (CR LF, CR, LF, LS, PS) that start before lineStart. The match
+// starts of the last input are kept (parseExpressionAt is typically called
+// many times on one template) and extended as needed; lineStart always
+// follows a "\n", so a scan never ends between the two halves of a \r\n.
+let lbInput = null, lbStarts = [], lbScanned = 0;
+function linesBefore(input, lineStart) {
+  if (lbInput !== input) {
+    lbInput = input;
+    lbStarts = [];
+    lbScanned = 0;
+  }
+  if (lbScanned < lineStart) {
+    const starts = lbStarts;
+    let i = lbScanned;
+    for (; i < lineStart; i++) {
+      const c = input.charCodeAt(i);
+      if (c === 13) {
+        starts.push(i);
+        if (input.charCodeAt(i + 1) === 10) i++;
+      } else if (c === 10 || c === 0x2028 || c === 0x2029) starts.push(i);
+    }
+    lbScanned = i;
+  }
+  const starts = lbStarts;
+  let lo = 0, hi = starts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (starts[mid] < lineStart) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo + 1;
+}
 
 export class FastParser {
-  constructor(options, input, startPos) {
+  constructor(options, input, startPos, jsx, bodyOverride) {
     // options: already normalized by acorn's getOptions()
     // startPos: only for parseExpressionAt (acorn's Parser(options, input, startPos))
+    // jsx: null, or the options of a recognised acorn-jsx plugin class
+    //   ({ allowNamespaces, allowNamespacedObjects }): parse like that class
     this.options = options;
+    this.jsx = jsx != null;
+    this.jsxNamespaces = jsx != null && jsx.allowNamespaces === true;
+    this.jsxNamespacedObjects = jsx != null && jsx.allowNamespacedObjects === true;
+    // parseFunctionBody override of a recognised Parser.extend() subclass
+    this.bodyOverride = bodyOverride != null ? bodyOverride : null;
+    this.facade = bodyOverride != null ? new BodyFacade(this) : null;
     this.input = input;
     this.len = input.length;
     this.ecma = options.ecmaVersion;
@@ -439,6 +668,10 @@ export class FastParser {
     // onComment calls are buffered and delivered after a successful parse, so
     // a bail (which re-runs real acorn) never reports a comment twice
     this.commentBuf = options.onComment ? [] : null;
+    // unexpected() throws acorn's "Unexpected token" SyntaxError itself (no
+    // re-parse), except where acorn would have called other code first: a
+    // plugin (JSX / parseFunctionBody override) or onComment callbacks
+    this.exactErrors = this.commentBuf === null && jsx == null && bodyOverride == null;
     this.ranges = !!options.ranges;
     this.directSourceFile = options.directSourceFile;
     this.sourceFile = options.sourceFile;
@@ -462,7 +695,7 @@ export class FastParser {
     if (startPos) {
       // (acorn: only a \n starts the line here, but all line breaks count)
       this.lineStart = input.lastIndexOf("\n", startPos - 1) + 1;
-      if (this.locations) this.curLine = input.slice(0, this.lineStart).split(lineBreak).length;
+      if (this.locations) this.curLine = linesBefore(input, this.lineStart);
     } else {
       this.lineStart = 0;
     }
@@ -470,8 +703,17 @@ export class FastParser {
     this.value = null;
     this.start = this.pos;
     this.end = this.pos;
+    // With locations, token *end* Positions are created lazily: endLoc /
+    // lastTokEndLoc are null until something reads the latter through
+    // leloc(), which creates the Position from the recorded line / line start
+    // and caches it in the slot, so every reader gets the same object (as
+    // with acorn's eagerly created ones). About half of them are never read.
+    // (Start positions are read at many places; they stay eager.)
+    this.endLine = this.lastTokEndLine = this.curLine;
+    this.endLS = this.lastTokEndLS = this.lineStart;
     this.startLoc = this.endLoc = this.curPosition();
-    this.lastTokEndLoc = this.lastTokStartLoc = null;
+    this.lastTokStartLoc = null;
+    this.lastTokEndLoc = this.locations ? null : undefined;
     this.lastTokStart = this.lastTokEnd = this.pos;
     this.nlBefore = false;
     this.ctx = [C_B_STAT];
@@ -479,8 +721,11 @@ export class FastParser {
     this.inTemplateElement = false;
     this.pnComputed = false;
     this.rdePool = [];
+    this.stk = [];
+    this.sp = 0;
     this.rdeDepth = 0;
-    this.internTable = sharedInternTable;
+    this.fbExpression = false;
+    this.clashNames = [];
 
     this.inModule = options.sourceType === "module";
     this.strict = this.inModule || options.strict === true || this.strictDirective(this.pos);
@@ -505,12 +750,37 @@ export class FastParser {
     if (this.locations) return new Position(this.curLine, this.pos - this.lineStart);
   }
 
+  // the current token's end position
+  eloc() {
+    let o = this.endLoc;
+    if (o === null) o = this.endLoc = new Position(this.endLine, this.end - this.endLS);
+    return o;
+  }
+
+  leloc() {
+    let o = this.lastTokEndLoc;
+    if (o === null) o = this.lastTokEndLoc = new Position(this.lastTokEndLine, this.lastTokEnd - this.lastTokEndLS);
+    return o;
+  }
+
   raise() {
     bail();
   }
 
-  unexpected() {
-    bail();
+  // acorn: this.raise(pos != null ? pos : this.start, "Unexpected token")
+  unexpected(pos) {
+    if (!this.exactErrors) bail();
+    if (pos == null) pos = this.start;
+    const loc = getLineInfo(this.input, pos);
+    let message = "Unexpected token (" + loc.line + ":" + loc.column + ")";
+    if (this.sourceFile) message += " in " + this.sourceFile;
+    const err = new SyntaxError(message);
+    err.pos = pos;
+    err.loc = loc;
+    err.raisedAt = this.pos;
+    exactErrors.add(err);
+    errorStats.exact++;
+    throw err;
   }
 
   // acorn's strictDirective, written as a scanner (no regexps)
@@ -615,7 +885,7 @@ export class FastParser {
 
   insertSemicolon() {
     if (this.canInsertSemicolon()) {
-      if (this.onInsertedSemicolon) this.onInsertedSemicolon(this.lastTokEnd, this.lastTokEndLoc);
+      if (this.onInsertedSemicolon) this.onInsertedSemicolon(this.lastTokEnd, this.leloc());
       return true;
     }
   }
@@ -782,6 +1052,10 @@ export class FastParser {
     this.lastTokStart = this.start;
     this.lastTokEndLoc = this.endLoc;
     this.lastTokStartLoc = this.startLoc;
+    if (this.locations) {
+      this.lastTokEndLine = this.endLine;
+      this.lastTokEndLS = this.endLS;
+    }
     this.nlBefore = false;
     this.nextToken();
   }
@@ -792,11 +1066,15 @@ export class FastParser {
     const input = this.input;
     let pos = this.pos;
     let code;
-    if (ctx[ctx.length - 1] === C_Q_TMPL) {
+    const cur = ctx[ctx.length - 1];
+    if (cur === C_Q_TMPL || cur === C_J_EXPR) {
+      // contexts with preserveSpace: q_tmpl (override: template token) and
+      // acorn-jsx's tc_expr (readToken -> jsx_readToken)
       this.start = pos;
       if (this.locations) this.startLoc = new Position(this.curLine, pos - this.lineStart);
       if (pos >= this.len) return this.finishToken(T_EOF, undefined);
-      return this.tryReadTemplateToken();
+      if (cur === C_Q_TMPL) return this.tryReadTemplateToken();
+      return this.jsxReadToken();
     }
     code = input.charCodeAt(pos);
     if (code === 32) code = input.charCodeAt(++pos);
@@ -811,6 +1089,10 @@ export class FastParser {
     if (pos >= this.len) {
       this.pos = pos;
       return this.finishToken(T_EOF, undefined);
+    }
+    if (this.jsx && (code === 60 || cur === C_J_OTAG || cur === C_J_CTAG)) {
+      this.pos = pos;
+      if (this.jsxReadTokenHook(code, cur)) return;
     }
     if (code < 128) {
       const t = PUNCT1[code];
@@ -924,7 +1206,11 @@ export class FastParser {
 
   finishToken(type, val) {
     this.end = this.pos;
-    if (this.locations) this.endLoc = new Position(this.curLine, this.pos - this.lineStart);
+    if (this.locations) {
+      this.endLoc = null;
+      this.endLine = this.curLine;
+      this.endLS = this.lineStart;
+    }
     const prevType = this.type;
     this.type = type;
     this.value = val;
@@ -959,6 +1245,25 @@ export class FastParser {
 
   updateContext(prevType) {
     const type = this.type;
+    if (this.jsx) {
+      // acorn-jsx's updateContext override
+      if (type === T_BRACEL) {
+        const ctx = this.ctx;
+        const cur = ctx[ctx.length - 1];
+        if (cur === C_J_OTAG) ctx.push(C_B_EXPR);
+        else if (cur === C_J_EXPR) ctx.push(C_B_TMPL);
+        else ctx.push(this.braceIsBlock(prevType) ? C_B_STAT : C_B_EXPR);
+        this.exprAllowed = true;
+        return;
+      }
+      if (type === T_SLASH && prevType === T_JSXTAGSTART) {
+        const ctx = this.ctx;
+        ctx.length -= 2;
+        ctx.push(C_J_CTAG);
+        this.exprAllowed = false;
+        return;
+      }
+    }
     if (type >= T_KW_FIRST && prevType === T_DOT) {
       this.exprAllowed = false;
       return;
@@ -1026,6 +1331,23 @@ export class FastParser {
           if ((v === "of" && !this.exprAllowed) || (v === "yield" && this.inGeneratorContext())) allowed = true;
         }
         this.exprAllowed = allowed;
+        return;
+      }
+      case T_JSXTAGSTART:
+        // acorn-jsx: tokTypes.jsxTagStart.updateContext
+        ctx.push(C_J_EXPR);
+        ctx.push(C_J_OTAG);
+        this.exprAllowed = false;
+        return;
+      case T_JSXTAGEND: {
+        // acorn-jsx: tokTypes.jsxTagEnd.updateContext
+        const out = ctx.pop();
+        if ((out === C_J_OTAG && prevType === T_SLASH) || out === C_J_CTAG) {
+          ctx.pop();
+          this.exprAllowed = ctx[ctx.length - 1] === C_J_EXPR;
+        } else {
+          this.exprAllowed = true;
+        }
         return;
       }
       default:
@@ -1626,7 +1948,11 @@ export class FastParser {
     }
     // finishToken + updateContext for a plain name token
     this.end = p;
-    if (this.locations) this.endLoc = new Position(this.curLine, p - this.lineStart);
+    if (this.locations) {
+      this.endLoc = null;
+      this.endLine = this.curLine;
+      this.endLS = this.lineStart;
+    }
     const prevType = this.type;
     this.type = T_NAME;
     const v = (this.value = input.slice(start, p));
@@ -1635,12 +1961,171 @@ export class FastParser {
     this.exprAllowed = allowed;
   }
 
+  // ------------------------------------------------------------ acorn-jsx tokens
+
+  // acorn-jsx's readToken(code) override, before acorn's own readToken
+  // (contexts other than tc_expr): returns true when it read a token
+  jsxReadTokenHook(code, cur) {
+    if (cur === C_J_OTAG || cur === C_J_CTAG) {
+      // (non-ASCII here: an astral or non-ASCII tag name, or an error)
+      if (code >= 128) bail();
+      if (ID_START[code] === 1) {
+        this.jsxReadWord();
+        return true;
+      }
+      if (code === 62) {
+        ++this.pos;
+        this.finishToken(T_JSXTAGEND, undefined);
+        return true;
+      }
+      if ((code === 34 || code === 39) && cur === C_J_OTAG) {
+        this.jsxReadString(code);
+        return true;
+      }
+    }
+    if (code === 60 && this.exprAllowed && this.input.charCodeAt(this.pos + 1) !== 33) {
+      ++this.pos;
+      this.finishToken(T_JSXTAGSTART, undefined);
+      return true;
+    }
+    return false;
+  }
+
+  // jsx_readToken: JSX text (children)
+  jsxReadToken() {
+    const input = this.input, len = this.len;
+    let out = "", chunkStart = this.pos;
+    for (;;) {
+      if (this.pos >= len) bail();
+      const ch = input.charCodeAt(this.pos);
+      switch (ch) {
+        case 60:
+        case 123:
+          if (this.pos === this.start) {
+            if (ch === 60 && this.exprAllowed) {
+              ++this.pos;
+              return this.finishToken(T_JSXTAGSTART, undefined);
+            }
+            return this.getTokenFromCode(ch);
+          }
+          out += input.slice(chunkStart, this.pos);
+          return this.finishToken(T_JSXTEXT, out);
+        case 38:
+          out += input.slice(chunkStart, this.pos);
+          out += this.jsxReadEntity();
+          chunkStart = this.pos;
+          break;
+        case 62:
+        case 125:
+          bail();
+        // falls through (unreachable)
+        default:
+          if (ch === 10 || ch === 13 || ch === 0x2028 || ch === 0x2029) {
+            out += input.slice(chunkStart, this.pos);
+            out += this.jsxReadNewLine(true);
+            chunkStart = this.pos;
+          } else {
+            ++this.pos;
+          }
+      }
+    }
+  }
+
+  jsxReadNewLine(normalizeCRLF) {
+    const input = this.input;
+    const ch = input.charCodeAt(this.pos);
+    let out;
+    ++this.pos;
+    if (ch === 13 && input.charCodeAt(this.pos) === 10) {
+      ++this.pos;
+      out = normalizeCRLF ? "\n" : "\r\n";
+    } else {
+      out = String.fromCharCode(ch);
+    }
+    if (this.locations) {
+      ++this.curLine;
+      this.lineStart = this.pos;
+    }
+    return out;
+  }
+
+  jsxReadString(quote) {
+    const input = this.input, len = this.len;
+    let out = "", chunkStart = ++this.pos;
+    for (;;) {
+      if (this.pos >= len) bail();
+      const ch = input.charCodeAt(this.pos);
+      if (ch === quote) break;
+      if (ch === 38) {
+        out += input.slice(chunkStart, this.pos);
+        out += this.jsxReadEntity();
+        chunkStart = this.pos;
+      } else if (ch === 10 || ch === 13 || ch === 0x2028 || ch === 0x2029) {
+        out += input.slice(chunkStart, this.pos);
+        out += this.jsxReadNewLine(false);
+        chunkStart = this.pos;
+      } else {
+        ++this.pos;
+      }
+    }
+    out += input.slice(chunkStart, this.pos++);
+    return this.finishToken(T_STRING, out);
+  }
+
+  // jsx_readEntity, verbatim (string indexing, the plain-object entity table
+  // and String.fromCharCode's truncation included)
+  jsxReadEntity() {
+    const input = this.input;
+    let str = "", count = 0, entity;
+    let ch = input[this.pos];
+    if (ch !== "&") bail();
+    const startPos = ++this.pos;
+    while (this.pos < input.length && count++ < 10) {
+      ch = input[this.pos++];
+      if (ch === ";") {
+        if (str[0] === "#") {
+          if (str[1] === "x") {
+            str = str.substr(2);
+            if (hexNumber.test(str)) entity = String.fromCharCode(parseInt(str, 16));
+          } else {
+            str = str.substr(1);
+            if (decimalNumber.test(str)) entity = String.fromCharCode(parseInt(str, 10));
+          }
+        } else {
+          entity = XHTMLEntities[str];
+        }
+        break;
+      }
+      str += ch;
+    }
+    if (!entity) {
+      this.pos = startPos;
+      return "&";
+    }
+    return entity;
+  }
+
+  // jsx_readWord (the first character is an ASCII identifier start)
+  jsxReadWord() {
+    const input = this.input;
+    const start = this.pos;
+    let ch;
+    do {
+      ch = input.charCodeAt(++this.pos);
+    } while (ch < 128 ? ID_CHAR[ch] === 1 || ch === 45 : isIdentifierChar(ch));
+    return this.finishToken(T_JSXNAME, input.slice(start, this.pos));
+  }
+
   // ------------------------------------------------------------ statements
 
   parseTopLevel(s, sl) {
     const exports = Object.create(null);
-    const body = [];
-    while (this.type !== T_EOF) body.push(this.parseStatement(null, true, exports));
+    const base = this.sp;
+    while (this.type !== T_EOF) {
+      const st = this.parseStatement(null, true, exports);
+      this.stk[this.sp++] = st;
+    }
+    const body = listFrom(this, base);
     if (this.inModule) {
       for (const name in this.undefinedExports) bail();
     }
@@ -1849,7 +2334,7 @@ export class FastParser {
     this.enterScope(0);
     this.expect(T_PARENL);
     if (this.type === T_SEMI) {
-      if (awaitAt > -1) this.unexpected();
+      if (awaitAt > -1) this.unexpected(awaitAt);
       return this.parseFor(s, sl, null);
     }
     const isLet = this.isLet();
@@ -1875,13 +2360,13 @@ export class FastParser {
       return this.parseForAfterInit(s, sl, init, awaitAt);
     }
     const containsEsc = this.containsEsc;
-    const rde = new DestructuringErrors();
+    const rde = rdeAcquire(this);
     const initPos = this.start;
     const init = awaitAt > -1 ? this.parseExprSubscripts(rde, "await") : this.parseExpression(true, rde);
     if (this.type === T_IN || (isForOf = this.isContextual("of"))) {
       let awaitVal;
       if (awaitAt > -1) {
-        if (this.type === T_IN) this.unexpected();
+        if (this.type === T_IN) this.unexpected(awaitAt);
         awaitVal = true;
       } else if (isForOf) {
         if (init.start === initPos && !containsEsc && init.type === "Identifier" && init.name === "async") this.unexpected();
@@ -1889,12 +2374,14 @@ export class FastParser {
       }
       if (startsWithLet && isForOf) bail();
       this.toAssignable(init, false, rde);
+      this.rdeDepth--;
       this.checkLValPattern(init);
       return this.parseForIn(s, sl, init, awaitVal);
     } else {
       this.checkExpressionErrors(rde, true);
+      this.rdeDepth--;
     }
-    if (awaitAt > -1) this.unexpected();
+    if (awaitAt > -1) this.unexpected(awaitAt);
     return this.parseFor(s, sl, init);
   }
 
@@ -1903,11 +2390,11 @@ export class FastParser {
       let awaitVal;
       if (this.type === T_IN) {
         if ((init.kind === "using" || init.kind === "await using") && !init.declarations[0].init) bail();
-        if (awaitAt > -1) this.unexpected();
+        if (awaitAt > -1) this.unexpected(awaitAt);
       } else awaitVal = awaitAt > -1;
       return this.parseForIn(s, sl, init, awaitVal);
     }
-    if (awaitAt > -1) this.unexpected();
+    if (awaitAt > -1) this.unexpected(awaitAt);
     return this.parseFor(s, sl, init);
   }
 
@@ -1939,19 +2426,23 @@ export class FastParser {
   parseSwitchStatement(s, sl) {
     this.next();
     const discriminant = this.parseParenExpression();
-    const cases = [];
+    const casesBase = this.sp;
     this.expect(T_BRACEL);
     this.labels.push(switchLabel);
     this.enterScope(SCOPE_SWITCH);
-    let cur = null, cs = 0, csl = null, curCons = null, curTest = null;
+    // (stack: the finished cases, then the current case's consequent)
+    let cur = null, cs = 0, csl = null, consBase = 0, curTest = null;
     for (let sawDefault = false; this.type !== T_BRACER; ) {
       if (this.type === T_CASE || this.type === T_DEFAULT) {
         const isCase = this.type === T_CASE;
-        if (cur) cases.push(new NSwitchCase(this, cs, csl, curCons, curTest));
+        if (cur) {
+          const c = new NSwitchCase(this, cs, csl, listFrom(this, consBase), curTest);
+          this.stk[this.sp++] = c;
+        }
         cur = true;
         cs = this.start;
         csl = this.startLoc;
-        curCons = [];
+        consBase = this.sp;
         this.next();
         if (isCase) {
           curTest = this.parseExpression();
@@ -1963,11 +2454,16 @@ export class FastParser {
         this.expect(T_COLON);
       } else {
         if (!cur) this.unexpected();
-        curCons.push(this.parseStatement(null));
+        const st = this.parseStatement(null);
+        this.stk[this.sp++] = st;
       }
     }
     this.exitScope();
-    if (cur) cases.push(new NSwitchCase(this, cs, csl, curCons, curTest));
+    if (cur) {
+      const c = new NSwitchCase(this, cs, csl, listFrom(this, consBase), curTest);
+      this.stk[this.sp++] = c;
+    }
+    const cases = listFrom(this, casesBase);
     this.next();
     this.labels.pop();
     return new NSwitchStatement(this, s, sl, discriminant, cases);
@@ -2059,10 +2555,14 @@ export class FastParser {
   }
 
   parseBlock(createNewLexicalScope = true, s = this.start, sl = this.startLoc, exitStrict) {
-    const body = [];
+    const base = this.sp;
     this.expect(T_BRACEL);
     if (createNewLexicalScope) this.enterScope(0);
-    while (this.type !== T_BRACER) body.push(this.parseStatement(null));
+    while (this.type !== T_BRACER) {
+      const st = this.parseStatement(null);
+      this.stk[this.sp++] = st;
+    }
+    const body = listFrom(this, base);
     if (exitStrict) this.strict = false;
     this.next();
     if (createNewLexicalScope) this.exitScope();
@@ -2105,7 +2605,7 @@ export class FastParser {
   }
 
   parseVar(isFor, kind, allowMissingInitializer) {
-    const declarations = [];
+    const base = this.sp;
     for (;;) {
       const ds = this.start, dsl = this.startLoc;
       const id = this.parseVarId(kind);
@@ -2121,16 +2621,37 @@ export class FastParser {
       } else {
         init = null;
       }
-      declarations.push(new NVariableDeclarator(this, ds, dsl, id, init));
+      const d = new NVariableDeclarator(this, ds, dsl, id, init);
+      this.stk[this.sp++] = d;
       if (!this.eat(T_COMMA)) break;
     }
-    return declarations;
+    return listFrom(this, base);
   }
 
   parseVarId(kind) {
     const id = kind === "using" || kind === "await using" ? this.parseIdent() : this.parseBindingAtom();
     this.checkLValPattern(id, kind === "var" ? BIND_VAR : BIND_LEXICAL, false);
     return id;
+  }
+
+  // acorn's function node as it is when parseFunctionBody runs (initFunction's
+  // key order: id, expression, generator, async; then params)
+  overrideFunctionNode(s, sl, id, generator, async, params) {
+    const node = new Node(this.nodeShim, s, sl);
+    node.id = id;
+    node.expression = false;
+    node.generator = generator;
+    node.async = async;
+    node.params = params;
+    return node;
+  }
+
+  runBodyOverride(node, isArrowFunction, isMethod, forInit) {
+    const f = this.facade;
+    const saved = f.fnNode;
+    f.fnNode = node;
+    this.bodyOverride.call(f, node, isArrowFunction, isMethod, forInit);
+    f.fnNode = saved;
   }
 
   parseFunction(s, sl, statement, allowExpressionBody, isAsync, forInit) {
@@ -2153,12 +2674,21 @@ export class FastParser {
     this.expect(T_PARENL);
     const params = this.parseBindingList(T_PARENR, false, true);
     this.checkYieldAwaitInDefaultParams();
-    const fb = this.parseFunctionBody(params, id, allowExpressionBody, false, forInit);
+    if (this.bodyOverride !== null) {
+      const node = this.overrideFunctionNode(s, sl, id, generator, async, params);
+      this.runBodyOverride(node, allowExpressionBody, false, forInit);
+      this.yieldPos = oldYieldPos;
+      this.awaitPos = oldAwaitPos;
+      this.awaitIdentPos = oldAwaitIdentPos;
+      return finishNodeAt(this, node, statement & FUNC_STATEMENT ? "FunctionDeclaration" : "FunctionExpression", this.lastTokEnd, this.leloc());
+    }
+    const body = this.parseFunctionBody(params, id, allowExpressionBody, false, forInit);
+    const expression = this.fbExpression;
     this.yieldPos = oldYieldPos;
     this.awaitPos = oldAwaitPos;
     this.awaitIdentPos = oldAwaitIdentPos;
     const C = statement & FUNC_STATEMENT ? NFunctionDeclaration : NFunctionExpression;
-    return new C(this, s, sl, id, fb.expression, generator, async, params, fb.body);
+    return new C(this, s, sl, id, expression, generator, async, params, body);
   }
 
   parseClass(s, sl, isStatement) {
@@ -2178,12 +2708,12 @@ export class FastParser {
     const privateNameMap = this.enterClassBody();
     const bs = this.start, bsl = this.startLoc;
     let hadConstructor = false;
-    const body = [];
+    const base = this.sp;
     this.expect(T_BRACEL);
     while (this.type !== T_BRACER) {
       const element = this.parseClassElement(superClass !== null);
       if (element) {
-        body.push(element);
+        this.stk[this.sp++] = element;
         if (element.type === "MethodDefinition" && element.kind === "constructor") {
           if (hadConstructor) bail();
           hadConstructor = true;
@@ -2192,6 +2722,7 @@ export class FastParser {
         }
       }
     }
+    const body = listFrom(this, base);
     this.strict = oldStrict;
     this.next();
     const classBody = new NClassBody(this, bs, bsl, body);
@@ -2271,11 +2802,15 @@ export class FastParser {
   }
 
   parseClassStaticBlock(s, sl) {
-    const body = [];
+    const base = this.sp;
     const oldLabels = this.labels;
     this.labels = [];
     this.enterScope(SCOPE_CLASS_STATIC_BLOCK | SCOPE_SUPER);
-    while (this.type !== T_BRACER) body.push(this.parseStatement(null));
+    while (this.type !== T_BRACER) {
+      const st = this.parseStatement(null);
+      this.stk[this.sp++] = st;
+    }
+    const body = listFrom(this, base);
     this.next();
     this.exitScope();
     this.labels = oldLabels;
@@ -2405,7 +2940,7 @@ export class FastParser {
   }
 
   parseExportSpecifiers(exports) {
-    const nodes = [];
+    const base = this.sp;
     let first = true;
     this.expect(T_BRACEL);
     while (!this.eat(T_BRACER)) {
@@ -2413,16 +2948,17 @@ export class FastParser {
         this.expect(T_COMMA);
         if (this.afterTrailingComma(T_BRACER)) break;
       } else first = false;
-      nodes.push(this.parseExportSpecifier(exports));
+      const n = this.parseExportSpecifier(exports);
+      this.stk[this.sp++] = n;
     }
-    return nodes;
+    return listFrom(this, base);
   }
 
   parseImport(s, sl) {
     this.next();
     let specifiers, source;
     if (this.type === T_STRING) {
-      specifiers = empty;
+      specifiers = emptyImportSpecifiers;
       source = this.parseExprAtom();
     } else {
       specifiers = this.parseImportSpecifiers();
@@ -2465,15 +3001,17 @@ export class FastParser {
   }
 
   parseImportSpecifiers() {
-    const nodes = [];
+    const base = this.sp;
     let first = true;
     if (this.type === T_NAME) {
-      nodes.push(this.parseImportDefaultSpecifier());
-      if (!this.eat(T_COMMA)) return nodes;
+      const n = this.parseImportDefaultSpecifier();
+      this.stk[this.sp++] = n;
+      if (!this.eat(T_COMMA)) return listFrom(this, base);
     }
     if (this.type === T_STAR) {
-      nodes.push(this.parseImportNamespaceSpecifier());
-      return nodes;
+      const n = this.parseImportNamespaceSpecifier();
+      this.stk[this.sp++] = n;
+      return listFrom(this, base);
     }
     this.expect(T_BRACEL);
     while (!this.eat(T_BRACER)) {
@@ -2481,9 +3019,10 @@ export class FastParser {
         this.expect(T_COMMA);
         if (this.afterTrailingComma(T_BRACER)) break;
       } else first = false;
-      nodes.push(this.parseImportSpecifier());
+      const n = this.parseImportSpecifier();
+      this.stk[this.sp++] = n;
     }
-    return nodes;
+    return listFrom(this, base);
   }
 
   parseWithClause() {
@@ -2630,26 +3169,27 @@ export class FastParser {
   }
 
   parseBindingList(close, allowEmpty, allowTrailingComma) {
-    const elts = [];
+    const base = this.sp;
     let first = true;
     while (!this.eat(close)) {
       if (first) first = false;
       else this.expect(T_COMMA);
       if (allowEmpty && this.type === T_COMMA) {
-        elts.push(null);
+        this.stk[this.sp++] = null;
       } else if (allowTrailingComma && this.afterTrailingComma(close)) {
         break;
       } else if (this.type === T_ELLIPSIS) {
         const rest = this.parseRestBinding();
-        elts.push(rest);
+        this.stk[this.sp++] = rest;
         if (this.type === T_COMMA) bail();
         this.expect(close);
         break;
       } else {
-        elts.push(this.parseMaybeDefault(this.start, this.startLoc));
+        const e = this.parseMaybeDefault(this.start, this.startLoc);
+        this.stk[this.sp++] = e;
       }
     }
-    return elts;
+    return listFrom(this, base);
   }
 
   parseMaybeDefault(s, sl, left) {
@@ -2667,8 +3207,8 @@ export class FastParser {
         if (isBind) {
           if (bindingType === BIND_LEXICAL && expr.name === "let") bail();
           if (checkClashes) {
-            if (Object.hasOwn(checkClashes, expr.name)) bail();
-            checkClashes[expr.name] = true;
+            if (checkClashes.includes(expr.name)) bail();
+            checkClashes.push(expr.name);
           }
           if (bindingType !== BIND_OUTSIDE) this.declareName(expr.name, bindingType);
         }
@@ -2718,9 +3258,10 @@ export class FastParser {
 
   // ------------------------------------------------------------ expressions
 
-  checkPropClash(prop, propHash, rde) {
-    if (prop.type === "SpreadElement") return;
-    if (prop.computed || prop.method || prop.shorthand) return;
+  // returns whether the object has had an init __proto__ property so far
+  checkPropClash(prop, sawProto, rde) {
+    if (prop.type === "SpreadElement") return sawProto;
+    if (prop.computed || prop.method || prop.shorthand) return sawProto;
     const key = prop.key;
     let name;
     switch (key.type) {
@@ -2731,25 +3272,30 @@ export class FastParser {
         name = String(key.value);
         break;
       default:
-        return;
+        return sawProto;
     }
     if (name === "__proto__" && prop.kind === "init") {
-      if (propHash.proto) {
+      if (sawProto) {
         if (rde) {
           if (rde.doubleProto < 0) rde.doubleProto = key.start;
         } else bail();
       }
-      propHash.proto = true;
+      return true;
     }
+    return sawProto;
   }
 
   parseExpression(forInit, rde) {
     const s = this.start, sl = this.startLoc;
     const expr = this.parseMaybeAssign(forInit, rde);
     if (this.type === T_COMMA) {
-      const expressions = [expr];
-      while (this.eat(T_COMMA)) expressions.push(this.parseMaybeAssign(forInit, rde));
-      return new NSequenceExpression(this, s, sl, expressions);
+      const base = this.sp;
+      this.stk[this.sp++] = expr;
+      while (this.eat(T_COMMA)) {
+        const e = this.parseMaybeAssign(forInit, rde);
+        this.stk[this.sp++] = e;
+      }
+      return new NSequenceExpression(this, s, sl, listFrom(this, base));
     }
     return expr;
   }
@@ -2893,7 +3439,7 @@ export class FastParser {
       }
     }
     if (this.type === T_STARSTAR && !incDec && !(expr.type === "ArrowFunctionExpression" && expr.start === s) && this.eat(T_STARSTAR)) {
-      if (sawUnary) this.unexpected();
+      if (sawUnary) this.unexpected(this.lastTokStart);
       else return this.buildBinary(s, sl, expr, this.parseMaybeUnary(null, false, false, forInit), "**", false);
     } else {
       return expr;
@@ -2986,6 +3532,15 @@ export class FastParser {
   }
 
   parseExprAtom(rde, forInit, forNew) {
+    if (this.jsx) {
+      // acorn-jsx's parseExprAtom(refShortHandDefaultPos) override: JSX
+      // atoms, otherwise super.parseExprAtom(refShortHandDefaultPos) -- which
+      // drops forInit and forNew
+      if (this.type === T_JSXTEXT) return this.jsxParseText();
+      if (this.type === T_JSXTAGSTART) return this.jsxParseElement();
+      forInit = undefined;
+      forNew = undefined;
+    }
     if (this.type === T_SLASH) this.readRegexp();
     const canBeArrow = this.potentialArrowAt === this.start;
     const s = this.start, sl = this.startLoc;
@@ -3107,6 +3662,161 @@ export class FastParser {
     return new NMetaProperty(this, s, sl, meta, property);
   }
 
+  // ------------------------------------------------------------ acorn-jsx parse functions
+
+  // jsx_parseText: parseLiteral(this.value) with type "JSXText"
+  jsxParseText() {
+    const s = this.start, sl = this.startLoc;
+    const value = this.value;
+    const raw = this.input.slice(this.start, this.end);
+    this.next();
+    if (raw.charCodeAt(raw.length - 1) === 110) {
+      const bigint = value != null ? value.toString() : raw.slice(0, -1).replace(/_/g, "");
+      return new NJSXTextBig(this, s, sl, value, raw, bigint);
+    }
+    return new NJSXText(this, s, sl, value, raw);
+  }
+
+  jsxParseIdentifier() {
+    const s = this.start, sl = this.startLoc;
+    let name;
+    if (this.type === T_JSXNAME) name = this.value;
+    else if (this.type >= T_KW_FIRST) name = KW_NAME[this.type];
+    else this.unexpected();
+    this.next();
+    return new NJSXIdentifier(this, s, sl, name);
+  }
+
+  jsxParseNamespacedName() {
+    const s = this.start, sl = this.startLoc;
+    const name = this.jsxParseIdentifier();
+    if (!this.jsxNamespaces || !this.eat(T_COLON)) return name;
+    const local = this.jsxParseIdentifier();
+    return new NJSXNamespacedName(this, s, sl, name, local);
+  }
+
+  jsxParseElementName() {
+    if (this.type === T_JSXTAGEND) return "";
+    const s = this.start, sl = this.startLoc;
+    let node = this.jsxParseNamespacedName();
+    if (this.type === T_DOT && node.type === "JSXNamespacedName" && !this.jsxNamespacedObjects) this.unexpected();
+    while (this.eat(T_DOT)) {
+      const property = this.jsxParseIdentifier();
+      node = new NJSXMemberExpression(this, s, sl, node, property);
+    }
+    return node;
+  }
+
+  jsxParseAttributeValue() {
+    switch (this.type) {
+      case T_BRACEL: {
+        const node = this.jsxParseExpressionContainer();
+        if (node.expression.type === "JSXEmptyExpression") bail();
+        return node;
+      }
+      case T_JSXTAGSTART:
+      case T_STRING:
+        return this.parseExprAtom();
+      default:
+        bail();
+    }
+  }
+
+  // starts at the end of the `{` and ends at the start of the `}`
+  jsxParseEmptyExpression() {
+    const node = new NJSXEmptyExpression(this, this.lastTokEnd, this.leloc());
+    return setEnd(this, node, this.start, this.startLoc);
+  }
+
+  jsxParseExpressionContainer() {
+    const s = this.start, sl = this.startLoc;
+    this.next();
+    const expression = this.type === T_BRACER ? this.jsxParseEmptyExpression() : this.parseExpression();
+    this.expect(T_BRACER);
+    return new NJSXExpressionContainer(this, s, sl, expression);
+  }
+
+  jsxParseAttribute() {
+    const s = this.start, sl = this.startLoc;
+    if (this.eat(T_BRACEL)) {
+      this.expect(T_ELLIPSIS);
+      const argument = this.parseMaybeAssign();
+      this.expect(T_BRACER);
+      return new NJSXSpreadAttribute(this, s, sl, argument);
+    }
+    const name = this.jsxParseNamespacedName();
+    const value = this.eat(T_EQ) ? this.jsxParseAttributeValue() : null;
+    return new NJSXAttribute(this, s, sl, name, value);
+  }
+
+  jsxParseOpeningElementAt(s, sl) {
+    const base = this.sp;
+    const nodeName = this.jsxParseElementName();
+    while (this.type !== T_SLASH && this.type !== T_JSXTAGEND) {
+      const a = this.jsxParseAttribute();
+      this.stk[this.sp++] = a;
+    }
+    const attributes = listFrom(this, base);
+    const selfClosing = this.eat(T_SLASH);
+    this.expect(T_JSXTAGEND);
+    return nodeName ? new NJSXOpeningElement(this, s, sl, attributes, nodeName, selfClosing) : new NJSXOpeningFragment(this, s, sl, attributes, selfClosing);
+  }
+
+  jsxParseClosingElementAt(s, sl) {
+    const nodeName = this.jsxParseElementName();
+    this.expect(T_JSXTAGEND);
+    return nodeName ? new NJSXClosingElement(this, s, sl, nodeName) : new NJSXClosingFragment(this, s, sl);
+  }
+
+  jsxParseElementAt(s, sl) {
+    const base = this.sp;
+    const openingElement = this.jsxParseOpeningElementAt(s, sl);
+    let closingElement = null;
+    if (!openingElement.selfClosing) {
+      contents: for (;;) {
+        switch (this.type) {
+          case T_JSXTAGSTART: {
+            const cs = this.start, csl = this.startLoc;
+            this.next();
+            if (this.eat(T_SLASH)) {
+              closingElement = this.jsxParseClosingElementAt(cs, csl);
+              break contents;
+            }
+            const el = this.jsxParseElementAt(cs, csl);
+            this.stk[this.sp++] = el;
+            break;
+          }
+          case T_JSXTEXT: {
+            const t = this.parseExprAtom();
+            this.stk[this.sp++] = t;
+            break;
+          }
+          case T_BRACEL: {
+            const c = this.jsxParseExpressionContainer();
+            this.stk[this.sp++] = c;
+            break;
+          }
+          default:
+            this.unexpected();
+        }
+      }
+      if (jsxQualifiedName(closingElement.name) !== jsxQualifiedName(openingElement.name)) bail();
+    }
+    const children = listFrom(this, base);
+    const isElement = !!openingElement.name;
+    // "Adjacent JSX elements must be wrapped in an enclosing tag"
+    if (this.type === T_RELATIONAL && this.value === "<") bail();
+    return isElement
+      ? new NJSXElement(this, s, sl, openingElement, closingElement, children)
+      : new NJSXFragment(this, s, sl, openingElement, closingElement, children);
+  }
+
+  jsxParseElement() {
+    const s = this.start, sl = this.startLoc;
+    this.next();
+    return this.jsxParseElementAt(s, sl);
+  }
+
   parseLiteral(value) {
     const s = this.start, sl = this.startLoc;
     const raw = this.input.slice(this.start, this.end);
@@ -3130,9 +3840,9 @@ export class FastParser {
     let val;
     this.next();
     const innerStartPos = this.start, innerStartLoc = this.startLoc;
-    const exprList = [];
+    const base = this.sp;
     let first = true, lastIsComma = false;
-    const rde = new DestructuringErrors(), oldYieldPos = this.yieldPos, oldAwaitPos = this.awaitPos;
+    const rde = rdeAcquire(this), oldYieldPos = this.yieldPos, oldAwaitPos = this.awaitPos;
     let spreadStart;
     this.yieldPos = 0;
     this.awaitPos = 0;
@@ -3143,25 +3853,30 @@ export class FastParser {
         break;
       } else if (this.type === T_ELLIPSIS) {
         spreadStart = this.start;
-        exprList.push(this.parseRestBinding());
+        const r = this.parseRestBinding();
+        this.stk[this.sp++] = r;
         if (this.type === T_COMMA) bail();
         break;
       } else {
-        exprList.push(this.parseMaybeAssign(false, rde));
+        const e = this.parseMaybeAssign(false, rde);
+        this.stk[this.sp++] = e;
       }
     }
-    const innerEndPos = this.lastTokEnd, innerEndLoc = this.lastTokEndLoc;
+    const exprList = listFrom(this, base);
+    const innerEndPos = this.lastTokEnd, innerEndLoc = this.leloc();
     this.expect(T_PARENR);
     if (canBeArrow && !this.canInsertSemicolon() && this.eat(T_ARROW)) {
       this.checkPatternErrors(rde, false);
+      this.rdeDepth--;
       this.checkYieldAwaitInDefaultParams();
       this.yieldPos = oldYieldPos;
       this.awaitPos = oldAwaitPos;
       return this.parseArrowExpression(s, sl, exprList, false, forInit);
     }
-    if (!exprList.length || lastIsComma) this.unexpected();
-    if (spreadStart) this.unexpected();
+    if (!exprList.length || lastIsComma) this.unexpected(this.lastTokStart);
+    if (spreadStart) this.unexpected(spreadStart);
     this.checkExpressionErrors(rde, true);
+    this.rdeDepth--;
     this.yieldPos = oldYieldPos || this.yieldPos;
     this.awaitPos = oldAwaitPos || this.awaitPos;
     if (exprList.length > 1) {
@@ -3193,7 +3908,7 @@ export class FastParser {
     if (callee.type === "Super") bail();
     let args;
     if (this.eat(T_PARENL)) args = this.parseExprList(T_PARENR, true, false);
-    else args = empty;
+    else args = emptyNewArguments;
     return new NNewExpression(this, s, sl, callee, args);
   }
 
@@ -3214,17 +3929,38 @@ export class FastParser {
   parseTemplate(isTagged) {
     const s = this.start, sl = this.startLoc;
     this.next();
-    const expressions = [];
     let curElt = this.parseTemplateElement(isTagged);
-    const quasis = [curElt];
+    if (curElt.tail) {
+      this.next();
+      return new NTemplateLiteral(this, s, sl, [], [curElt]);
+    }
+    // quasi, expression, quasi, ... interleaved on the list stack
+    const base = this.sp;
+    this.stk[this.sp++] = curElt;
     while (!curElt.tail) {
       if (this.type === T_EOF) bail();
       this.expect(T_DOLLARBRACEL);
-      expressions.push(this.parseExpression());
+      const e = this.parseExpression();
+      this.stk[this.sp++] = e;
       this.expect(T_BRACER);
-      quasis.push((curElt = this.parseTemplateElement(isTagged)));
+      curElt = this.parseTemplateElement(isTagged);
+      this.stk[this.sp++] = curElt;
     }
     this.next();
+    const st = this.stk, cnt = this.sp - base;
+    this.sp = base;
+    let expressions, quasis;
+    if (cnt === 3) {
+      expressions = [st[base + 1]];
+      quasis = [st[base], st[base + 2]];
+    } else if (cnt === 5) {
+      expressions = [st[base + 1], st[base + 3]];
+      quasis = [st[base], st[base + 2], st[base + 4]];
+    } else {
+      expressions = [];
+      quasis = [];
+      for (let i = 0; i < cnt; i++) (i & 1 ? expressions : quasis).push(st[base + i]);
+    }
     return new NTemplateLiteral(this, s, sl, expressions, quasis);
   }
 
@@ -3242,8 +3978,8 @@ export class FastParser {
   parseObj(isPattern, rde) {
     const s = this.start, sl = this.startLoc;
     let first = true;
-    const propHash = {};
-    const properties = [];
+    let sawProto = false;
+    const base = this.sp;
     this.next();
     while (!this.eat(T_BRACER)) {
       if (!first) {
@@ -3251,9 +3987,10 @@ export class FastParser {
         if (this.afterTrailingComma(T_BRACER)) break;
       } else first = false;
       const prop = this.parseProperty(isPattern, rde);
-      if (!isPattern) this.checkPropClash(prop, propHash, rde);
-      properties.push(prop);
+      if (!isPattern) sawProto = this.checkPropClash(prop, sawProto, rde);
+      this.stk[this.sp++] = prop;
     }
+    const properties = listFrom(this, base);
     return isPattern ? new NObjectPattern(this, s, sl, properties) : new NObjectExpression(this, s, sl, properties);
   }
 
@@ -3360,11 +4097,20 @@ export class FastParser {
     this.expect(T_PARENL);
     const params = this.parseBindingList(T_PARENR, false, true);
     this.checkYieldAwaitInDefaultParams();
-    const fb = this.parseFunctionBody(params, null, false, true, false);
+    if (this.bodyOverride !== null) {
+      const node = this.overrideFunctionNode(s, sl, null, generator, async, params);
+      this.runBodyOverride(node, false, true, false);
+      this.yieldPos = oldYieldPos;
+      this.awaitPos = oldAwaitPos;
+      this.awaitIdentPos = oldAwaitIdentPos;
+      return finishNodeAt(this, node, "FunctionExpression", this.lastTokEnd, this.leloc());
+    }
+    const body = this.parseFunctionBody(params, null, false, true, false);
+    const expression = this.fbExpression;
     this.yieldPos = oldYieldPos;
     this.awaitPos = oldAwaitPos;
     this.awaitIdentPos = oldAwaitIdentPos;
-    return new NFunctionExpression(this, s, sl, null, fb.expression, generator, async, params, fb.body);
+    return new NFunctionExpression(this, s, sl, null, expression, generator, async, params, body);
   }
 
   parseArrowExpression(s, sl, params, isAsync, forInit) {
@@ -3375,14 +4121,23 @@ export class FastParser {
     this.awaitPos = 0;
     this.awaitIdentPos = 0;
     params = this.toAssignableList(params, true);
-    const fb = this.parseFunctionBody(params, null, true, false, forInit);
+    if (this.bodyOverride !== null) {
+      const node = this.overrideFunctionNode(s, sl, null, false, async, params);
+      this.runBodyOverride(node, true, false, forInit);
+      this.yieldPos = oldYieldPos;
+      this.awaitPos = oldAwaitPos;
+      this.awaitIdentPos = oldAwaitIdentPos;
+      return finishNodeAt(this, node, "ArrowFunctionExpression", this.lastTokEnd, this.leloc());
+    }
+    const body = this.parseFunctionBody(params, null, true, false, forInit);
+    const expression = this.fbExpression;
     this.yieldPos = oldYieldPos;
     this.awaitPos = oldAwaitPos;
     this.awaitIdentPos = oldAwaitIdentPos;
-    return new NArrowFunctionExpression(this, s, sl, null, fb.expression, false, async, params, fb.body);
+    return new NArrowFunctionExpression(this, s, sl, null, expression, false, async, params, body);
   }
 
-  // returns { body, expression }
+  // returns the body; sets this.fbExpression (read it right after the call)
   parseFunctionBody(params, id, isArrowFunction, isMethod, forInit) {
     const isExpression = isArrowFunction && this.type !== T_BRACEL;
     const oldStrict = this.strict;
@@ -3409,16 +4164,22 @@ export class FastParser {
       this.labels = oldLabels;
     }
     this.exitScope();
-    return { body, expression };
+    this.fbExpression = expression;
+    return body;
   }
 
   checkParams(params, allowDuplicates) {
-    const nameHash = allowDuplicates ? null : Object.create(null);
+    // (names seen so far: a reused array; checkLVal* never re-enters here)
+    let nameHash = null;
+    if (!allowDuplicates) {
+      nameHash = this.clashNames;
+      nameHash.length = 0;
+    }
     for (let i = 0; i < params.length; i++) this.checkLValInnerPattern(params[i], BIND_VAR, nameHash);
   }
 
   parseExprList(close, allowTrailingComma, allowEmpty, rde) {
-    const elts = [];
+    const base = this.sp;
     let first = true;
     while (!this.eat(close)) {
       if (!first) {
@@ -3433,9 +4194,9 @@ export class FastParser {
       } else {
         elt = this.parseMaybeAssign(false, rde);
       }
-      elts.push(elt);
+      this.stk[this.sp++] = elt;
     }
-    return elts;
+    return listFrom(this, base);
   }
 
   checkUnreserved(ref) {
@@ -3580,16 +4341,16 @@ function flushComments(p, options) {
 
 // acorn's Parser.parseExpressionAt: new Parser(options, input, pos),
 // nextToken(), parseExpression() -- no end-of-input or top-level checks
-export function fastParseExpressionAt(input, pos, options) {
-  const p = new FastParser(options, input, pos);
+export function fastParseExpressionAt(input, pos, options, jsx, bodyOverride) {
+  const p = new FastParser(options, input, pos, jsx, bodyOverride);
   p.nextToken();
   const expr = p.parseExpression();
   flushComments(p, options);
   return expr;
 }
 
-export function fastParse(input, options) {
-  const p = new FastParser(options, input);
+export function fastParse(input, options, jsx, bodyOverride) {
+  const p = new FastParser(options, input, 0, jsx, bodyOverride);
   const s = p.start, sl = p.startLoc;
   p.nextToken();
   const program = p.parseTopLevel(s, sl);

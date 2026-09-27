@@ -170,44 +170,63 @@ function writeBytes(bytes) {
   return p;
 }
 
+// Ended streaming sessions are kept (a few, with big buffers released) and
+// re-initialized by the next constructor: equivalent to a fresh state, but
+// avoids allocating and zeroing windows/hash tables for every stream.
+const POOL_MAX = 4, POOL_TRIM = 1 << 20;
+const freeDef = [], freeInf = [];
+function releaseDef(s) {
+  if (freeDef.length < POOL_MAX) { W.def_trim(s, POOL_TRIM); freeDef.push(s); } else W.def_destroy(s);
+}
+function releaseInf(s) {
+  if (freeInf.length < POOL_MAX) { W.inf_trim(s, POOL_TRIM); freeInf.push(s); } else W.inf_destroy(s);
+}
+
+let defPool = 0;
+
 // set up a wasm deflate session per pako's Deflate constructor; throws like it
 function defSession(prev, opt, streaming) {
   const s = W.def_init(prev, opt.level, opt.method, opt.windowBits, opt.memLevel, opt.strategy, opt.chunkSize, streaming ? 1 : 0);
   if (!s) {
     const st = m32[res() + R_STATUS];
+    if (prev && streaming) freeDef.push(prev); // left intact by a failed re-init
     throw new Error(msg[st]);
   }
-  if (opt.header) {
-    const h = opt.header;
-    const extra = h.extra ? new Uint8Array(h.extra) : null;
-    const name = h.name ? latin1Bytes(h.name) : null;
-    const comment = h.comment ? latin1Bytes(h.comment) : null;
-    const allocs = [];
-    const put = (b) => {
-      if (!b) return [0, -1];
-      const p = writeBytes(b);
-      allocs.push([p, b.length]);
-      return [p, b.length];
-    };
-    const [ep, el] = put(extra);
-    const [np, nl] = put(name);
-    const [cp, cl] = put(comment);
-    W.def_set_header(s, h.text ? 1 : 0, h.hcrc ? 1 : 0, (h.time | 0) >>> 0, (h.os & 0xff) >>> 0, ep, el, np, nl, cp, cl);
-    for (const [p, n] of allocs) W.fz_free(p, n);
-  }
-  if (opt.dictionary) {
-    let dict = opt.dictionary;
-    if (typeof dict === "string") dict = string2buf(dict);
-    else if (isAB(dict)) dict = new Uint8Array(dict);
-    const p = writeBytes(dict);
-    const st = W.def_set_dict(s, p, dict.length);
-    W.fz_free(p, dict.length);
-    if (st !== Z_OK) throw new Error(msg[st]);
+  if (!streaming) defPool = s;
+  try {
+    if (opt.header) {
+      const h = opt.header;
+      const extra = h.extra ? new Uint8Array(h.extra) : null;
+      const name = h.name ? latin1Bytes(h.name) : null;
+      const comment = h.comment ? latin1Bytes(h.comment) : null;
+      const allocs = [];
+      const put = (b) => {
+        if (!b) return [0, -1];
+        const p = writeBytes(b);
+        allocs.push([p, b.length]);
+        return [p, b.length];
+      };
+      const [ep, el] = put(extra);
+      const [np, nl] = put(name);
+      const [cp, cl] = put(comment);
+      W.def_set_header(s, h.text ? 1 : 0, h.hcrc ? 1 : 0, (h.time | 0) >>> 0, (h.os & 0xff) >>> 0, ep, el, np, nl, cp, cl);
+      for (const [p, n] of allocs) W.fz_free(p, n);
+    }
+    if (opt.dictionary) {
+      let dict = opt.dictionary;
+      if (typeof dict === "string") dict = string2buf(dict);
+      else if (isAB(dict)) dict = new Uint8Array(dict);
+      const p = writeBytes(dict);
+      const st = W.def_set_dict(s, p, dict.length);
+      W.fz_free(p, dict.length);
+      if (st !== Z_OK) throw new Error(msg[st]);
+    }
+  } catch (e) {
+    if (streaming) releaseDef(s);
+    throw e;
   }
   return s;
 }
-
-let defPool = 0;
 
 function deflateOnce(input, options) {
   const opt = assign(
@@ -225,7 +244,6 @@ function deflateOnce(input, options) {
   if (!fastDeflateOpts(opt)) return null;
 
   const s = defSession(defPool, opt, false);
-  defPool = s;
   const inPtr = W.def_input(s, data.length);
   views();
   m8.set(data, inPtr);
@@ -264,6 +282,20 @@ export function gzip(input, options) {
 // ---- streaming Deflate class
 
 const S = Symbol("fastpako");
+const S_OPT = Symbol("fastpako.options");
+const taTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
+const isTypedArray = (x) => taTag.call(x) !== undefined; // any TypedArray, not DataView
+// nothing has gone through the stream yet
+const untouched = (self) => self.strm.total_in === 0 && self.strm.total_out === 0;
+// continue this (still untouched) stream in the original implementation
+function toVendor(self, VClass, kind, s) {
+  if (kind === 0) releaseDef(s);
+  else releaseInf(s);
+  self[S] = null;
+  if (registry) registry.unregister(self);
+  VClass.call(self, self[S_OPT]);
+  return self;
+}
 const registry = typeof FinalizationRegistry === "function"
   ? new FinalizationRegistry(([kind, s]) => { if (W) (kind === 0 ? W.def_destroy : W.inf_destroy)(s); })
   : null;
@@ -317,8 +349,9 @@ export function Deflate(options) {
   this.chunks = [];
   this.strm = new ZStream();
   this.strm.avail_out = 0;
-  const s = defSession(0, opt, true);
+  const s = defSession(freeDef.length ? freeDef.pop() : 0, opt, true);
   Object.defineProperty(this, S, { value: s, writable: true });
+  Object.defineProperty(this, S_OPT, { value: options, writable: true });
   this.strm.state = {};
   if (opt.dictionary) this._dict_set = true;
   if (registry) registry.register(this, [0, s], this);
@@ -335,7 +368,19 @@ Deflate.prototype.push = function (data, flush_mode) {
   if (typeof data === "string") input = string2buf(data);
   else if (isAB(data)) input = new Uint8Array(data);
   else input = data;
-  if (!(input instanceof Uint8Array)) input = Uint8Array.from(input, (v) => v);
+  if (!(input instanceof Uint8Array)) {
+    // typed arrays are read exactly like pako reads them (via set());
+    // other inputs are fed to pako's JS zlib as-is, with results we
+    // cannot mirror: an untouched stream is handed to the original
+    if (!isTypedArray(input)) {
+      if (untouched(this)) return toVendor(this, VDeflate, 0, s).push(data, flush_mode);
+      // mid-stream: pako throws when zlib reads such input (strm.input is
+      // read with .length, then .subarray): same errors, generated alike
+      const strm = { input };
+      if (strm.input.length !== 0) strm.input.subarray();
+    }
+    input = Uint8Array.from(input, (v) => v);
+  }
   const strm = this.strm;
   strm.input = input;
   const chunkSize = this.options.chunkSize;
@@ -364,7 +409,7 @@ Deflate.prototype.push = function (data, flush_mode) {
     strm.state = null;
     this.onEnd(st);
     this.ended = true;
-    W.def_destroy(s);
+    releaseDef(s);
     this[S] = 0;
     if (registry) registry.unregister(this);
     return st === Z_OK;
@@ -413,8 +458,10 @@ function infSession(prev, opt, streaming) {
   const s = W.inf_init(prev, opt.windowBits, opt.chunkSize, streaming ? 1 : 0, opt.to === "string" ? 1 : 0);
   if (!s) {
     const st = m32[res() + R_STATUS];
+    if (prev && streaming) freeInf.push(prev); // still a valid session
     throw new Error(msg[st]);
   }
+  if (!streaming) infPool = s;
   if (opt.dictionary) {
     let dict = opt.dictionary;
     if (typeof dict === "string") dict = string2buf(dict);
@@ -423,7 +470,10 @@ function infSession(prev, opt, streaming) {
     const p = writeBytes(dict);
     const st = W.inf_set_dict(s, p, dict.length, opt.raw ? 1 : 0);
     W.fz_free(p, dict.length);
-    if (opt.raw && st !== Z_OK) throw new Error(msg[st]);
+    if (opt.raw && st !== Z_OK) {
+      if (streaming) releaseInf(s);
+      throw new Error(msg[st]);
+    }
   }
   return s;
 }
@@ -438,7 +488,6 @@ function inflateOnce(input, options) {
   else return UNDEF;
   if (!fastInflateOpts(opt)) return UNDEF;
   const s = infSession(infPool, opt, false);
-  infPool = s;
   const inPtr = W.inf_input(s, data.length);
   views();
   m8.set(data, inPtr);
@@ -515,8 +564,9 @@ export function Inflate(options) {
   this.chunks = [];
   this.strm = new ZStream();
   this.strm.avail_out = 0;
-  const s = infSession(0, opt, true);
+  const s = infSession(freeInf.length ? freeInf.pop() : 0, opt, true);
   Object.defineProperty(this, S, { value: s, writable: true });
+  Object.defineProperty(this, S_OPT, { value: options, writable: true });
   Object.defineProperty(this, "_hv", { value: 0, writable: true });
   this.strm.state = {};
   this.header = new GZheader();
@@ -551,7 +601,16 @@ Inflate.prototype.push = function (data, flush_mode) {
   else fm = flush_mode === true ? Z_FINISH : Z_NO_FLUSH;
   const ab = isAB(data);
   let input = ab ? new Uint8Array(data) : data;
-  if (!(input instanceof Uint8Array)) input = Uint8Array.from(input, (v) => v);
+  if (!(input instanceof Uint8Array)) {
+    // pako's JS inflate reads element values as they are: only byte
+    // arrays convert exactly; anything else on an untouched stream is
+    // handed to the original
+    if (!(input instanceof Uint8ClampedArray)) {
+      if (untouched(this)) return toVendor(this, VInflate, 1, s).push(data, flush_mode);
+      void input.length; // null / undefined throw here in pako too
+    }
+    input = Uint8Array.from(input, (v) => v);
+  }
   const strm = this.strm;
   strm.input = input;
   const chunkSize = this.options.chunkSize;
@@ -588,7 +647,7 @@ Inflate.prototype.push = function (data, flush_mode) {
     if (st === Z_OK) strm.state = null;
     this.onEnd(st);
     this.ended = true;
-    W.inf_destroy(s);
+    releaseInf(s);
     this[S] = 0;
     if (registry) registry.unregister(this);
     return st === Z_OK;

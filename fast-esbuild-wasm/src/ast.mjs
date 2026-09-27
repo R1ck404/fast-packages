@@ -316,6 +316,9 @@ export class NamespaceAlias {
 export class SymbolMap {
   constructor(sourceCount = 0) {
     this.symbolsForSource = new Array(sourceCount).fill(null);
+    // JS-only: source index -> true once a shared (frozen) symbol of that
+    // source has been copied for writing (see graph.writableSymbol)
+    this.sharedWritten = null;
   }
   get(ref) {
     return this.symbolsForSource[ref >>> REF_INNER_BITS][ref & REF_INNER_MASK];

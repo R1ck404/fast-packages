@@ -6313,5 +6313,12 @@ function tokenizer(input, options) {
 
 export { Node, Parser, Position, SourceLocation, TokContext, Token, TokenType, defaultOptions, getLineInfo, isIdentifierChar, isIdentifierStart, isNewLine, keywords as keywordTypes, lineBreak, lineBreakG, nonASCIIwhitespace, parse, parseExpressionAt, types as tokContexts, types$1 as tokTypes, tokenizer, version };
 // fast-acorn: internals used by the fast parser
-export { getOptions as _getOptions, RegExpValidationState as _RegExpValidationState, astralIdentifierStartCodes as _astralIdentifierStartCodes, astralIdentifierCodes as _astralIdentifierCodes, nonASCIIidentifierStart as _nonASCIIidentifierStart, nonASCIIidentifier as _nonASCIIidentifier };
+// (acorn's one-time "ecmaVersion is required" warning, with acorn's own flag)
+function warnAboutEcmaVersionOnce() {
+  if (!warnedAboutEcmaVersion && typeof console === "object" && console.warn) {
+    warnedAboutEcmaVersion = true;
+    console.warn("Since Acorn 8.0.0, options.ecmaVersion is required.\nDefaulting to 2020, but this will stop working in the future.");
+  }
+}
+export { warnAboutEcmaVersionOnce as _warnAboutEcmaVersionOnce, empty as _emptyNewArguments, empty$1 as _emptyImportSpecifiers, getOptions as _getOptions, RegExpValidationState as _RegExpValidationState, astralIdentifierStartCodes as _astralIdentifierStartCodes, astralIdentifierCodes as _astralIdentifierCodes, nonASCIIidentifierStart as _nonASCIIidentifierStart, nonASCIIidentifier as _nonASCIIidentifier };
 

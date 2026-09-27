@@ -172,6 +172,18 @@ for (let c = 48; c <= 57; c++) asciiIdent[c] = 2;
 export function isIdentifier(text) {
   const n = text.length;
   if (n === 0) return false;
+  // (JS-only: ASCII fast path, the same result as the loop below)
+  let c0 = text.charCodeAt(0);
+  if (c0 < 0x80) {
+    if (asciiIdent[c0] !== 1) return false;
+    let j = 1;
+    for (; j < n; j++) {
+      c0 = text.charCodeAt(j);
+      if (c0 >= 0x80) break;
+      if (asciiIdent[c0] === 0) return false;
+    }
+    if (j === n) return true;
+  }
   for (let i = 0; i < n; i++) {
     let c = text.charCodeAt(i);
     if (c >= 0xd800 && c <= 0xdbff && i + 1 < n) {
@@ -195,6 +207,18 @@ export function isIdentifier(text) {
 export function isIdentifierES5AndESNext(text) {
   const n = text.length;
   if (n === 0) return false;
+  // (JS-only: ASCII fast path, the same result as the loop below)
+  let c0 = text.charCodeAt(0);
+  if (c0 < 0x80) {
+    if (asciiIdent[c0] !== 1) return false;
+    let j = 1;
+    for (; j < n; j++) {
+      c0 = text.charCodeAt(j);
+      if (c0 >= 0x80) break;
+      if (asciiIdent[c0] === 0) return false;
+    }
+    if (j === n) return true;
+  }
   for (let i = 0; i < n; i++) {
     let c = text.charCodeAt(i);
     if (c >= 0xd800 && c <= 0xdbff && i + 1 < n) {

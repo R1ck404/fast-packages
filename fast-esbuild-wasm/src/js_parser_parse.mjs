@@ -265,6 +265,29 @@ function scopeMemberCompare(a, b) {
   return refSource(a.ref) - refSource(b.ref);
 }
 
+// Stable sort with scopeMemberCompare (same result as Array.prototype.sort).
+// Members are usually already in order, and small lists use an insertion sort
+// instead of the builtin (which allocates a scratch copy).
+function sortScopeMembers(a) {
+  const n = a.length;
+  let i = 1;
+  while (i < n && scopeMemberCompare(a[i - 1], a[i]) <= 0) i++;
+  if (i >= n) return;
+  if (n > 64) {
+    a.sort(scopeMemberCompare);
+    return;
+  }
+  for (; i < n; i++) {
+    const x = a[i];
+    let j = i - 1;
+    while (j >= 0 && scopeMemberCompare(a[j], x) > 0) {
+      a[j + 1] = a[j];
+      j--;
+    }
+    a[j + 1] = x;
+  }
+}
+
 export function defineValueCanBeUsedInAssignTarget(data) {
   switch (data.k) {
     case E_IDENTIFIER:
@@ -444,7 +467,8 @@ export const parseMethods = {
     parent.children.pop();
 
     // Reparent our child scopes into our parent
-    for (const scope of toFlatten.children) {
+    for (let $i43 = 0, $a43 = toFlatten.children; $i43 < $a43.length; $i43++) {
+      const scope = $a43[$i43];
       scope.parent = parent;
       parent.children.push(scope);
     }
@@ -664,7 +688,8 @@ export const parseMethods = {
     // to be a module). We might only encounter an "export {}" clause at the end
     // of the file.
     if ((scope.strictMode !== SloppyMode && scope.kind === ScopeBlock) || (scope.parent === null && p.isFileConsideredESM)) {
-      for (const replaced of scope.replaced) {
+      for (let $i44 = 0, $a44 = scope.replaced; $i44 < $a44.length; $i44++) {
+        const replaced = $a44[$i44];
         const symbol = p.symbols[refInner(replaced.ref)];
         if (symbolKindIsFunction(symbol.kind)) {
           const member = scope.members.get(symbol.originalName);
@@ -678,11 +703,11 @@ export const parseMethods = {
       }
     }
 
-    if (!scopeKindStopsHoisting(scope.kind)) {
+    if (!scopeKindStopsHoisting(scope.kind) && scope.members.size > 0) { // (JS-only: skip the empty case)
       // We create new symbols in the loop below, so the iteration order of the
       // loop must be deterministic to avoid generating different minified names
       const sortedMembers = Array.from(scope.members.values());
-      sortedMembers.sort(scopeMemberCompare);
+      sortScopeMembers(sortedMembers);
 
       nextMember: for (let member of sortedMembers) {
         let symbol = p.symbols[refInner(member.ref)];
@@ -822,7 +847,8 @@ export const parseMethods = {
       }
     }
 
-    for (const child of scope.children) {
+    for (let $i45 = 0, $a45 = scope.children; $i45 < $a45.length; $i45++) {
+      const child = $a45[$i45];
       p.hoistSymbols(child);
     }
   },
@@ -1351,7 +1377,8 @@ export const parseMethods = {
                   opts.tsDeclareRange = nameRange;
                   const scopeIndex = p.scopesInOrder.length;
 
-                  const [prop, ok] = p.parseProperty(startLoc, kind, opts, null);
+                  const $d101 = p.parseProperty(startLoc, kind, opts, null);
+                  const prop = $d101[0], ok = $d101[1];
                   if (
                     ok &&
                     prop.kind === PropertyField &&
@@ -1395,7 +1422,8 @@ export const parseMethods = {
                   opts.isTSAbstract = true;
                   const scopeIndex = p.scopesInOrder.length;
 
-                  const [prop, ok] = p.parseProperty(startLoc, kind, opts, null);
+                  const $d102 = p.parseProperty(startLoc, kind, opts, null);
+                  const prop = $d102[0], ok = $d102[1];
                   if (
                     ok &&
                     prop.kind === PropertyField &&
@@ -1688,7 +1716,8 @@ export const parseMethods = {
       // Only allow omitting the body if we're parsing TypeScript class
       data.allowMissingBodyForTypeScript = p.options.ts.parse && opts.isClass;
 
-      const [fn, hadBody] = p.parseFn(null, opts.classKeyword, opts.decoratorContext, data);
+      const $d103 = p.parseFn(null, opts.classKeyword, opts.decoratorContext, data);
+      const fn = $d103[0], hadBody = $d103[1];
 
       // "class Foo { foo(): void; foo(): void {} }"
       if (!hadBody) {
@@ -2256,7 +2285,8 @@ export const parseMethods = {
           item = spread.value;
           isSpread = true;
         }
-        const [binding, initializerOrNil, log] = p.convertExprToBindingAndInitializer(item, invLog, isSpread);
+        const $d104 = p.convertExprToBindingAndInitializer(item, invLog, isSpread);
+        const binding = $d104[0], initializerOrNil = $d104[1], log = $d104[2];
         invLog = log;
         args.push(new Arg(binding, initializerOrNil));
       }
@@ -2416,7 +2446,8 @@ export const parseMethods = {
               // (markSyntaxFeature(compat.NestedRestBinding) no-op)
             }
           }
-          const [binding, initializerOrNil, log] = p.convertExprToBindingAndInitializer(item, invLog, isSpread);
+          const $d105 = p.convertExprToBindingAndInitializer(item, invLog, isSpread);
+          const binding = $d105[0], initializerOrNil = $d105[1], log = $d105[2];
           invLog = log;
           items.push(new ArrayBinding(binding, initializerOrNil, item.loc));
         }
@@ -2429,7 +2460,8 @@ export const parseMethods = {
         }
         invLog.syntaxFeatures.push(new syntaxFeature(0 /* compat.Destructuring */, p.source.rangeOfOperatorAfter(expr.loc, "{")));
         const properties = [];
-        for (const property of e.properties) {
+        for (let $i46 = 0, $a46 = e.properties; $i46 < $a46.length; $i46++) {
+          const property = $a46[$i46];
           if (propertyKindIsMethodDefinition(property.kind)) {
             invLog.invalidTokens.push(rangeOfIdentifier(p.source, property.key.loc));
             continue;
@@ -2709,7 +2741,8 @@ export const parseMethods = {
         if (p.lexer.legacyOctalLoc > loc) {
           legacyOctalLoc = p.lexer.legacyOctalLoc;
         }
-        const [parts, tailLegacyOctalLoc] = p.parseTemplateParts(false /* includeRaw */);
+        const $d106 = p.parseTemplateParts(false /* includeRaw */);
+        const parts = $d106[0], tailLegacyOctalLoc = $d106[1];
         if (tailLegacyOctalLoc > 0) {
           legacyOctalLoc = tailLegacyOctalLoc;
         }
@@ -2956,7 +2989,8 @@ export const parseMethods = {
             }
           } else {
             // This property may turn out to be a type in TypeScript, which should be ignored
-            const [property, ok] = p.parseProperty(p.saveExprCommentsHere(), PropertyField, new propertyOpts(), selfErrors);
+            const $d107 = p.parseProperty(p.saveExprCommentsHere(), PropertyField, new propertyOpts(), selfErrors);
+            const property = $d107[0], ok = $d107[1];
             if (ok) {
               properties.push(property);
             }

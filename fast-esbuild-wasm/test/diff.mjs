@@ -3,7 +3,8 @@
 // files and option sets.
 //
 // usage: node test/diff.mjs [--limit N] [--dir path]... [--opts name,name] [--file path]
-//                           [--show N] [--stop] [--quiet]
+//                           [--show N] [--stop] [--quiet] [--no-nm]
+//   --no-nm   skip node_modules directories while walking --dir trees
 // Categories:
 //   ok            identical output
 //   bail          fast path declined (falls back to esbuild) — fine
@@ -20,6 +21,8 @@ import { createRequire } from "node:module";
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const esbuild = require("esbuild");
+// Check every hit of the runtime print cache against a fresh print
+globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__ = true;
 const { fastTransform, stats } = await import("../src/transform.mjs");
 
 const args = process.argv.slice(2);
@@ -34,6 +37,7 @@ const stopOnFail = args.includes("--stop");
 const quiet = args.includes("--quiet");
 const onlyOpts = getArg("--opts", null)?.split(",");
 const singleFile = getArg("--file", null);
+const skipNodeModules = args.includes("--no-nm");
 
 const importMetaDefine = {
   "import.meta.url": "import_meta.url",
@@ -142,7 +146,7 @@ function* walk(dir, seen) {
   for (const e of entries) {
     const p = join(dir, e.name);
     if (e.isDirectory()) {
-      if (e.name === ".git") continue;
+      if (e.name === ".git" || (skipNodeModules && e.name === "node_modules")) continue;
       yield* walk(p, seen);
     } else if (e.isFile() || e.isSymbolicLink()) {
       if (!kindOf(p)) continue;

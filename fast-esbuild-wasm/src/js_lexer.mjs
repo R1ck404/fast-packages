@@ -1738,8 +1738,12 @@ export class Lexer {
             const bucket = KEYWORD_BUCKETS[len * 26 + (cp - 97)];
             if (bucket !== undefined) {
               for (let k = 0; k < bucket.length; k += 2) {
-                if (contents.startsWith(bucket[k], start)) {
-                  identifier = bucket[k];
+                // (the first letter and the length already match)
+                const text = bucket[k];
+                let m = 1;
+                while (m < len && contents.charCodeAt(start + m) === text.charCodeAt(m)) m++;
+                if (m === len) {
+                  identifier = text;
                   token = bucket[k + 1];
                   break;
                 }
@@ -2259,7 +2263,9 @@ export class Lexer {
   // store to "lexer.end" before calling "lexer.syntaxError()" if relevant.
   // Otherwise returns "[decoded, true, 0]".
   tryToDecodeEscapeSequences(start, text, reportErrors) {
-    let decoded = "";
+    // (JS-only: the decoded pieces, joined at the end; appending with += would
+    // build a deep rope for strings with many escapes)
+    const decoded = [];
     const n = text.length;
     let i = 0;
 
@@ -2273,7 +2279,7 @@ export class Lexer {
         i++;
         continue;
       }
-      if (runStart < i) decoded += text.slice(runStart, i);
+      if (runStart < i) decoded.push(text.slice(runStart, i));
       const width = 1;
       i += width;
 
@@ -2293,7 +2299,7 @@ export class Lexer {
         }
 
         // Convert '\r' into '\n'
-        decoded += "\n";
+        decoded.push("\n");
         runStart = i;
         continue;
       }
@@ -2522,13 +2528,14 @@ export class Lexer {
       }
 
       if (!skip) {
-        decoded += runeToUTF16(value);
+        decoded.push(runeToUTF16(value));
       }
       runStart = i;
     }
 
-    if (runStart < n) decoded += runStart === 0 ? text : text.slice(runStart);
-    return [decoded, true, 0];
+    if (runStart === 0) return [text, true, 0];
+    if (runStart < n) decoded.push(text.slice(runStart));
+    return [decoded.join(""), true, 0];
   }
 
   rescanCloseBraceAsTemplateToken() {

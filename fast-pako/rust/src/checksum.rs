@@ -110,7 +110,7 @@ static CRC_TABLES: [[u32; 256]; 8] = make_crc_tables();
 const POLY: u32 = 0xedb88320;
 
 /// a*b mod P (reflected), zlib multmodp
-const fn multmodp(a: u32, mut b: u32) -> u32 {
+pub(crate) const fn multmodp(a: u32, mut b: u32) -> u32 {
     let mut m: u32 = 1 << 31;
     let mut p: u32 = 0;
     loop {
@@ -185,7 +185,139 @@ fn crc32_1(crc: u32, buf: &[u8]) -> u32 {
     !c
 }
 
+// ---- sparse-relation reduction ("Chorba"-style) for large buffers --------
+//
+// With y = x^64, the CRC-32 polynomial P divides
+//     Q(y) = y^300 + y^155 + y^117 + y^89 + 1
+// (found by a meet-in-the-middle search; checked by `chorba_relation` test).
+// The message is a polynomial with 64-bit little-endian words as
+// coefficients of y (word 0 = highest degree, bit order reflected like the
+// table CRC). A word w at stream position i with at least 300 words after
+// it can therefore be replaced by w at positions i+145, i+183, i+211 and
+// i+300 without changing the value mod P. Doing this for every word except
+// the last 300 leaves a message that is zero except for those 300 words,
+// whose CRC (register starting at 0) is the CRC of the whole buffer. The
+// initial register value is folded in by XORing it into the first 4 bytes.
+//
+// Pull form: e[i] = in[i] ^ e[i-145] ^ e[i-183] ^ e[i-211] ^ e[i-300]
+// (e[j] = 0 for j < 0), computed for the eliminated words; the tail words
+// take contributions only from eliminated words.
+const C_SPAN: usize = 300;
+const C_O1: usize = 145;
+const C_O2: usize = 183;
+const C_O3: usize = 211;
+const C_O4: usize = 300;
+const C_BLK: usize = 2048;
+/// below this many bytes the table method is used
+const C_MIN: usize = 8 * C_SPAN * 3;
+
+#[repr(C, align(16))]
+struct Scratch([u64; C_SPAN + C_BLK + 2]);
+static mut C_SCR: Scratch = Scratch([0; C_SPAN + C_BLK + 2]);
+
+#[allow(static_mut_refs)]
+fn crc32_sparse(crc: u32, buf: &[u8]) -> u32 {
+    debug_assert!(buf.len() >= C_MIN);
+    let nw = buf.len() / 8;
+    let body = nw - C_SPAN; // words [0, body) are eliminated
+    let inp = buf.as_ptr();
+    unsafe {
+        let s = C_SCR.0.as_mut_ptr();
+        core::ptr::write_bytes(s, 0, C_SPAN);
+        let init = (!crc) as u64;
+        let mut i = 0usize;
+        while i < body {
+            let b = core::cmp::min(C_BLK, body - i);
+            let dst = s.add(C_SPAN);
+            let src = inp.add(8 * i);
+            let mut j = 0usize;
+            if i == 0 {
+                // first word carries the initial register value
+                let w = (src as *const u64).read_unaligned() ^ init;
+                *dst = w ^ *dst.sub(C_O1) ^ *dst.sub(C_O2) ^ *dst.sub(C_O3) ^ *dst.sub(C_O4);
+                j = 1;
+            }
+            sparse_block(src, dst, j, b);
+            // keep the last C_SPAN e values in front
+            core::ptr::copy(s.add(b), s, C_SPAN);
+            i += b;
+        }
+        // tail words (register starts at 0: init was folded into word 0,
+        // or into the tail's first word if nothing was eliminated)
+        let mut tail = [0u64; C_SPAN];
+        let e = s; // e[body - C_SPAN + k] = s[k]
+        for m in 0..C_SPAN {
+            let mut w = (inp.add(8 * (body + m)) as *const u64).read_unaligned();
+            if body + m == 0 {
+                w ^= init;
+            }
+            if m < C_O1 {
+                w ^= *e.add(C_SPAN + m - C_O1);
+            }
+            if m < C_O2 {
+                w ^= *e.add(C_SPAN + m - C_O2);
+            }
+            if m < C_O3 {
+                w ^= *e.add(C_SPAN + m - C_O3);
+            }
+            if m < C_O4 {
+                w ^= *e.add(C_SPAN + m - C_O4);
+            }
+            tail[m] = w.to_le();
+        }
+        let tb = core::slice::from_raw_parts(tail.as_ptr() as *const u8, 8 * C_SPAN);
+        let c = crc32_1(0xffff_ffff, tb);
+        crc32_1(c, &buf[8 * nw..])
+    }
+}
+
+/// dst[k] = src[k] ^ dst[k-O1] ^ dst[k-O2] ^ dst[k-O3] ^ dst[k-O4] for k in from..n
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+unsafe fn sparse_block(src: *const u8, dst: *mut u64, from: usize, n: usize) {
+    use core::arch::wasm32::*;
+    let mut k = from;
+    if k & 1 != 0 && k < n {
+        let w = (src.add(8 * k) as *const u64).read_unaligned();
+        *dst.add(k) = w ^ *dst.add(k).sub(C_O1) ^ *dst.add(k).sub(C_O2) ^ *dst.add(k).sub(C_O3) ^ *dst.add(k).sub(C_O4);
+        k += 1;
+    }
+    while k + 2 <= n {
+        let d = dst.add(k);
+        let v = v128_load(src.add(8 * k) as *const v128);
+        let a = v128_xor(v128_load(d.sub(C_O1) as *const v128), v128_load(d.sub(C_O2) as *const v128));
+        let b = v128_xor(v128_load(d.sub(C_O3) as *const v128), v128_load(d.sub(C_O4) as *const v128));
+        v128_store(d as *mut v128, v128_xor(v, v128_xor(a, b)));
+        k += 2;
+    }
+    if k < n {
+        let w = (src.add(8 * k) as *const u64).read_unaligned();
+        *dst.add(k) = w ^ *dst.add(k).sub(C_O1) ^ *dst.add(k).sub(C_O2) ^ *dst.add(k).sub(C_O3) ^ *dst.add(k).sub(C_O4);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+unsafe fn sparse_block(src: *const u8, dst: *mut u64, from: usize, n: usize) {
+    for k in from..n {
+        let w = u64::from_le((src.add(8 * k) as *const u64).read_unaligned());
+        *dst.add(k) = w ^ *dst.add(k).sub(C_O1) ^ *dst.add(k).sub(C_O2) ^ *dst.add(k).sub(C_O3) ^ *dst.add(k).sub(C_O4);
+    }
+}
+
+/// Table method only (reference for tests).
+pub fn crc32_tables(crc: u32, buf: &[u8]) -> u32 {
+    crc32_lanes(crc, buf)
+}
+
 pub fn crc32(crc: u32, buf: &[u8]) -> u32 {
+    if buf.len() >= C_MIN {
+        return crc32_sparse(crc, buf);
+    }
+    crc32_lanes(crc, buf)
+}
+
+fn crc32_lanes(crc: u32, buf: &[u8]) -> u32 {
     let t = &CRC_TABLES;
     let mut c = crc;
     let mut p = buf;

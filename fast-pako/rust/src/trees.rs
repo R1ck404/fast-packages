@@ -251,17 +251,19 @@ impl Deflate {
             self.bl_count[b] = 0;
         }
         let heap_max = self.heap_max;
-        let heap = self.heap;
+        // (a copy of the heap array was made here before: 1 KB per call)
+        let heap_p = self.heap.as_ptr();
+        let heap = |i: usize| -> u16 { unsafe { *heap_p.add(i) } };
         let mut overflow: i32 = 0;
         let mut opt_len = self.opt_len;
         let mut static_len = self.static_len;
         let mut bl_count = self.bl_count;
         {
             let tree = self.tree(k);
-            tree[heap[heap_max] as usize * 2 + 1] = 0;
+            tree[heap(heap_max) as usize * 2 + 1] = 0;
             let mut h = heap_max + 1;
             while h < HEAP_SIZE {
-                let n = heap[h] as usize;
+                let n = heap(h) as usize;
                 let mut bits = tree[tree[n * 2 + 1] as usize * 2 + 1] as usize + 1;
                 if bits > max_length {
                     bits = max_length;
@@ -304,7 +306,7 @@ impl Deflate {
                     let mut n = bl_count[bits];
                     while n != 0 {
                         h -= 1;
-                        let m = heap[h] as usize;
+                        let m = heap(h) as usize;
                         if m > max_code {
                             continue;
                         }
@@ -329,28 +331,35 @@ impl Deflate {
             TreeKind::D => (true, D_CODES),
             TreeKind::Bl => (false, BL_CODES),
         };
-        let stree: &[u16] = match k {
-            TreeKind::L => &ST.ltree[..],
-            TreeKind::D => &ST.dtree[..],
-            TreeKind::Bl => &[][..],
+        let stree: *const u16 = match k {
+            TreeKind::L => ST.ltree.as_ptr(),
+            TreeKind::D => ST.dtree.as_ptr(),
+            TreeKind::Bl => core::ptr::null(),
         };
-        let mut heap = self.heap;
-        let mut depth = self.depth;
+        let tree: *mut u16 = match k {
+            TreeKind::L => self.dyn_ltree.as_mut_ptr(),
+            TreeKind::D => self.dyn_dtree.as_mut_ptr(),
+            TreeKind::Bl => self.bl_tree.as_mut_ptr(),
+        };
+        // zlib's smaller(n, m) (freq, then depth <=) as one compare of
+        // key = freq << 10 | depth (depth < 1024: at most 572 nodes)
+        let heap = self.heap.as_mut_ptr();
+        let key = self.hkey.as_mut_ptr();
         let mut heap_len: usize = 0;
         let mut heap_max: usize = HEAP_SIZE;
         let mut max_code: i32 = -1;
         let mut opt_len = self.opt_len;
         let mut static_len = self.static_len;
-        {
-            let tree = self.tree(k);
+        unsafe {
             for n in 0..elems {
-                if tree[n * 2] != 0 {
+                let f = *tree.add(n * 2);
+                if f != 0 {
                     heap_len += 1;
-                    heap[heap_len] = n as u16;
+                    *heap.add(heap_len) = n as u16;
                     max_code = n as i32;
-                    depth[n] = 0;
+                    *key.add(n) = (f as u32) << 10;
                 } else {
-                    tree[n * 2 + 1] = 0;
+                    *tree.add(n * 2 + 1) = 0;
                 }
             }
             while heap_len < 2 {
@@ -361,46 +370,47 @@ impl Deflate {
                     0
                 };
                 heap_len += 1;
-                heap[heap_len] = node as u16;
-                tree[node * 2] = 1;
-                depth[node] = 0;
+                *heap.add(heap_len) = node as u16;
+                *tree.add(node * 2) = 1;
+                *key.add(node) = 1 << 10;
                 opt_len -= 1;
                 if has_stree {
-                    static_len -= stree[node * 2 + 1] as i64;
+                    static_len -= *stree.add(node * 2 + 1) as i64;
                 }
             }
             let mut n = heap_len >> 1;
             while n >= 1 {
-                pqdownheap(tree, &mut heap, &depth, heap_len, n);
+                pqdownheap(heap, key, heap_len, n);
                 n -= 1;
             }
             let mut node = elems;
             loop {
-                let n = heap[1] as usize;
-                heap[1] = heap[heap_len];
+                let n = *heap.add(1) as usize;
+                *heap.add(1) = *heap.add(heap_len);
                 heap_len -= 1;
-                pqdownheap(tree, &mut heap, &depth, heap_len, 1);
-                let m = heap[1] as usize;
+                pqdownheap(heap, key, heap_len, 1);
+                let m = *heap.add(1) as usize;
                 heap_max -= 1;
-                heap[heap_max] = n as u16;
+                *heap.add(heap_max) = n as u16;
                 heap_max -= 1;
-                heap[heap_max] = m as u16;
-                tree[node * 2] = tree[n * 2].wrapping_add(tree[m * 2]);
-                depth[node] = (if depth[n] >= depth[m] { depth[n] } else { depth[m] }) + 1;
-                tree[n * 2 + 1] = node as u16;
-                tree[m * 2 + 1] = node as u16;
-                heap[1] = node as u16;
+                *heap.add(heap_max) = m as u16;
+                let f = (*tree.add(n * 2)).wrapping_add(*tree.add(m * 2));
+                *tree.add(node * 2) = f;
+                let dn = *key.add(n) & 1023;
+                let dm = *key.add(m) & 1023;
+                *key.add(node) = ((f as u32) << 10) | (if dn >= dm { dn } else { dm }) + 1;
+                *tree.add(n * 2 + 1) = node as u16;
+                *tree.add(m * 2 + 1) = node as u16;
+                *heap.add(1) = node as u16;
                 node += 1;
-                pqdownheap(tree, &mut heap, &depth, heap_len, 1);
+                pqdownheap(heap, key, heap_len, 1);
                 if heap_len < 2 {
                     break;
                 }
             }
             heap_max -= 1;
-            heap[heap_max] = heap[1];
+            *heap.add(heap_max) = *heap.add(1);
         }
-        self.heap = heap;
-        self.depth = depth;
         self.heap_len = heap_len;
         self.heap_max = heap_max;
         self.opt_len = opt_len;
@@ -656,91 +666,93 @@ impl Deflate {
         }
     }
 
-    /// Send the block data with the given trees. 64-bit accumulator, written
-    /// out 32 bits at a time (so the byte parity matches zlib's 16-bit
-    /// writes), then normalized so bi_valid is in 1..=16 like zlib's.
+    /// Send the block data with the given trees.
+    ///
+    /// Each symbol is emitted with one combined (code | extra bits) value
+    /// from per-block tables and a branchless 64-bit bit writer (8-byte
+    /// store, advance by whole bytes). The bit stream is identical to zlib's
+    /// send_bits sequence; afterwards (pending, bi_buf, bi_valid) are set to
+    /// exactly the state zlib's 16-bit writer would have: it writes whole
+    /// 16-bit units from `pending`, so bi_valid = ((B - 1) mod 16) + 1 for B
+    /// bits sent since then (bi_valid is in 1..=16 after the END_BLOCK code).
     fn compress_block(&mut self, fixed: bool) {
-        let (ltree, dtree): (&[u16], &[u16]) = if fixed {
-            (&ST.ltree[..], &ST.dtree[..])
+        if fixed {
+            unsafe { self.compress_block_with(|lc| FIXED_CTAB[CT_LIT + lc], |lc| FIXED_CTAB[CT_LEN + lc], |c| FIXED_CTAB[CT_DIST + c], FIXED_CTAB[CT_EOB]) }
+        } else if self.sym_next >= 3 * CT_MIN_SYMS {
+            build_ctab(&self.dyn_ltree, &self.dyn_dtree, &mut self.ctab);
+            let t = self.ctab.as_ptr();
+            unsafe { self.compress_block_with(|lc| *t.add(CT_LIT + lc), |lc| *t.add(CT_LEN + lc), |c| *t.add(CT_DIST + c), *t.add(CT_EOB)) }
         } else {
-            // SAFETY: trees are not modified while encoding
+            // small block: look entries up directly instead of building tables
+            let lt = self.dyn_ltree.as_ptr();
+            let dt = self.dyn_dtree.as_ptr();
             unsafe {
-                (
-                    core::slice::from_raw_parts(self.dyn_ltree.as_ptr(), self.dyn_ltree.len()),
-                    core::slice::from_raw_parts(self.dyn_dtree.as_ptr(), self.dyn_dtree.len()),
+                let eob = ((*lt.add(END_BLOCK * 2 + 1) as u32) << 24) | *lt.add(END_BLOCK * 2) as u32;
+                self.compress_block_with(
+                    |lc| ((*lt.add(lc * 2 + 1) as u32) << 24) | *lt.add(lc * 2) as u32,
+                    |lc| len_entry(lt, lc),
+                    |c| ((*dt.add(c * 2 + 1) as u32 + EXTRA_DBITS[c] as u32) << 24) | ((*dt.add(c * 2 + 1) as u32) << 16) | *dt.add(c * 2) as u32,
+                    eob,
                 )
             }
-        };
-        let mut acc: u64 = self.bi_buf as u64;
-        let mut n: u32 = self.bi_valid;
-        let mut pend = self.pending;
-        let out = self.pending_buf.as_mut_ptr();
-        let sym = self.sym_buf.as_ptr();
-        let sym_next = self.sym_next;
-        let mut sx = 0usize;
-        macro_rules! flush32 {
-            () => {
-                if n >= 32 {
-                    unsafe { (out.add(pend) as *mut u32).write_unaligned((acc as u32).to_le()) };
-                    pend += 4;
-                    acc >>= 32;
-                    n -= 32;
-                }
-            };
         }
-        unsafe {
-            while sx < sym_next {
-                let mut dist = *sym.add(sx) as usize | ((*sym.add(sx + 1) as usize) << 8);
-                let mut lc = *sym.add(sx + 2) as usize;
-                sx += 3;
+    }
+
+    #[inline(always)]
+    unsafe fn compress_block_with(&mut self, lit: impl Fn(usize) -> u32, len: impl Fn(usize) -> u32, dcode: impl Fn(usize) -> u32, eob: u32) {
+        {
+            let out = self.pending_buf.as_mut_ptr();
+            let p0 = out.add(self.pending);
+            let mut p = p0;
+            let mut bb: u64 = self.bi_buf as u64;
+            let mut nb: u64 = self.bi_valid as u64;
+            macro_rules! flush {
+                () => {{
+                    (p as *mut u64).write_unaligned(bb.to_le());
+                    p = p.add((nb >> 3) as usize);
+                    bb >>= nb & 56;
+                    nb &= 7;
+                }};
+            }
+            flush!();
+            let mut s = self.sym_buf.as_ptr();
+            let end = s.add(self.sym_next);
+            while s < end {
+                // sym_buf has slack, so a 4-byte load is fine
+                let w = (s as *const u32).read_unaligned().to_le();
+                s = s.add(3);
+                let dist = w & 0xffff;
+                let lc = ((w >> 16) & 0xff) as usize;
                 if dist == 0 {
-                    acc |= (*ltree.get_unchecked(lc * 2) as u64) << n;
-                    n += *ltree.get_unchecked(lc * 2 + 1) as u32;
-                    flush32!();
+                    let e = lit(lc);
+                    bb |= ((e & 0xff_ffff) as u64) << nb;
+                    nb += (e >> 24) as u64;
                 } else {
-                    let code = ST.length_code[lc] as usize;
-                    acc |= (*ltree.get_unchecked((code + LITERALS + 1) * 2) as u64) << n;
-                    n += *ltree.get_unchecked((code + LITERALS + 1) * 2 + 1) as u32;
-                    let extra = EXTRA_LBITS[code] as u32;
-                    if extra != 0 {
-                        lc -= ST.base_length[code] as usize;
-                        acc |= (lc as u64) << n;
-                        n += extra;
-                    }
-                    flush32!();
-                    dist -= 1;
-                    let code = d_code(dist);
-                    acc |= (*dtree.get_unchecked(code * 2) as u64) << n;
-                    n += *dtree.get_unchecked(code * 2 + 1) as u32;
-                    let extra = EXTRA_DBITS[code] as u32;
-                    if extra != 0 {
-                        dist -= ST.base_dist[code] as usize;
-                        acc |= (dist as u64) << n;
-                        n += extra;
-                    }
-                    flush32!();
+                    let e = len(lc);
+                    bb |= ((e & 0xff_ffff) as u64) << nb;
+                    nb += (e >> 24) as u64;
+                    let d = (dist - 1) as usize;
+                    let c = d_code(d);
+                    let t = dcode(c);
+                    let v = (t & 0xffff) as u64 | (((d - ST.base_dist[c] as usize) as u64) << ((t >> 16) & 0xff));
+                    bb |= v << nb;
+                    nb += (t >> 24) as u64;
                 }
+                flush!();
             }
-            acc |= (ltree[END_BLOCK * 2] as u64) << n;
-            n += ltree[END_BLOCK * 2 + 1] as u32;
-            flush32!();
-            while n > 16 {
-                *out.add(pend) = acc as u8;
-                *out.add(pend + 1) = (acc >> 8) as u8;
-                pend += 2;
-                acc >>= 16;
-                n -= 16;
-            }
-            if n == 0 {
-                // zlib keeps a full 16-bit buffer instead of writing it out
-                pend -= 2;
-                acc = *out.add(pend) as u64 | ((*out.add(pend + 1) as u64) << 8);
-                n = 16;
-            }
+            let e = eob;
+            bb |= ((e & 0xff_ffff) as u64) << nb;
+            nb += (e >> 24) as u64;
+            flush!();
+            // the partial byte (if any) is in pending_buf now as well
+            let total = 8 * (p as usize - p0 as usize) as u64 + nb;
+            let bv = ((total - 1) & 15) + 1;
+            let np = p0.add(((total - bv) >> 3) as usize);
+            let bi = (np as *const u16).read_unaligned().to_le() as u32 & ((1u32 << bv) - 1);
+            self.pending = np as usize - out as usize;
+            self.bi_buf = bi;
+            self.bi_valid = bv as u32;
         }
-        self.pending = pend;
-        self.bi_buf = acc as u32;
-        self.bi_valid = n;
     }
 
     #[inline(always)]
@@ -772,25 +784,47 @@ impl Deflate {
     }
 }
 
-fn smaller(tree: &[u16], n: usize, m: usize, depth: &[u16; 2 * L_CODES + 1]) -> bool {
-    tree[n * 2] < tree[m * 2] || (tree[n * 2] == tree[m * 2] && depth[n] <= depth[m])
-}
-
-fn pqdownheap(tree: &[u16], heap: &mut [u16; 2 * L_CODES + 1], depth: &[u16; 2 * L_CODES + 1], heap_len: usize, mut k: usize) {
-    let v = heap[k] as usize;
+/// zlib pqdownheap with smaller(a, b) = key[a] <= key[b]
+#[inline(always)]
+unsafe fn pqdownheap(heap: *mut u16, key: *const u32, heap_len: usize, mut k: usize) {
+    let v = *heap.add(k);
+    let kv = *key.add(v as usize);
     let mut j = k << 1;
     while j <= heap_len {
-        if j < heap_len && smaller(tree, heap[j + 1] as usize, heap[j] as usize, depth) {
-            j += 1;
+        let mut hj = *heap.add(j);
+        if j < heap_len {
+            let hj1 = *heap.add(j + 1);
+            if *key.add(hj1 as usize) <= *key.add(hj as usize) {
+                j += 1;
+                hj = hj1;
+            }
         }
-        if smaller(tree, v, heap[j] as usize, depth) {
+        if kv <= *key.add(hj as usize) {
             break;
         }
-        heap[k] = heap[j];
+        *heap.add(k) = hj;
         k = j;
         j <<= 1;
     }
-    heap[k] = v as u16;
+    *heap.add(k) = v;
+}
+
+const fn make_rev8() -> [u8; 256] {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = (i as u8).reverse_bits();
+        i += 1;
+    }
+    t
+}
+static REV8: [u8; 256] = make_rev8();
+
+/// bi_reverse(code, len) for len in 1..=16 (only the low `len` bits count)
+#[inline(always)]
+fn rev_bits(code: u32, len: u32) -> u32 {
+    let r = ((REV8[(code & 0xff) as usize] as u32) << 8) | REV8[((code >> 8) & 0xff) as usize] as u32;
+    r >> (16 - len)
 }
 
 fn gen_codes(tree: &mut [u16], max_code: usize, bl_count: &[u16; MAX_BITS + 1]) {
@@ -798,14 +832,78 @@ fn gen_codes(tree: &mut [u16], max_code: usize, bl_count: &[u16; MAX_BITS + 1]) 
     let mut code: u32 = 0;
     for bits in 1..=MAX_BITS {
         code = (code + bl_count[bits - 1] as u32) << 1;
-        next_code[bits] = code;
+        next_code[bits] = code & 0xffff; // ush in zlib/pako
     }
     for n in 0..=max_code {
         let len = tree[n * 2 + 1] as usize;
         if len == 0 {
             continue;
         }
-        tree[n * 2] = bi_reverse(next_code[len], len as u32) as u16;
-        next_code[len] += 1;
+        tree[n * 2] = rev_bits(next_code[len], len as u32) as u16;
+        next_code[len] = (next_code[len] + 1) & 0xffff;
     }
+}
+
+// ---- combined emission tables (compress_block) ----
+// entry: nbits << 24 | value (Huffman code bits, then extra bits above them)
+//   [CT_LIT + lc]  literal lc
+//   [CT_LEN + lc]  match length lc + 3 (length code + extra bits)
+//   [CT_DIST + c]  distance code c: (clen + extra) << 24 | clen << 16 | code
+//   [CT_EOB]       END_BLOCK
+pub const CT_LIT: usize = 0;
+pub const CT_LEN: usize = 256;
+pub const CT_DIST: usize = 512;
+pub const CT_EOB: usize = 543;
+pub const CT_SIZE: usize = 544;
+
+const fn ctab_fill(lt: &[u16], dt: &[u16], t: &mut [u32; CT_SIZE]) {
+    let mut i = 0;
+    while i < 256 {
+        t[CT_LIT + i] = ((lt[i * 2 + 1] as u32) << 24) | lt[i * 2] as u32;
+        i += 1;
+    }
+    let mut lc = 0;
+    while lc < 256 {
+        let code = ST.length_code[lc] as usize;
+        let c = lt[(code + LITERALS + 1) * 2] as u32;
+        let clen = lt[(code + LITERALS + 1) * 2 + 1] as u32;
+        let extra = EXTRA_LBITS[code] as u32;
+        let v = if extra != 0 { c | ((lc as u32 - ST.base_length[code] as u32) << clen) } else { c };
+        t[CT_LEN + lc] = ((clen + extra) << 24) | v;
+        lc += 1;
+    }
+    let mut c = 0;
+    while c < D_CODES {
+        let clen = dt[c * 2 + 1] as u32;
+        t[CT_DIST + c] = ((clen + EXTRA_DBITS[c] as u32) << 24) | (clen << 16) | dt[c * 2] as u32;
+        c += 1;
+    }
+    t[CT_EOB] = ((lt[END_BLOCK * 2 + 1] as u32) << 24) | lt[END_BLOCK * 2] as u32;
+}
+
+fn build_ctab(lt: &[u16], dt: &[u16], t: &mut [u32; CT_SIZE]) {
+    ctab_fill(lt, dt, t);
+}
+
+const fn make_fixed_ctab() -> [u32; CT_SIZE] {
+    let mut t = [0u32; CT_SIZE];
+    let s = make_static();
+    ctab_fill(&s.ltree, &s.dtree, &mut t);
+    t
+}
+
+static FIXED_CTAB: [u32; CT_SIZE] = make_fixed_ctab();
+
+/// below this many symbols a dynamic block is emitted without building tables
+const CT_MIN_SYMS: usize = 600;
+
+/// emission entry for match length lc + 3 read straight from a tree
+#[inline(always)]
+unsafe fn len_entry(lt: *const u16, lc: usize) -> u32 {
+    let code = ST.length_code[lc] as usize;
+    let c = *lt.add((code + LITERALS + 1) * 2) as u32;
+    let clen = *lt.add((code + LITERALS + 1) * 2 + 1) as u32;
+    let extra = EXTRA_LBITS[code] as u32;
+    let v = if extra != 0 { c | ((lc as u32 - ST.base_length[code] as u32) << clen) } else { c };
+    ((clen + extra) << 24) | v
 }

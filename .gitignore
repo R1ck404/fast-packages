@@ -5,3 +5,7 @@ target-*/
 *.wasm.tmp
 # copied from esbuild-wasm by fast-esbuild-wasm/build.mjs
 fast-esbuild-wasm/esbuild.wasm
+.scratch/
+# verify/: generated JSX corpus and run outputs
+verify/jsx-corpus/
+verify/out/

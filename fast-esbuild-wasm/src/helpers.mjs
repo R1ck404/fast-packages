@@ -280,7 +280,8 @@ export function formatFloatG(x) {
   let out;
   if (x === 0) out = "0";
   else {
-    const [d, dp] = shortestDecimal(x);
+    const $d233 = shortestDecimal(x);
+    const d = $d233[0], dp = $d233[1];
     const exp = dp - 1;
     if (exp < -4 || exp >= 6) {
       out = d[0] + (d.length > 1 ? "." + d.slice(1) : "") + expSuffix(exp, "e");
@@ -305,7 +306,8 @@ export function formatFloatE(x) {
   let out;
   if (x === 0) out = "0e+00";
   else {
-    const [d, dp] = shortestDecimal(x);
+    const $d234 = shortestDecimal(x);
+    const d = $d234[0], dp = $d234[1];
     out = d[0] + (d.length > 1 ? "." + d.slice(1) : "") + expSuffix(dp - 1, "e");
   }
   return neg ? "-" + out : out;

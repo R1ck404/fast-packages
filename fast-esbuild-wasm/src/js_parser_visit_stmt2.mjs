@@ -273,7 +273,8 @@ export const visitStmt2Methods = {
         }
 
         if (s.items !== null) {
-          for (const item of s.items) {
+          for (let $i58 = 0, $a58 = s.items; $i58 < $a58.length; $i58++) {
+            const item = $a58[$i58];
             p.recordDeclaredSymbol(item.name.ref);
           }
         }
@@ -395,7 +396,8 @@ export const visitStmt2Methods = {
             const result = p.visitClass(s.value.loc, s2.class, s.defaultName.ref, "default");
 
             // Lower class field syntax for browsers that don't support it
-            const [classStmts] = p.lowerClass(stmt, null, result, "");
+            const $d194 = p.lowerClass(stmt, null, result, "");
+            const classStmts = $d194[0];
 
             // Remember if the class was side-effect free before lowering
             if (result.canBeRemovedIfUnused) {
@@ -439,7 +441,8 @@ export const visitStmt2Methods = {
       case S_BREAK:
         if (s.label !== null) {
           const name = p.loadNameFromRef(s.label.ref);
-          const [ref] = p.findLabelSymbol(s.label.loc, name);
+          const $d195 = p.findLabelSymbol(s.label.loc, name);
+          const ref = $d195[0];
           s.label = new LocRef(s.label.loc, ref);
         } else if (!p.fnOrArrowDataVisit.isInsideLoop && !p.fnOrArrowDataVisit.isInsideSwitch) {
           // "Cannot use \"break\" here:"
@@ -450,7 +453,8 @@ export const visitStmt2Methods = {
       case S_CONTINUE:
         if (s.label !== null) {
           const name = p.loadNameFromRef(s.label.ref);
-          const [ref, isLoop, ok] = p.findLabelSymbol(s.label.loc, name);
+          const $d196 = p.findLabelSymbol(s.label.loc, name);
+          const ref = $d196[0], isLoop = $d196[1], ok = $d196[2];
           s.label = new LocRef(s.label.loc, ref);
           if (ok && !isLoop) {
             // "Cannot continue to label \"%s\""
@@ -594,7 +598,8 @@ export const visitStmt2Methods = {
           for (const decl of decls) {
             if (decl.valueOrNil !== null) {
               let target = convertBindingToExpr(decl.binding, wrapIdentifier);
-              const [result, ok] = p.lowerAssign(target, decl.valueOrNil, objRestReturnValueIsUnused);
+              const $d197 = p.lowerAssign(target, decl.valueOrNil, objRestReturnValueIsUnused);
+              const result = $d197[0], ok = $d197[1];
               if (ok) {
                 target = result;
               } else {
@@ -614,7 +619,8 @@ export const visitStmt2Methods = {
 
         // Potentially relocate "var" declarations to the top level
         if (s.kind === LocalVar) {
-          const [assign_, ok] = p.maybeRelocateVarsToTopLevel(s.decls, relocateVarsNormal);
+          const $d198 = p.maybeRelocateVarsToTopLevel(s.decls, relocateVarsNormal);
+          const assign_ = $d198[0], ok = $d198[1];
           if (ok) {
             if (assign_ !== null) {
               stmts.push(assign_);
@@ -707,7 +713,8 @@ export const visitStmt2Methods = {
         // (minify only) simplify the test
 
         // Fold constants
-        const [bool, , ok] = toBooleanWithSideEffects(s.test.data);
+        const $d199 = toBooleanWithSideEffects(s.test.data);
+        const bool = $d199[0], ok = $d199[2];
 
         // Mark the control flow as dead if the branch is never taken
         if (ok && !bool) {
@@ -760,7 +767,8 @@ export const visitStmt2Methods = {
         if (s.initOrNil !== null) {
           const init = s.initOrNil.data;
           if (init.k === S_LOCAL && init.kind === LocalVar) {
-            const [assign_, ok] = p.maybeRelocateVarsToTopLevel(init.decls, relocateVarsNormal);
+            const $d200 = p.maybeRelocateVarsToTopLevel(init.decls, relocateVarsNormal);
+            const assign_ = $d200[0], ok = $d200[1];
             if (ok) {
               if (assign_ !== null) {
                 s.initOrNil = assign_;
@@ -803,7 +811,8 @@ export const visitStmt2Methods = {
         // must be done inside the scope of the for loop or they won't be relocated.
         const init = s.init.data;
         if (init.k === S_LOCAL && init.kind === LocalVar) {
-          const [replacement, ok] = p.maybeRelocateVarsToTopLevel(init.decls, relocateVarsForInOrForOf);
+          const $d201 = p.maybeRelocateVarsToTopLevel(init.decls, relocateVarsForInOrForOf);
+          const replacement = $d201[0], ok = $d201[1];
           if (ok) {
             s.init = replacement;
           }
@@ -836,7 +845,8 @@ export const visitStmt2Methods = {
         // must be done inside the scope of the for loop or they won't be relocated.
         const init = s.init.data;
         if (init.k === S_LOCAL && init.kind === LocalVar) {
-          const [replacement, ok] = p.maybeRelocateVarsToTopLevel(init.decls, relocateVarsForInOrForOf);
+          const $d202 = p.maybeRelocateVarsToTopLevel(init.decls, relocateVarsForInOrForOf);
+          const replacement = $d202[0], ok = $d202[1];
           if (ok) {
             s.init = replacement;
           }
@@ -937,7 +947,8 @@ export const visitStmt2Methods = {
 
         // Check for duplicate case values
         p.duplicateCaseChecker.reset();
-        for (const c of s.cases) {
+        for (let $i59 = 0, $a59 = s.cases; $i59 < $a59.length; $i59++) {
+          const c = $a59[$i59];
           if (c.valueOrNil !== null) {
             p.duplicateCaseChecker.check(p, c.valueOrNil);
           }
@@ -1023,7 +1034,8 @@ export const visitStmt2Methods = {
         }
 
         // Lower class field syntax for browsers that don't support it
-        const [classStmts] = p.lowerClass(stmt, null, result, "");
+        const $d203 = p.lowerClass(stmt, null, result, "");
+        const classStmts = $d203[0];
 
         // Remember if the class was side-effect free before lowering
         if (result.canBeRemovedIfUnused) {
@@ -1225,7 +1237,8 @@ export const visitStmt2Methods = {
         // ahead of time before visiting any statements inside the namespace
         // because we may end up visiting the uses before the declarations.
         // We need to convert the uses into property accesses on the namespace.
-        for (const childStmt of s.stmts) {
+        for (let $i60 = 0, $a60 = s.stmts; $i60 < $a60.length; $i60++) {
+          const childStmt = $a60[$i60];
           const local = childStmt.data;
           if (local.k === S_LOCAL) {
             if (local.isExport) {
@@ -1308,7 +1321,8 @@ export const visitStmt2Methods = {
           const c = s.cases[i];
           // (Go passes a nil "right" for the default case, which is never equal)
           if (c.valueOrNil === null) continue;
-          const [isEqualToTest, ok] = checkEqualityIfNoSideEffects(s.test.data, c.valueOrNil.data, StrictEquality);
+          const $d204 = checkEqualityIfNoSideEffects(s.test.data, c.valueOrNil.data, StrictEquality);
+          const isEqualToTest = $d204[0], ok = $d204[1];
           if (ok && isEqualToTest) {
             takenIndex = i;
             break;
@@ -1363,7 +1377,8 @@ export const visitStmt2Methods = {
     if (s.cases.length === 1) {
       const c = s.cases[0];
       if (c.valueOrNil === null && p.astHelpers.exprCanBeRemovedIfUnused(s.test)) {
-        const [body, ok] = tryToInlineCaseBody(s.bodyLoc, c.body, s.closeBraceLoc);
+        const $d205 = tryToInlineCaseBody(s.bodyLoc, c.body, s.closeBraceLoc);
+        const body = $d205[0], ok = $d205[1];
         if (ok) {
           for (const x of body) stmts.push(x);
           return stmts;
@@ -1405,12 +1420,15 @@ export const visitStmt2Methods = {
       }
     }
     if (yesCase.valueOrNil !== null) {
-      const [yesBody, ok] = tryToInlineCaseBody(s.bodyLoc, yesCase.body, s.closeBraceLoc);
+      const $d206 = tryToInlineCaseBody(s.bodyLoc, yesCase.body, s.closeBraceLoc);
+      const yesBody = $d206[0], ok = $d206[1];
       if (ok) {
-        const [noBody, ok2] = tryToInlineCaseBody(s.bodyLoc, noCase.body, s.closeBraceLoc);
+        const $d207 = tryToInlineCaseBody(s.bodyLoc, noCase.body, s.closeBraceLoc);
+        const noBody = $d207[0], ok2 = $d207[1];
         if (ok2) {
           let testData;
-          const [isEqualToTest, ok3] = checkEqualityIfNoSideEffects(s.test.data, yesCase.valueOrNil.data, StrictEquality);
+          const $d208 = checkEqualityIfNoSideEffects(s.test.data, yesCase.valueOrNil.data, StrictEquality);
+          const isEqualToTest = $d208[0], ok3 = $d208[1];
           if (ok3) {
             testData = new EBoolean(isEqualToTest);
           } else {
@@ -1788,7 +1806,8 @@ export const visitStmt2Methods = {
     // symbol inside the class body changing our decision to lower private members
     // later on because that shouldn't be possible.
     if (classLoweringInfo.lowerAllStaticFields) {
-      for (const prop of class_.properties) {
+      for (let $i61 = 0, $a61 = class_.properties; $i61 < $a61.length; $i61++) {
+        const prop = $a61[$i61];
         // We need to lower all private members if fields of that type are lowered,
         // not just private fields (methods and accessors too).
         if (prop.key !== null && prop.key.data.k === E_PRIVATE_IDENTIFIER) {
@@ -1802,7 +1821,8 @@ export const visitStmt2Methods = {
     // brand check anywhere in the file. See the comment on this map for details.
     // (An empty map behaves exactly like Go's nil map here.)
     if (p.lowerAllOfThesePrivateNames !== null && p.lowerAllOfThesePrivateNames.size > 0) {
-      for (const prop of class_.properties) {
+      for (let $i62 = 0, $a62 = class_.properties; $i62 < $a62.length; $i62++) {
+        const prop = $a62[$i62];
         if (prop.key !== null && prop.key.data.k === E_PRIVATE_IDENTIFIER) {
           const symbol = p.symbols[refInner(prop.key.data.ref)];
           if (p.lowerAllOfThesePrivateNames.has(symbol.originalName)) {
@@ -1916,7 +1936,8 @@ export const visitStmt2Methods = {
           p.symbols[refInner(result.innerClassNameRef)].kind = SymbolClassInComputedPropertyKey;
         }
 
-        const [key] = p.visitExprInOut(property.key, new exprIn(false, false, false, false, true));
+        const $d209 = p.visitExprInOut(property.key, new exprIn(false, false, false, false, true));
+        const key = $d209[0];
         property.key = key;
 
         // Re-allow using the class name after visiting a computed key
@@ -1984,7 +2005,8 @@ export const visitStmt2Methods = {
           }
         }
 
-        const [value] = p.visitExprInOut(property.valueOrNil, new exprIn(true, isLoweredPrivateMethod));
+        const $d210 = p.visitExprInOut(property.valueOrNil, new exprIn(true, isLoweredPrivateMethod));
+        const value = $d210[0];
         property.valueOrNil = value;
       }
 
@@ -2066,7 +2088,8 @@ export const visitStmt2Methods = {
   visitArgs(args, opts) {
     const p = this;
     let duplicateArgCheck = null;
-    const [, hasUseStrict] = fnBodyContainsUseStrict(opts.body);
+    const $d211 = fnBodyContainsUseStrict(opts.body);
+    const hasUseStrict = $d211[1];
     const hasSimpleArgs = isSimpleParameterList(args, opts.hasRestArg);
 
     // Section 15.2.1 Static Semantics: Early Errors: "It is a Syntax Error if
@@ -2175,7 +2198,8 @@ export const visitStmt2Methods = {
         break;
 
       case "this": {
-        const [thisValue, ok] = p.valueForThis(loc, false /* shouldLog */, AssignTargetNone, false, false);
+        const $d212 = p.valueForThis(loc, false /* shouldLog */, AssignTargetNone, false, false);
+        const thisValue = $d212[0], ok = $d212[1];
         if (ok) {
           value = thisValue;
         } else {
@@ -2186,7 +2210,8 @@ export const visitStmt2Methods = {
 
       default: {
         if (firstPart === "import" && parts.length > start && parts[start] === "meta") {
-          const [importMeta, ok] = p.valueForImportMeta(loc);
+          const $d213 = p.valueForImportMeta(loc);
+          const importMeta = $d213[0], ok = $d213[1];
           if (ok) {
             value = importMeta;
           } else {
@@ -2213,7 +2238,8 @@ export const visitStmt2Methods = {
     // Build up a chain of property access expressions for subsequent parts
     for (let i = start; i < parts.length; i++) {
       const part = parts[i];
-      const [expr2, ok] = p.maybeRewritePropertyAccess(loc, AssignTargetNone, false, value, part, loc, false, false, false);
+      const $d214 = p.maybeRewritePropertyAccess(loc, AssignTargetNone, false, value, part, loc, false, false, false);
+      const expr2 = $d214[0], ok = $d214[1];
       if (ok) {
         value = expr2;
       } else {
@@ -2406,9 +2432,11 @@ export const visitStmt2Methods = {
 
     // (minify only) "foo".length
 
-    return [null, false];
+    return NOT_REWRITTEN; // [null, false] (callers only read it)
   },
 };
+
+const NOT_REWRITTEN = Object.freeze([null, false]);
 
 // Go's "p.isDotOrIndexDefineMatch(e.Target, parts[:last])" recursion without
 // allocating sub-slices: only the first "n" entries of "parts" are considered.
@@ -2575,7 +2603,8 @@ export function isSafeForConstLocalPrefix(expr) {
       return true;
 
     case E_ARRAY:
-      for (const item of e.items) {
+      for (let $i63 = 0, $a63 = e.items; $i63 < $a63.length; $i63++) {
+        const item = $a63[$i63];
         if (!isSafeForConstLocalPrefix(item)) {
           return false;
         }

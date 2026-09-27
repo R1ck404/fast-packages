@@ -179,7 +179,8 @@ export function analyzeSwitchCasesForLiveness(s) {
     } else if (c.valueOrNil === null) {
       status = alwaysDead; // This is the default case, and will be filled in later
     } else {
-      const [isEqualToTest, ok] = checkEqualityIfNoSideEffects(s.test.data, c.valueOrNil.data, StrictEquality);
+      const $d159 = checkEqualityIfNoSideEffects(s.test.data, c.valueOrNil.data, StrictEquality);
+      const isEqualToTest = $d159[0], ok = $d159[1];
       if (ok) {
         if (isEqualToTest) {
           status = alwaysLive; // This branch will always be matched, and will be taken unless an earlier branch was taken
@@ -275,7 +276,8 @@ export class duplicateCaseChecker {
   }
 
   check(p, expr) {
-    const [hash, ok] = duplicateCaseHash(expr);
+    const $d160 = duplicateCaseHash(expr);
+    const hash = $d160[0], ok = $d160[1];
     if (ok) {
       const bucket = hash % bloomFilterSize;
       const index = bucket >>> 3;
@@ -283,12 +285,14 @@ export class duplicateCaseChecker {
 
       // Check for collisions
       if ((this.bloomFilter[index] & mask) !== 0) {
-        for (const c of this.cases) {
+        for (let $i54 = 0, $a54 = this.cases; $i54 < $a54.length; $i54++) {
+          const c = $a54[$i54];
           if (c.hash === hash) {
             // (The second result, "couldBeIncorrect", and the ranges only
             // affect the message text, which is never materialised: see
             // logger.mjs.)
-            const [equals] = duplicateCaseEquals(c.value, expr);
+            const $d161 = duplicateCaseEquals(c.value, expr);
+            const equals = $d161[0];
             if (equals) {
               let kind = Warning;
               if (p.suppressWarningsAboutWeirdCode) {
@@ -360,7 +364,8 @@ export function duplicateCaseHash(expr) {
       return [hashCombine(6, refInner(e.ref)), true];
 
     case E_DOT: {
-      const [target, ok] = duplicateCaseHash(e.target);
+      const $d162 = duplicateCaseHash(e.target);
+      const target = $d162[0], ok = $d162[1];
       if (ok) {
         return [hashCombineString(hashCombine(7, target), e.name), true];
       }
@@ -368,9 +373,11 @@ export function duplicateCaseHash(expr) {
     }
 
     case E_INDEX: {
-      const [target, ok] = duplicateCaseHash(e.target);
+      const $d163 = duplicateCaseHash(e.target);
+      const target = $d163[0], ok = $d163[1];
       if (ok) {
-        const [index, ok2] = duplicateCaseHash(e.index);
+        const $d164 = duplicateCaseHash(e.index);
+        const index = $d164[0], ok2 = $d164[1];
         if (ok2) {
           return [hashCombine(hashCombine(8, target), index), true];
         }
@@ -411,7 +418,8 @@ export function duplicateCaseEquals(left, right) {
 
     case E_BIG_INT:
       if (b.k === E_BIG_INT) {
-        const [equal, ok] = checkEqualityBigInt(a.value, b.value);
+        const $d165 = checkEqualityBigInt(a.value, b.value);
+        const equal = $d165[0], ok = $d165[1];
         return [ok && equal, false];
       }
       break;
@@ -421,16 +429,19 @@ export function duplicateCaseEquals(left, right) {
 
     case E_DOT:
       if (b.k === E_DOT && a.optionalChain === b.optionalChain && a.name === b.name) {
-        const [equals] = duplicateCaseEquals(a.target, b.target);
+        const $d166 = duplicateCaseEquals(a.target, b.target);
+        const equals = $d166[0];
         return [equals, true];
       }
       break;
 
     case E_INDEX:
       if (b.k === E_INDEX && a.optionalChain === b.optionalChain) {
-        const [indexEquals] = duplicateCaseEquals(a.index, b.index);
+        const $d167 = duplicateCaseEquals(a.index, b.index);
+        const indexEquals = $d167[0];
         if (indexEquals) {
-          const [equals] = duplicateCaseEquals(a.target, b.target);
+          const $d168 = duplicateCaseEquals(a.target, b.target);
+          const equals = $d168[0];
           return [equals, true];
         }
       }
@@ -511,13 +522,15 @@ export function findIdentifiers(binding, identifiers) {
       break;
 
     case B_ARRAY:
-      for (const item of b.items) {
+      for (let $i55 = 0, $a55 = b.items; $i55 < $a55.length; $i55++) {
+        const item = $a55[$i55];
         identifiers = findIdentifiers(item.binding, identifiers);
       }
       break;
 
     case B_OBJECT:
-      for (const property of b.properties) {
+      for (let $i56 = 0, $a56 = b.properties; $i56 < $a56.length; $i56++) {
+        const property = $a56[$i56];
         identifiers = findIdentifiers(property.value, identifiers);
       }
       break;
@@ -568,7 +581,8 @@ export function shouldKeepStmtInDeadControlFlow(stmt) {
 
       // Omit everything except the identifiers
       let identifiers = [];
-      for (const decl of s.decls) {
+      for (let $i57 = 0, $a57 = s.decls; $i57 < $a57.length; $i57++) {
+        const decl = $a57[$i57];
         identifiers = findIdentifiers(decl.binding, identifiers);
       }
       if (identifiers.length === 0) {
@@ -930,7 +944,13 @@ export const visitStmtMethods = {
 
     // Track how many times we've referenced this symbol
     p.recordUsage(ref);
-    return new findSymbolResult(ref, declareLoc, isInsideWithScope);
+    // (JS-only: the result object is reused; callers read it right away)
+    let result = p.findSymbolScratch;
+    if (result === null) result = p.findSymbolScratch = new findSymbolResult();
+    result.ref = ref;
+    result.declareLoc = declareLoc;
+    result.isInsideWithScope = isInsideWithScope;
+    return result;
   },
 
   // Returns [ref, isLoop, ok]
@@ -1881,7 +1901,8 @@ export const visitStmtMethods = {
       //
       const replacementCanBeRemoved = p.astHelpers.exprCanBeRemovedIfUnused(replacement);
 
-      const [new_, status] = p.substituteSingleUseSymbolInExpr(holder[field], ref, replacement, replacementCanBeRemoved);
+      const $d169 = p.substituteSingleUseSymbolInExpr(holder[field], ref, replacement, replacementCanBeRemoved);
+      const new_ = $d169[0], status = $d169[1];
       if (status === substituteSuccess) {
         holder[field] = new_;
         return true;
@@ -1914,7 +1935,8 @@ export const visitStmtMethods = {
         break;
 
       case E_SPREAD: {
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.value, ref, replacement, replacementCanBeRemoved);
+        const $d170 = p.substituteSingleUseSymbolInExpr(e.value, ref, replacement, replacementCanBeRemoved);
+        const value = $d170[0], status = $d170[1];
         if (status !== substituteContinue) {
           e.value = value;
           return [expr, status];
@@ -1923,7 +1945,8 @@ export const visitStmtMethods = {
       }
 
       case E_AWAIT: {
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.value, ref, replacement, replacementCanBeRemoved);
+        const $d171 = p.substituteSingleUseSymbolInExpr(e.value, ref, replacement, replacementCanBeRemoved);
+        const value = $d171[0], status = $d171[1];
         if (status !== substituteContinue) {
           e.value = value;
           return [expr, status];
@@ -1933,7 +1956,8 @@ export const visitStmtMethods = {
 
       case E_YIELD:
         if (e.valueOrNil !== null) {
-          const [value, status] = p.substituteSingleUseSymbolInExpr(e.valueOrNil, ref, replacement, replacementCanBeRemoved);
+          const $d172 = p.substituteSingleUseSymbolInExpr(e.valueOrNil, ref, replacement, replacementCanBeRemoved);
+          const value = $d172[0], status = $d172[1];
           if (status !== substituteContinue) {
             e.valueOrNil = value;
             return [expr, status];
@@ -1942,7 +1966,8 @@ export const visitStmtMethods = {
         break;
 
       case E_IMPORT_CALL: {
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.expr, ref, replacement, replacementCanBeRemoved);
+        const $d173 = p.substituteSingleUseSymbolInExpr(e.expr, ref, replacement, replacementCanBeRemoved);
+        const value = $d173[0], status = $d173[1];
         if (status !== substituteContinue) {
           e.expr = value;
           return [expr, status];
@@ -1969,7 +1994,8 @@ export const visitStmtMethods = {
             break;
 
           default: {
-            const [value, status] = p.substituteSingleUseSymbolInExpr(e.value, ref, replacement, replacementCanBeRemoved);
+            const $d174 = p.substituteSingleUseSymbolInExpr(e.value, ref, replacement, replacementCanBeRemoved);
+            const value = $d174[0], status = $d174[1];
             if (status !== substituteContinue) {
               e.value = value;
               return [expr, status];
@@ -1979,7 +2005,8 @@ export const visitStmtMethods = {
         break;
 
       case E_DOT: {
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.target, ref, replacement, replacementCanBeRemoved);
+        const $d175 = p.substituteSingleUseSymbolInExpr(e.target, ref, replacement, replacementCanBeRemoved);
+        const value = $d175[0], status = $d175[1];
         if (status !== substituteContinue) {
           e.target = value;
           return [expr, status];
@@ -1990,7 +2017,8 @@ export const visitStmtMethods = {
       case E_BINARY: {
         // Do not substitute into an assignment position
         if (opCodeBinaryAssignTarget(e.op) === AssignTargetNone) {
-          const [value, status] = p.substituteSingleUseSymbolInExpr(e.left, ref, replacement, replacementCanBeRemoved);
+          const $d176 = p.substituteSingleUseSymbolInExpr(e.left, ref, replacement, replacementCanBeRemoved);
+          const value = $d176[0], status = $d176[1];
           if (status !== substituteContinue) {
             e.left = value;
             return [expr, status];
@@ -2017,7 +2045,8 @@ export const visitStmtMethods = {
 
         // If we get here then it should be safe to attempt to substitute the
         // replacement past the left operand into the right operand.
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.right, ref, replacement, replacementCanBeRemoved);
+        const $d177 = p.substituteSingleUseSymbolInExpr(e.right, ref, replacement, replacementCanBeRemoved);
+        const value = $d177[0], status = $d177[1];
         if (status !== substituteContinue) {
           e.right = value;
           return [expr, status];
@@ -2026,7 +2055,8 @@ export const visitStmtMethods = {
       }
 
       case E_IF: {
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.test, ref, replacement, replacementCanBeRemoved);
+        const $d178 = p.substituteSingleUseSymbolInExpr(e.test, ref, replacement, replacementCanBeRemoved);
+        const value = $d178[0], status = $d178[1];
         if (status !== substituteContinue) {
           e.test = value;
           return [expr, status];
@@ -2041,13 +2071,15 @@ export const visitStmtMethods = {
           // Side effects in one branch should not prevent the substitution into
           // the other branch.
 
-          const [yesValue, yesStatus] = p.substituteSingleUseSymbolInExpr(e.yes, ref, replacement, replacementCanBeRemoved);
+          const $d179 = p.substituteSingleUseSymbolInExpr(e.yes, ref, replacement, replacementCanBeRemoved);
+          const yesValue = $d179[0], yesStatus = $d179[1];
           if (yesStatus === substituteSuccess) {
             e.yes = yesValue;
             return [expr, yesStatus];
           }
 
-          const [noValue, noStatus] = p.substituteSingleUseSymbolInExpr(e.no, ref, replacement, replacementCanBeRemoved);
+          const $d180 = p.substituteSingleUseSymbolInExpr(e.no, ref, replacement, replacementCanBeRemoved);
+          const noValue = $d180[0], noStatus = $d180[1];
           if (noStatus === substituteSuccess) {
             e.no = noValue;
             return [expr, noStatus];
@@ -2063,7 +2095,8 @@ export const visitStmtMethods = {
       }
 
       case E_INDEX: {
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.target, ref, replacement, replacementCanBeRemoved);
+        const $d181 = p.substituteSingleUseSymbolInExpr(e.target, ref, replacement, replacementCanBeRemoved);
+        const value = $d181[0], status = $d181[1];
         if (status !== substituteContinue) {
           e.target = value;
           return [expr, status];
@@ -2072,7 +2105,8 @@ export const visitStmtMethods = {
         // Do not substitute our unconditionally-executed value into a branch
         // unless the value itself has no side effects
         if (replacementCanBeRemoved || e.optionalChain === OptionalChainNone) {
-          const [value2, status2] = p.substituteSingleUseSymbolInExpr(e.index, ref, replacement, replacementCanBeRemoved);
+          const $d182 = p.substituteSingleUseSymbolInExpr(e.index, ref, replacement, replacementCanBeRemoved);
+          const value2 = $d182[0], status2 = $d182[1];
           if (status2 !== substituteContinue) {
             e.index = value2;
             return [expr, status2];
@@ -2090,12 +2124,14 @@ export const visitStmtMethods = {
           }
         }
 
-        const [value, status] = p.substituteSingleUseSymbolInExpr(e.target, ref, replacement, replacementCanBeRemoved);
+        const $d183 = p.substituteSingleUseSymbolInExpr(e.target, ref, replacement, replacementCanBeRemoved);
+        const value = $d183[0], status = $d183[1];
         if (status !== substituteContinue) {
           e.target = value;
           if (status === substituteSuccess) {
             // "const y = () => x; y()" => "(() => x)()" => "x"
-            const [inlined, ok] = p.maybeInlineIIFE(expr.loc, e);
+            const $d184 = p.maybeInlineIIFE(expr.loc, e);
+            const inlined = $d184[0], ok = $d184[1];
             if (ok) {
               return [inlined, substituteSuccess];
             }
@@ -2108,7 +2144,8 @@ export const visitStmtMethods = {
         if (replacementCanBeRemoved || e.optionalChain === OptionalChainNone) {
           const args = e.args;
           for (let i = 0; i < args.length; i++) {
-            const [argValue, argStatus] = p.substituteSingleUseSymbolInExpr(args[i], ref, replacement, replacementCanBeRemoved);
+            const $d185 = p.substituteSingleUseSymbolInExpr(args[i], ref, replacement, replacementCanBeRemoved);
+            const argValue = $d185[0], argStatus = $d185[1];
             if (argStatus !== substituteContinue) {
               args[i] = argValue;
               return [expr, argStatus];
@@ -2121,7 +2158,8 @@ export const visitStmtMethods = {
       case E_ARRAY: {
         const items = e.items;
         for (let i = 0; i < items.length; i++) {
-          const [value, status] = p.substituteSingleUseSymbolInExpr(items[i], ref, replacement, replacementCanBeRemoved);
+          const $d186 = p.substituteSingleUseSymbolInExpr(items[i], ref, replacement, replacementCanBeRemoved);
+          const value = $d186[0], status = $d186[1];
           if (status !== substituteContinue) {
             items[i] = value;
             return [expr, status];
@@ -2137,7 +2175,8 @@ export const visitStmtMethods = {
 
           // Check the key
           if ((property.flags & PropertyIsComputed) !== 0) {
-            const [value, status] = p.substituteSingleUseSymbolInExpr(property.key, ref, replacement, replacementCanBeRemoved);
+            const $d187 = p.substituteSingleUseSymbolInExpr(property.key, ref, replacement, replacementCanBeRemoved);
+            const value = $d187[0], status = $d187[1];
             if (status !== substituteContinue) {
               properties[i].key = value;
               return [expr, status];
@@ -2149,7 +2188,8 @@ export const visitStmtMethods = {
 
           // Check the value
           if (property.valueOrNil !== null) {
-            const [value, status] = p.substituteSingleUseSymbolInExpr(property.valueOrNil, ref, replacement, replacementCanBeRemoved);
+            const $d188 = p.substituteSingleUseSymbolInExpr(property.valueOrNil, ref, replacement, replacementCanBeRemoved);
+            const value = $d188[0], status = $d188[1];
             if (status !== substituteContinue) {
               properties[i].valueOrNil = value;
               return [expr, status];
@@ -2161,7 +2201,8 @@ export const visitStmtMethods = {
 
       case E_TEMPLATE: {
         if (e.tagOrNil !== null) {
-          const [value, status] = p.substituteSingleUseSymbolInExpr(e.tagOrNil, ref, replacement, replacementCanBeRemoved);
+          const $d189 = p.substituteSingleUseSymbolInExpr(e.tagOrNil, ref, replacement, replacementCanBeRemoved);
+          const value = $d189[0], status = $d189[1];
           if (status !== substituteContinue) {
             e.tagOrNil = value;
             return [expr, status];
@@ -2170,7 +2211,8 @@ export const visitStmtMethods = {
 
         const parts = e.parts;
         for (let i = 0; i < parts.length; i++) {
-          const [value, status] = p.substituteSingleUseSymbolInExpr(parts[i].value, ref, replacement, replacementCanBeRemoved);
+          const $d190 = p.substituteSingleUseSymbolInExpr(parts[i].value, ref, replacement, replacementCanBeRemoved);
+          const value = $d190[0], status = $d190[1];
           if (status !== substituteContinue) {
             parts[i].value = value;
 
@@ -2256,7 +2298,8 @@ export const visitStmtMethods = {
           assignTarget = AssignTargetReplace;
         }
         p.stmtExprValue = s.value.data;
-        const [value] = p.visitExprInOut(s.value, assignTarget === AssignTargetReplace ? exprInAssignTargetReplace : exprInAssignTargetNone);
+        const $d191 = p.visitExprInOut(s.value, assignTarget === AssignTargetReplace ? exprInAssignTargetReplace : exprInAssignTargetNone);
+        const value = $d191[0];
         s.value = value;
         break;
       }
@@ -2350,7 +2393,8 @@ export const visitStmtMethods = {
           // Go copies the PropertyBinding struct, updates the copy and writes it back
           const property = properties[i].clone();
           if (!property.isSpread) {
-            const [key] = p.visitExprInOut(property.key, exprInShouldMangleStringsAsProps);
+            const $d192 = p.visitExprInOut(property.key, exprInShouldMangleStringsAsProps);
+            const key = $d192[0];
             property.key = key;
           }
           p.visitBinding(property.value, opts);
@@ -2378,7 +2422,8 @@ export const visitStmtMethods = {
     const p = this;
 
     // Constant folding using the test expression
-    const [boolean, sideEffects, ok] = toBooleanWithSideEffects(s.test.data);
+    const $d193 = toBooleanWithSideEffects(s.test.data);
+    const boolean = $d193[0], sideEffects = $d193[1], ok = $d193[2];
     if (ok) {
       if (boolean) {
         // The test is truthy
