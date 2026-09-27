@@ -1,7 +1,8 @@
-// fast-brotli-wasm as an ES module, like brotli-wasm's pkg.web/brotli_wasm.js:
-// the default export init(input?) loads fastbrotli.wasm (next to this file,
-// or from `input`: URL/string/Request/Response/bytes/WebAssembly.Module) and
-// resolves to the wasm exports; the named exports work once it has resolved.
+// @r1ck404/fast-brotli-wasm as an ES module, like brotli-wasm's pkg.web/brotli_wasm.js:
+// the default export init(input?) loads fastbrotli.wasm (fetched from next to
+// this file, or from `input`: URL/string/Request/Response/bytes/
+// WebAssembly.Module) and resolves to the wasm exports; the named exports
+// work once it has resolved. (Node: see index.node.mjs / index.node.cjs.)
 import { bind, BrotliStreamResultCode as Codes } from "./core.mjs";
 
 export let compress;
@@ -27,14 +28,7 @@ async function load(input) {
 }
 
 export default async function init(input) {
-  if (typeof input === "undefined") {
-    input = new URL("fastbrotli.wasm", import.meta.url);
-    // Node has no fetch() for file: URLs
-    if (input.protocol === "file:" && typeof process === "object" && process.versions && process.versions.node) {
-      const { readFile } = await import("node:fs/promises");
-      input = await readFile(input);
-    }
-  }
+  if (typeof input === "undefined") input = new URL("./fastbrotli.wasm", import.meta.url);
   if (typeof input === "string" || (typeof Request === "function" && input instanceof Request) || (typeof URL === "function" && input instanceof URL)) {
     input = fetch(input);
   }

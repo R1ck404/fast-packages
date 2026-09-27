@@ -4,7 +4,7 @@
 // success, identical error string on failure (or both trapping).
 // Also checks that valid streams really take the fast path (decompress_fast_only)
 // so the comparisons exercise the new decoder, not the fallback.
-// node fast-brotli-wasm/test/decode-equiv.mjs [--quick] [--seed N] [--fuzz N]
+// node packages/fast-brotli-wasm/test/decode-equiv.mjs [--quick] [--seed N] [--fuzz N]
 import zlib from "node:zlib";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,7 @@ import { fastDecode, fastOnly, refDecode, origDecode, brotliWasm, sameOutcome, d
 import { genStream } from "./decode-gen.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const nm = join(here, "../../node_modules");
+const nm = join(here, "../../../node_modules");
 const arg = (name, def) => {
   const i = process.argv.indexOf(name);
   return i > 0 ? +process.argv[i + 1] : def;

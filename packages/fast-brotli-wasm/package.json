@@ -1,0 +1,66 @@
+{
+  "name": "@r1ck404/fast-brotli-wasm",
+  "version": "3.0.1",
+  "description": "Faster drop-in replacement for brotli-wasm 3.0.1: the same Rust brotli crates with a rewritten encoder hot path and a new decoder, byte-identical output (q11 3-4.5x faster)",
+  "keywords": [
+    "brotli",
+    "brotli-wasm",
+    "compression",
+    "decompression",
+    "wasm",
+    "drop-in"
+  ],
+  "license": "Apache-2.0",
+  "author": "R1ck404 (https://github.com/R1ck404)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R1ck404/nodepod-fast-packages.git",
+    "directory": "packages/fast-brotli-wasm"
+  },
+  "homepage": "https://github.com/R1ck404/nodepod-fast-packages/tree/main/packages/fast-brotli-wasm#readme",
+  "upstream": "brotli-wasm@3.0.1",
+  "main": "./index.node.cjs",
+  "browser": "./index.mjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "node": {
+        "import": "./index.node.mjs",
+        "require": "./index.node.cjs"
+      },
+      "browser": "./index.mjs",
+      "import": "./index.mjs",
+      "require": "./index.node.cjs",
+      "default": "./index.mjs"
+    },
+    "./fastbrotli.wasm": "./fastbrotli.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "index.node.mjs",
+    "index.node.cjs",
+    "pkg.web.mjs",
+    "core.mjs",
+    "fastbrotli.wasm",
+    "index.d.ts",
+    "types/brotli_wasm.d.ts",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/api.mjs && node test/stream-equiv.mjs && node test/decode-equiv.mjs --quick",
+    "test:full": "node test/api.mjs && node test/compress-equiv.mjs && node test/compress-stress.mjs && node test/decode-equiv.mjs && node test/stream-equiv.mjs"
+  },
+  "devDependencies": {
+    "brotli-wasm": "3.0.1",
+    "binaryen": "^132.0.0"
+  }
+}

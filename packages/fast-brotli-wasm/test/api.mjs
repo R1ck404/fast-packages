@@ -1,15 +1,16 @@
-// API parity: fast-brotli-wasm vs brotli-wasm 3.0.1 through the public API
+// API parity: @r1ck404/fast-brotli-wasm vs brotli-wasm 3.0.1 through the public API
 // (CommonJS Node entry and the ESM web entry): results, thrown values (type,
 // message), console output of panics, object shapes and stream behaviour.
-// usage: node fast-brotli-wasm/test/api.mjs
+// usage: node packages/fast-brotli-wasm/test/api.mjs
 import { createRequire } from "node:module";
-import { randomBytes, jsonText } from "../../bench/corpus.mjs";
+import { readFileSync } from "node:fs";
+import { randomBytes, jsonText } from "../../../bench/corpus.mjs";
 
 const require = createRequire(import.meta.url);
 const O = require("brotli-wasm");
 const F = require("../index.node.cjs");
 const Fweb = await import("../pkg.web.mjs");
-await Fweb.default();
+await Fweb.default(readFileSync(new URL("../fastbrotli.wasm", import.meta.url)));
 
 let checks = 0, failures = 0;
 function describe(fn) {

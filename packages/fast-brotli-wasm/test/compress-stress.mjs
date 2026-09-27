@@ -5,12 +5,12 @@
 // hits at +-1..3), text built from static-dictionary words with case
 // transforms and suffixes, low/high entropy binary, and mixtures. Reference
 // outputs are cached like compress-equiv's.
-// usage: node fast-brotli-wasm/test/compress-stress.mjs [--n=300] [--seed=1] [--q=0,..,11] [--wasm=path]
+// usage: node packages/fast-brotli-wasm/test/compress-stress.mjs [--n=300] [--seed=1] [--q=0,..,11] [--wasm=path]
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { root } from "../../bench/corpus.mjs";
+import { root } from "../../../bench/corpus.mjs";
 import { loadRaw } from "./raw.mjs";
 
 const require = createRequire(import.meta.url);

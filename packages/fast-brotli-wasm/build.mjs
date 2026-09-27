@@ -1,5 +1,5 @@
 // Build fastbrotli.wasm (cargo + wasm-opt -O3).
-// usage: node fast-brotli-wasm/build.mjs [--no-opt] [--no-fastdec]
+// usage: node packages/fast-brotli-wasm/build.mjs [--no-opt] [--no-fastdec]
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

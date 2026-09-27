@@ -4,7 +4,7 @@
 import zlib from "node:zlib";
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-const nm = new URL("../../node_modules/", import.meta.url);
+const nm = new URL("../../../node_modules/", import.meta.url);
 const rd = (r) => new Uint8Array(readFileSync(new URL(r, nm)));
 const C = zlib.constants;
 const QUICK = process.env.QUICK === "1";

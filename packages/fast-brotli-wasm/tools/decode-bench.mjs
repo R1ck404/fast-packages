@@ -3,16 +3,16 @@
 // and `decompress_fast`, both called with the input already in wasm memory
 // plus a copy-out of the result (same work brotli-wasm's glue does).
 // Min-of-samples, implementations interleaved round by round (noisy machine).
-// node fast-brotli-wasm/test/decode-bench.mjs [--quick] [--rounds N]
+// node packages/fast-brotli-wasm/tools/decode-bench.mjs [--quick] [--rounds N]
 import zlib from "node:zlib";
 import { performance } from "node:perf_hooks";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { brotliWasm, exportsNow, eqBytes } from "./decode-common.mjs";
+import { brotliWasm, exportsNow, eqBytes } from "../test/decode-common.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const nm = join(here, "../../node_modules");
+const nm = join(here, "../../../node_modules");
 const QUICK = process.argv.includes("--quick");
 const ri = process.argv.indexOf("--rounds");
 const ROUNDS = ri > 0 ? +process.argv[ri + 1] : QUICK ? 5 : 15;

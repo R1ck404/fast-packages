@@ -1,4 +1,4 @@
-// fastbrotli: wasm core of fast-brotli-wasm, a drop-in for brotli-wasm 3.0.1.
+// fastbrotli: wasm core of @r1ck404/fast-brotli-wasm, a drop-in for brotli-wasm 3.0.1.
 //
 // Same crates as brotli-wasm (brotli 5.0.0, brotli-decompressor 4.0.0, vendored
 // with speed-ups that keep the output byte-identical, see vendor/brotli), the

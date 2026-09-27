@@ -1,4 +1,4 @@
-// JS side of fast-brotli-wasm: the brotli-wasm 3.0.1 API (compress,
+// JS side of @r1ck404/fast-brotli-wasm: the brotli-wasm 3.0.1 API (compress,
 // decompress, CompressStream, DecompressStream, BrotliStreamResult,
 // BrotliStreamResultCode) over the plain C ABI of fastbrotli.wasm.
 //

@@ -1,12 +1,12 @@
 // Compression equivalence: fastbrotli vs brotli-wasm 3.0.1, byte for byte, on a
 // corpus at every quality. Reference outputs are cached (sha256 per input and
 // quality) in .scratch/brotli-ref-cache.json since q10/q11 are slow.
-// usage: node fast-brotli-wasm/test/compress-equiv.mjs [--q=0,1,..] [--max=N files] [--wasm=path]
+// usage: node packages/fast-brotli-wasm/test/compress-equiv.mjs [--q=0,1,..] [--max=N files] [--wasm=path]
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { listFiles, nm, root, randomBytes, jsonText } from "../../bench/corpus.mjs";
+import { listFiles, nm, root, randomBytes, jsonText } from "../../../bench/corpus.mjs";
 import { loadRaw } from "./raw.mjs";
 
 const require = createRequire(import.meta.url);

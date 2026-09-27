@@ -1,15 +1,15 @@
 // Stream API equivalence: CompressStream and DecompressStream of
-// fast-brotli-wasm vs brotli-wasm 3.0.1, call by call (result code,
+// @r1ck404/fast-brotli-wasm vs brotli-wasm 3.0.1, call by call (result code,
 // input_offset, output bytes, total_out, thrown errors) over random input
 // and output chunk sizes: DecompressStream on node-zlib streams with random
 // parameters, brotli-wasm output, truncated and corrupted streams;
 // CompressStream at every quality on real files and generated data.
-// usage: node fast-brotli-wasm/test/stream-equiv.mjs [--n=400] [--seed=1]
+// usage: node packages/fast-brotli-wasm/test/stream-equiv.mjs [--n=400] [--seed=1]
 import zlib from "node:zlib";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { listFiles, nm } from "../../bench/corpus.mjs";
+import { listFiles, nm } from "../../../bench/corpus.mjs";
 
 const require = createRequire(import.meta.url);
 const O = require("brotli-wasm");
