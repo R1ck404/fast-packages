@@ -1,0 +1,25 @@
+# Vendored from brotli-decompressor 4.0.0 (crates.io), the version brotli-wasm
+# 3.0.1 is built with. Local changes are marked "fast-brotli-wasm".
+[package]
+name = "brotli-decompressor"
+version = "4.0.0"
+edition = "2015"
+license = "BSD-3-Clause/MIT"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dependencies]
+alloc-no-stdlib = { path = "../alloc-no-stdlib" }
+alloc-stdlib = { path = "../alloc-stdlib", optional = true }
+
+[features]
+default = ["std"]
+std = ["alloc-stdlib"]
+benchmark = []
+disable-timer = []
+ffi-api = []
+pass-through-ffi-panics = []
+seccomp = []
+unsafe = ["alloc-no-stdlib/unsafe", "alloc-stdlib/unsafe"]

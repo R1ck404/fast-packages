@@ -1,0 +1,16 @@
+# Vendored from alloc-stdlib 0.2.1 (crates.io).
+[package]
+name = "alloc-stdlib"
+version = "0.2.1"
+edition = "2015"
+license = "BSD-3-Clause"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dependencies]
+alloc-no-stdlib = { path = "../alloc-no-stdlib" }
+
+[features]
+unsafe = []
