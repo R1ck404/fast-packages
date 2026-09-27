@@ -23,8 +23,21 @@ const variantsArg = args.find((a) => a.startsWith("--variants="));
 let seed = seedArg ? Number(seedArg.slice(7)) : 1;
 const variants = variantsArg ? Number(variantsArg.slice(11)) : 4;
 const modesArg = args.find((a) => a.startsWith("--modes="));
-const modes = modesArg ? modesArg.slice(8).split(",") : ["node", "v8", "v8-into", "encode"];
-for (const m of modes) F.__mode(m); // throws if a mode is unavailable
+// explicitly requested modes must exist; by default every mode this engine
+// supports (the v8 modes need the wasm JS-string builtins, which older V8s
+// such as Node 20's do not have)
+const modes = modesArg
+  ? modesArg.slice(8).split(",")
+  : ["node", "v8", "v8-into", "encode"].filter((m) => {
+      try {
+        F.__mode(m);
+        return true;
+      } catch {
+        console.log(`mode ${m}: not available in this engine, skipped`);
+        return false;
+      }
+    });
+for (const m of modes) F.__mode(m); // throws if a requested mode is unavailable
 const perMode = Object.fromEntries(modes.map((m) => [m, 0]));
 const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
 

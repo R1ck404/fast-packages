@@ -11,7 +11,17 @@ import { historyDependent } from "./history.mjs";
 
 O.initSync();
 F.initSync();
-const modes = ["node", "node-re", "v8", "v8-into", "encode"];
+// every source-copy mode this engine supports (the v8 modes need the wasm
+// JS-string builtins, which older V8s such as Node 20's do not have)
+const modes = ["node", "node-re", "v8", "v8-into", "encode"].filter((m) => {
+  try {
+    F.__mode(m);
+    return true;
+  } catch {
+    console.log(`mode ${m}: not available in this engine, skipped`);
+    return false;
+  }
+});
 
 const ser = (x) => JSON.stringify(x, (k, v) => (v === undefined ? "\u0000undef" : v));
 function run(P, src, name) {
