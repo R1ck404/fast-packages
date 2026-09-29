@@ -1,18 +1,17 @@
-// Differential test for the vendored acorn as @r1ck404/fast-acorn ships it (with the
-// fast nextToken of fasttok.mjs installed) against pristine acorn 8.18 from
-// node_modules: Parser.parse with many option sets (errors included:
-// message, pos, loc, raisedAt), onToken / onComment output, tokenizer()
-// token streams, a Parser.extend() subclass (Nodepod's topLevelParser), and
-// the same on mutated inputs (truncations, random edits) so error paths are
-// exercised too.
+// Differential test for acorn's generic parser as @r1ck404/fast-acorn ships it
+// (generic.cjs: acorn's own methods on the shared token types / Node /
+// Position / ..., loaded on demand) against pristine acorn 8.18 from
+// node_modules: `new Parser(options, input).parse()` (which always runs the
+// generic parser) with many option sets (errors included: message, pos, loc,
+// raisedAt), onToken / onComment output, token streams of such instances, a
+// Parser.extend() subclass (Nodepod's topLevelParser) instantiated directly,
+// and the same on mutated inputs (truncations, random edits) so error paths
+// are exercised too.
 //
 // node packages/fast-acorn/test/acorn-diff.mjs [--limit N] [--dir path] [--nodepod] [--mutations N] [--quick]
 import * as ref from "acorn";
-import * as V from "../vendor/acorn.mjs";
-// everything @r1ck404/fast-acorn installs on the vendored acorn (fasttok's nextToken,
-// the parseFunctionBody hook); parses below use the instance parse() so
-// they run acorn itself, not the fast parser behind Parser.parse
-import "../index.mjs";
+// (instance parse(): the generic parser, not the fast parser behind Parser.parse)
+import * as V from "../index.mjs";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,7 +166,8 @@ function checkParse(what, file, code, opts, RefP = ref.Parser, VP = V.Parser) {
 function tokens(lib, code, opts) {
   const out = [];
   try {
-    const t = lib.tokenizer(code, opts);
+    // acorn: tokenizer() is `new Parser(options, input)`
+    const t = lib === ref ? lib.tokenizer(code, opts) : new lib.Parser(opts, code);
     for (let i = 0; ; i++) {
       const tok = t.getToken();
       out.push(tok);
@@ -231,5 +231,7 @@ for (const file of files) {
     if (m === 0) checkParse("mutated topLevelParser", file, mc, { ecmaVersion: "latest", sourceType: "module" }, TopRef, TopV);
   }
 }
+// the generic parser must have been installed (and not by mistake be the fast one)
+if (typeof Object.getPrototypeOf(V.Parser.prototype).parseStatement !== "function") throw new Error("generic parser not installed");
 console.log(`checks ${checks}, both-error ${errsBoth}, MISMATCH ${fails}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
 process.exit(fails ? 1 : 0);

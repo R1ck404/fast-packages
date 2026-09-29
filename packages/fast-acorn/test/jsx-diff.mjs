@@ -1,16 +1,15 @@
 // Differential test for JSX: acorn 8.18 + acorn-jsx 5.3.2 (node_modules)
 // against @r1ck404/fast-acorn's Parser.extend(acornJsx(...)) -- through the public API
-// (fast path or fallback: result and errors must be identical) and through
-// the fast parser directly (to count fast-path parses and detect false
-// accepts). Inputs: a JSX corpus (default verify/jsx-corpus), the
+// and through the fast parser directly: results and errors (message, pos,
+// loc, raisedAt) must be identical. Inputs: a JSX corpus (default verify/jsx-corpus), the
 // JS corpus (--js N files), generated JSX, and mutations of all of those.
 //
 // node packages/fast-acorn/test/jsx-diff.mjs [--dir jsxdir] [--js N] [--gen N] [--mutations N] [--limit N]
 import * as ref from "acorn";
-import * as fast from "../index.mjs";
-import * as V from "../vendor/acorn.mjs";
-import { fastParse, BAIL } from "../parser.mjs";
-import { jsxOptionsOf } from "../jsx-detect.mjs";
+import * as fast from "../src/index.mjs";
+import * as V from "../src/shared.mjs";
+import { fastParse } from "../src/parser.mjs";
+import { jsxOptionsOf } from "../src/jsx-detect.mjs";
 import fastJsx from "@r1ck404/fast-acorn-jsx";
 import { idSer } from "./idser.mjs";
 import { createRequire } from "node:module";
@@ -37,8 +36,8 @@ const pairs = PLUGIN_OPTS.map((po) => ({
   G: fast.Parser.extend(fastJsx(po)), // @r1ck404/fast-acorn-jsx: registered
 }));
 for (const p of pairs) {
-  if (!jsxOptionsOf(p.F)) throw new Error("genuine acorn-jsx class not recognised: " + JSON.stringify(p.po));
-  if (!jsxOptionsOf(p.G)) throw new Error("@r1ck404/fast-acorn-jsx class not recognised: " + JSON.stringify(p.po));
+  if (!jsxOptionsOf(p.F, fast.Parser)) throw new Error("genuine acorn-jsx class not recognised: " + JSON.stringify(p.po));
+  if (!jsxOptionsOf(p.G, fast.Parser)) throw new Error("@r1ck404/fast-acorn-jsx class not recognised: " + JSON.stringify(p.po));
 }
 
 const replacer = (k, v) => (typeof v === "bigint" ? { $bigint: v.toString() } : v instanceof RegExp ? { $re: String(v) } : typeof v === "function" ? { $fn: v.name } : v);
@@ -50,9 +49,10 @@ function firstDiff(a, b) {
   return `@${i}: ref …${a.slice(Math.max(0, i - 100), i + 100)}…\n   fast …${b.slice(Math.max(0, i - 100), i + 100)}…`;
 }
 
-let checks = 0, fastOk = 0, bails = 0, bothErr = 0, mismatch = 0, falseAccept = 0, shown = 0;
+let checks = 0, fastOk = 0, falseReject = 0, bothErr = 0, mismatch = 0, falseAccept = 0, shown = 0;
 function fail(kind, name, detail) {
   if (kind === "FALSE-ACCEPT") falseAccept++;
+  else if (kind === "FALSE-REJECT") falseReject++;
   else mismatch++;
   if (shown++ < 25) console.log(`${kind} ${name}\n  ${detail}`);
 }
@@ -92,19 +92,19 @@ function check(name, code, opts, pair, which) {
   if (ea !== null || eb !== null) {
     if (ea !== eb) return fail("MISMATCH(error)", name + " " + JSON.stringify(opts) + " " + JSON.stringify(pair.po), `ref: ${ea}\n  fast: ${eb}`);
   } else if (ra !== rb) return fail("MISMATCH", name + " " + JSON.stringify(opts) + " " + JSON.stringify(pair.po), firstDiff(ra, rb));
-  // the fast parser alone: must never accept what acorn-jsx rejects
+  // the fast parser alone: the same result, or the same error
   const c = withSinks(opts);
-  let rc = null, bailed = false;
+  let rc = null, ec = null;
   try {
-    rc = idSer(fastParse(code, V._getOptions(c.o), jsxOptionsOf(Cls))) + "\u0000" + ser(c.log);
+    rc = idSer(fastParse(code, V.getOptions(c.o), jsxOptionsOf(Cls, fast.Parser))) + "\u0000" + ser(c.log);
   } catch (e) {
-    if (e !== BAIL && !(e instanceof RangeError)) return fail("CRASH", name, e.stack);
-    bailed = true;
+    ec = errSer(e) + "\u0000" + ser(c.log);
   }
   if (ea !== null) {
-    if (!bailed) return fail("FALSE-ACCEPT", name + " " + JSON.stringify(opts), ea);
+    if (ec === null) return fail("FALSE-ACCEPT", name + " " + JSON.stringify(opts), ea);
+    if (ec !== ea) return fail("MISMATCH(direct error)", name + " " + JSON.stringify(opts), `ref: ${ea}\n  fast: ${ec}`);
     bothErr++;
-  } else if (bailed) bails++;
+  } else if (ec !== null) return fail("FALSE-REJECT", name + " " + JSON.stringify(opts), ec);
   else {
     if (rc !== ra) return fail("MISMATCH(direct)", name, firstDiff(ra, rc));
     fastOk++;
@@ -223,7 +223,7 @@ for (const f of jsxFiles) {
   runInput(f, code, true);
   for (let m = 0; m < mutations; m++) runInput(f + " (mutated)", mutate(code), false);
 }
-const afterCorpus = { checks, fastOk, bails, bothErr };
+const afterCorpus = { checks, fastOk, bothErr };
 // 2. JS corpus parsed with the JSX classes
 const jsFiles = [];
 (function walk(d) {
@@ -251,6 +251,6 @@ for (let i = 0; i < genCount; i++) {
   runInput("gen#" + i + " " + JSON.stringify(code).slice(0, 200), code, i % 10 === 0);
   if (i % 2 === 0) runInput("gen#" + i + " (mutated)", mutate(code), false);
 }
-console.log(`jsx corpus part: checks ${afterCorpus.checks}, fast ${afterCorpus.fastOk}, bail ${afterCorpus.bails}, both-error ${afterCorpus.bothErr}`);
-console.log(`total: checks ${checks}, fast-path ${fastOk}, bail ${bails}, both-error ${bothErr}, FALSE-ACCEPT ${falseAccept}, MISMATCH ${mismatch}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
-process.exit(falseAccept || mismatch ? 1 : 0);
+console.log(`jsx corpus part: checks ${afterCorpus.checks}, same result ${afterCorpus.fastOk}, same error ${afterCorpus.bothErr}`);
+console.log(`total: checks ${checks}, same result ${fastOk}, same error ${bothErr}, FALSE-ACCEPT ${falseAccept}, FALSE-REJECT ${falseReject}, MISMATCH ${mismatch}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+process.exit(falseAccept || falseReject || mismatch ? 1 : 0);

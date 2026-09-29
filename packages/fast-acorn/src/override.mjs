@@ -18,13 +18,13 @@
 //    super.parseFunctionBody with its own four parameters; writes only to
 //    locals and to properties of AST nodes it got from the parser;
 //    arithmetic/relational operators only on numeric locals and literals.
-//    So it cannot have effects outside the parse -- which matters because on
-//    any error the whole input is re-parsed by acorn itself, running the
-//    method again. (Reading properties of objects it closes over, like
-//    `tt.braceL`, is assumed not to have side effects.)
+//    So it cannot have effects outside the parse. (Reading properties of
+//    objects it closes over, like `tt.braceL`, is assumed not to have side
+//    effects.)
 // Anything else keeps acorn's own behaviour.
 
-import * as V from "./vendor/acorn.mjs";
+import { fastParse } from "./parser.mjs";
+import { getOptions } from "./shared.mjs";
 
 const fnToString = Function.prototype.toString;
 const hasOwn = Object.hasOwn;
@@ -35,8 +35,8 @@ const CALLABLE = new Set(["next", "startNode", "startNodeAt", "finishNode", "fin
 const NODE_MAKERS = new Set(["startNode", "startNodeAt", "finishNode", "finishNodeAt"]);
 
 function parseSrc(src) {
-  // (acorn itself; the class wrapper keeps the method in strict mode)
-  return new V.Parser({ ecmaVersion: "latest", sourceType: "script" }, src).parse();
+  // (the class wrapper keeps the method in strict mode)
+  return fastParse(src, getOptions({ ecmaVersion: "latest", sourceType: "script" }));
 }
 
 // ---- whitelist analysis of the method
@@ -270,10 +270,10 @@ function analyseMethod(fn) {
 // ---- class recognition
 const analysed = new WeakMap(); // class -> { fn } | null
 
-function recognise(C) {
-  if (typeof C !== "function" || Object.getPrototypeOf(C) !== V.Parser) return null;
+function recognise(C, Parser) {
+  if (typeof C !== "function" || Object.getPrototypeOf(C) !== Parser) return null;
   const proto = C.prototype;
-  if (!proto || Object.getPrototypeOf(proto) !== V.Parser.prototype || proto.constructor !== C) return null;
+  if (!proto || Object.getPrototypeOf(proto) !== Parser.prototype || proto.constructor !== C) return null;
   const names = Object.getOwnPropertyNames(C);
   if (Object.getOwnPropertySymbols(C).length || names.length !== 3 || !names.includes("length") || !names.includes("name") || !names.includes("prototype")) return null;
   const pnames = Object.getOwnPropertyNames(proto);
@@ -308,11 +308,11 @@ function recognise(C) {
 ;                                                                                                                           
 
 // the method to run on the facade, or null
-export function bodyOverrideOf(C          )                      {
+export function bodyOverrideOf(C          , Parser     )                      {
   let rec = analysed.get(C);
   if (rec === undefined) {
     try {
-      rec = recognise(C);
+      rec = recognise(C, Parser);
     } catch {
       rec = null;
     }

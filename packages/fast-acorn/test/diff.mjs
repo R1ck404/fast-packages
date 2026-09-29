@@ -1,8 +1,9 @@
-// Differential test: fast parser vs acorn on every JS file we can find.
-// node packages/fast-acorn/test/diff.mjs [--limit N] [--dir path] [--locs]
+// Differential test: fast parser vs acorn on every JS file we can find --
+// results, errors (message, pos, loc, raisedAt) and callbacks must match.
+// node packages/fast-acorn/test/diff.mjs [--limit N] [--dir path] [--locs] [--comments] [--nodepod]
 import * as acorn from "acorn";
-import { fastParse, BAIL } from "../parser.mjs";
-import { _getOptions as getOptions, Node as VNode } from "../vendor/acorn.mjs";
+import { fastParse } from "../src/parser.mjs";
+import { getOptions, Node as VNode } from "../src/shared.mjs";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +54,7 @@ console.log(`${files.length} files`);
 
 const replacer = (k, v) => (typeof v === "bigint" ? { $bigint: v.toString() } : v instanceof RegExp ? { $re: String(v) } : v);
 const ser = (ast) => JSON.stringify(ast, replacer);
+const errSer = (e) => (e instanceof Error ? `${e.constructor.name}|${e.message}|${e.pos}|${e.loc ? e.loc.line + ":" + e.loc.column : e.loc}|${e.raisedAt}` : "THROW " + String(e));
 // object identity structure: which nodes, arrays, loc/Position objects and
 // range arrays are shared (acorn shares e.g. a token's Position between all
 // nodes starting/ending there, and the Identifier of `export { a }`)
@@ -82,8 +84,7 @@ function shareSig(ast) {
   return out.join(",");
 }
 
-let ok = 0, bails = 0, bothFail = 0, falseAccept = 0, mismatch = 0, shown = 0;
-const bailSamples = [];
+let ok = 0, sameError = 0, falseAccept = 0, falseReject = 0, mismatch = 0, shown = 0;
 
 function firstDiff(a, b) {
   let i = 0;
@@ -120,22 +121,27 @@ function check(file, code, opts0) {
   } catch (e) {
     fastErr = e;
   }
+  const sink = (s) => (s ? "\u0000" + ser(s) : "");
   if (refErr) {
-    if (fastErr) bothFail++;
-    else {
+    if (!fastErr) {
       falseAccept++;
       if (shown++ < 15) console.log(`FALSE ACCEPT ${file} ${JSON.stringify(opts)}: acorn threw ${refErr.message}`);
+      return;
     }
+    // the same error, after the same comments
+    const a = errSer(refErr) + sink(refSink), b = errSer(fastErr) + sink(fastSink);
+    if (a !== b) {
+      mismatch++;
+      if (shown++ < 15) console.log(`ERROR MISMATCH ${file} ${JSON.stringify(opts)}\n   acorn ${a.slice(0, 300)}\n   fast  ${b.slice(0, 300)}`);
+    } else sameError++;
     return;
   }
   if (fastErr) {
-    bails++;
-    if (fastErr !== BAIL) {
-      if (shown++ < 15) console.log(`CRASH ${file}: ${fastErr.stack}`);
-    } else if (bailSamples.length < 30) bailSamples.push(file);
+    falseReject++;
+    if (shown++ < 15) console.log(`FALSE REJECT ${file} ${JSON.stringify(opts)}: ${fastErr.stack}`);
     return;
   }
-  const a = ser(ref) + (refSink ? "\u0000" + ser(refSink) : ""), b = ser(fast) + (fastSink ? "\u0000" + ser(fastSink) : "");
+  const a = ser(ref) + sink(refSink), b = ser(fast) + sink(fastSink);
   if (a !== b) {
     mismatch++;
     if (shown++ < 15) console.log(`MISMATCH ${file} ${JSON.stringify(opts)}\n   ${firstDiff(a, b)}`);
@@ -176,6 +182,5 @@ for (const file of files) {
     check(file, code, { ecmaVersion: "latest", sourceType, comments: "fn" });
   }
 }
-console.log(`ok ${ok}, bail ${bails}, bothFail ${bothFail}, FALSE-ACCEPT ${falseAccept}, MISMATCH ${mismatch}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
-if (bailSamples.length) console.log("bail samples:\n  " + bailSamples.slice(0, 10).join("\n  "));
-process.exit(falseAccept || mismatch ? 1 : 0);
+console.log(`ok ${ok}, same error ${sameError}, FALSE-ACCEPT ${falseAccept}, FALSE-REJECT ${falseReject}, MISMATCH ${mismatch}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+process.exit(falseAccept || falseReject || mismatch ? 1 : 0);

@@ -4,15 +4,17 @@
 // the corpus and mutations of it: identical result or error (message, pos,
 // loc, raisedAt), compared with a serializer that also covers object
 // identity (shared nodes / Positions), prototypes and key order. Variants
-// that must be recognised are checked to take the fast path; variants that
-// must not be recognised are checked to be rejected.
+// that must be recognised are checked to take the fast path, and the fast
+// parser run directly must give the same result or error; variants that
+// must not be recognised are checked to be rejected (they run acorn's
+// generic parser, loaded on demand).
 //
 // node packages/fast-acorn/test/override-diff.mjs [--limit N] [--nodepod] [--mutations N]
 import * as ref from "acorn";
-import * as fast from "../index.mjs";
-import * as V from "../vendor/acorn.mjs";
-import { bodyOverrideOf } from "../override.mjs";
-import { fastParse, BAIL } from "../parser.mjs";
+import * as fast from "../src/index.mjs";
+import * as V from "../src/shared.mjs";
+import { bodyOverrideOf } from "../src/override.mjs";
+import { fastParse } from "../src/parser.mjs";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -223,11 +225,11 @@ const REJECT = {
 const classes = {};
 for (const [name, mk] of Object.entries(ACCEPT)) {
   classes[name] = { R: mk(ref), F: mk(fast), accept: true };
-  if (!bodyOverrideOf(classes[name].F)) throw new Error("not recognised: " + name);
+  if (!bodyOverrideOf(classes[name].F, fast.Parser)) throw new Error("not recognised: " + name);
 }
 for (const [name, mk] of Object.entries(REJECT)) {
   classes[name] = { R: mk(ref), F: mk(fast), accept: false };
-  if (bodyOverrideOf(classes[name].F)) throw new Error("wrongly recognised: " + name);
+  if (bodyOverrideOf(classes[name].F, fast.Parser)) throw new Error("wrongly recognised: " + name);
 }
 
 // ---- serializer with identity, prototypes and key order
@@ -269,7 +271,7 @@ function firstDiff(a, b) {
   return `@${i}: ref …${a.slice(Math.max(0, i - 150), i + 100)}…\n   fast …${b.slice(Math.max(0, i - 150), i + 100)}…`;
 }
 
-let checks = 0, fastOk = 0, bails = 0, bothErr = 0, mismatch = 0, falseAccept = 0, shown = 0;
+let checks = 0, fastOk = 0, falseReject = 0, bothErr = 0, mismatch = 0, falseAccept = 0, shown = 0;
 function check(name, file, code, opts, cls) {
   checks++;
   let a, ea = null, b, eb = null;
@@ -295,25 +297,25 @@ function check(name, file, code, opts, cls) {
     return;
   }
   if (!cls.accept) return;
-  // the fast path itself
-  let c = null, bailed = false;
+  // the fast path itself: the same result, or the same error
+  let c = null, ec = null;
   try {
-    c = idSer(fastParse(code, V._getOptions(opts), null, bodyOverrideOf(cls.F)));
+    c = idSer(fastParse(code, V.getOptions(opts), null, bodyOverrideOf(cls.F, fast.Parser)));
   } catch (e) {
-    if (e !== BAIL && !(e instanceof RangeError)) {
-      mismatch++;
-      if (shown++ < 20) console.log(`CRASH ${name} ${file}: ${e.stack}`);
-      return;
-    }
-    bailed = true;
+    ec = errSer(e);
   }
   if (ea !== null) {
-    if (!bailed) {
+    if (ec === null) {
       falseAccept++;
       if (shown++ < 20) console.log(`FALSE-ACCEPT ${name} ${file}: ${ea}`);
+    } else if (ec !== ea) {
+      mismatch++;
+      if (shown++ < 20) console.log(`MISMATCH(direct error) ${name} ${file}\n  ref: ${ea}\n  fast: ${ec}`);
     } else bothErr++;
-  } else if (bailed) bails++;
-  else if (c !== a) {
+  } else if (ec !== null) {
+    falseReject++;
+    if (shown++ < 20) console.log(`FALSE-REJECT ${name} ${file}: ${ec}`);
+  } else if (c !== a) {
     mismatch++;
     if (shown++ < 20) console.log(`MISMATCH(direct) ${name} ${file}\n  ${firstDiff(a, c)}`);
   } else fastOk++;
@@ -405,5 +407,5 @@ for (const file of files) {
     check(n2 + "(mutated)", file, mc, { ecmaVersion: "latest", sourceType: isModule ? "module" : "script" }, classes[n2]);
   }
 }
-console.log(`checks ${checks}, fast-path ${fastOk}, bail ${bails}, both-error ${bothErr}, FALSE-ACCEPT ${falseAccept}, MISMATCH ${mismatch}  (${((performance.now() - t0) / 1000).toFixed(1)}s; closure side effects seen ${sideEffects})`);
-process.exit(falseAccept || mismatch ? 1 : 0);
+console.log(`checks ${checks}, fast path: same result ${fastOk}, same error ${bothErr}, FALSE-ACCEPT ${falseAccept}, FALSE-REJECT ${falseReject}, MISMATCH ${mismatch}  (${((performance.now() - t0) / 1000).toFixed(1)}s; closure side effects seen ${sideEffects})`);
+process.exit(falseAccept || falseReject || mismatch ? 1 : 0);

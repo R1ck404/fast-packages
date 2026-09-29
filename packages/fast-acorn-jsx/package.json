@@ -1,7 +1,7 @@
 {
   "name": "@r1ck404/fast-acorn-jsx",
   "version": "5.3.2",
-  "description": "acorn-jsx 5.3.2, unchanged except that @r1ck404/fast-acorn parses its classes with a native JSX mode (2.4-2.6x faster, identical ASTs); works with any acorn",
+  "description": "acorn-jsx 5.3.2, unchanged except that @r1ck404/fast-acorn parses its classes with a native JSX mode (2.3-2.5x faster, identical ASTs); works with any acorn",
   "keywords": [
     "acorn",
     "jsx",
