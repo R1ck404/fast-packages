@@ -91,15 +91,29 @@ ok(eq(B.compress(data), Borig.compress(data)), "brotli compress (require)");
 const Bm = await (await import("brotli-wasm")).default;
 ok(eq(Bm.decompress(Borig.compress(data, { quality: 5 })), data), "brotli decompress (import)");
 
-// esbuild-wasm: Node API unchanged; node.mjs = fast in-thread API
+// esbuild-wasm: the Node API (in-process, no Go binary) and node.mjs (the
+// browser API in-thread), vs the original package
 const E = require("esbuild-wasm");
+const Eorig = require(${JSON.stringify(join(root, "node_modules/esbuild-wasm/lib/main.js"))});
 const r1 = E.transformSync("export const a: number = 1", { loader: "ts", format: "cjs" });
+ok(r1.code === Eorig.transformSync("export const a: number = 1", { loader: "ts", format: "cjs" }).code, "esbuild transformSync (vs esbuild-wasm)");
 const Ef = await import("esbuild-wasm/node.mjs");
 await Ef.initialize();
 const r2 = await Ef.transform("export const a: number = 1", { loader: "ts", format: "cjs" });
 ok(r1.code === r2.code, "esbuild transform (Node API vs node.mjs)");
 ok(Ef.default[Symbol.for("@r1ck404/fast-esbuild-wasm:stats")].fast === 1, "esbuild fast path used");
 await Ef.stop?.();
+const b1 = await E.build({ stdin: { contents: "import('x'); export default 1" }, bundle: true, external: ["x"], write: false, format: "esm", minify: true });
+const b2 = await Eorig.build({ stdin: { contents: "import('x'); export default 1" }, bundle: true, external: ["x"], write: false, format: "esm", minify: true });
+ok(b1.outputFiles[0].text === b2.outputFiles[0].text, "esbuild build (vs esbuild-wasm)");
+ok(!require("fs").existsSync(require.resolve("esbuild-wasm/package.json").replace("package.json", "esbuild.wasm")), "esbuild-wasm ships no Go binary");
+{
+  const bin = require.resolve("esbuild-wasm/package.json").replace("package.json", "bin/esbuild");
+  const cli = require("child_process").spawnSync(process.execPath, [bin, "--version"], { encoding: "utf8" });
+  ok(cli.stdout === "0.28.2\\n", "esbuild bin --version");
+}
+E.stop();
+Eorig.stop();
 
 // @noble/hashes: every entry point in both formats, the fast package in use
 const nobleOrig = (m) => require(${JSON.stringify(join(root, "node_modules/@noble/hashes"))} + "/" + m + ".js");
@@ -142,7 +156,7 @@ const { buildSync } = await import(pathToFileURL(join(root, "node_modules/esbuil
 const b = buildSync({ entryPoints: [join(work, "browser.mjs")], bundle: true, platform: "browser", format: "esm", write: false, logLevel: "silent", metafile: true, absWorkingDir: work });
 const inputs = Object.keys(b.metafile.inputs);
 const used = (name) => inputs.some((i) => i.includes(`node_modules/${name}/`));
-const expect = { "pako/index.mjs": true, "acorn/index.mjs": true, "acorn-jsx/index.js": true, "es-module-lexer/index.mjs": true, "brotli-wasm/index.mjs": true, "esbuild-wasm/lib/browser.js": true, "@noble/hashes/esm/sha2.js": true, "@noble/hashes/esm/_fast.js": true, "@noble/hashes/esm/crypto.js": true };
+const expect = { "pako/index.mjs": true, "acorn/index.mjs": true, "acorn-jsx/index.js": true, "es-module-lexer/browser.mjs": true, "brotli-wasm/index.mjs": true, "esbuild-wasm/lib/browser.js": true, "@noble/hashes/esm/sha2.js": true, "@noble/hashes/esm/_fast.js": true, "@noble/hashes/esm/crypto.js": true };
 let bad = 0;
 for (const f of Object.keys(expect)) if (!inputs.some((i) => i.endsWith("node_modules/" + f))) (bad++, console.log("browser bundle: missing", f));
 const nodeOnly = inputs.filter((i) => /lib\/main\.js|index\.node\.|node:|cryptoNode/.test(i));
