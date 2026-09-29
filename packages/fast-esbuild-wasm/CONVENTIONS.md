@@ -1,14 +1,17 @@
 # @r1ck404/fast-esbuild-wasm: porting conventions (Go → JavaScript)
 
-We are porting esbuild 0.28.2's *transform* pipeline (lexer, parser, printer,
-renamer, part of the linker) from Go to plain JavaScript ES modules (`.mjs`).
-The Go source is a checkout of esbuild v0.28.2; the tools look for it in
+This package is esbuild 0.28.2 ported from Go to plain JavaScript ES modules
+(`.mjs`): the whole pipeline (lexer, parser, printer, renamer, CSS, bundler,
+linker, resolver, file system layer, Yarn PnP with ".zip" archives), the
+service that esbuild's JavaScript API talks to (cmd/esbuild/service.go), the
+command line (cmd/esbuild/main.go) and the parts of Go's standard library
+whose behaviour shows (strconv, math, unicode, regexp, archive/zip,
+compress/flate, ...). Nothing runs Go: there is no fallback. The Go source is
+a checkout of esbuild v0.28.2; the tools look for it in
 `<os tmpdir>/esbuild-src` (`git clone --depth 1 --branch v0.28.2
 https://github.com/evanw/esbuild "$TMPDIR/esbuild-src"`) or take its path as an
-argument. The goal is **byte-identical
-output** to esbuild for the supported option subset, and much higher speed than
-esbuild-wasm. Anything we do not support must **bail** (see below) so the
-caller can fall back to the real esbuild-wasm.
+argument. The goal is **byte-identical output**, messages and behaviour to
+esbuild-wasm (Go on js/wasm), and much higher speed.
 
 The port is a faithful, function-by-function translation. Do not "improve" or
 simplify esbuild's logic, do not reorder conditions, do not merge functions.
@@ -25,8 +28,8 @@ no enums/namespaces/parameter properties, `import type` for types.
 All ported modules live in `src/`. Shared foundations that
 already exist (read them before starting):
 
-- `bail.mjs`       — `BAIL`, `LexerPanic`, `bail()`
-- `logger.mjs`     — Loc/Range/Span/Source helpers + `Log` (throws BAIL on errors/warnings)
+- `gopanic.mjs`    — `LEXER_PANIC`, `GoPanic` (Go's panics), `goIndexOutOfRange`, ...
+- `logger.mjs`     — Loc/Range/Span/Source helpers, `Log` (the stderr and deferred logs), message formatting
 - `helpers.mjs`    — ports of `internal/helpers` used across packages
 - `ast.mjs`        — port of `internal/ast` (Ref, Symbol, ImportRecord, …)
 - `js_ast.mjs`     — port of `internal/js_ast/js_ast.go` (all AST node classes)
@@ -104,10 +107,14 @@ Go esbuild works on UTF-8 bytes; we work on JS strings (UTF-16). Consequences:
   and are decoded back by `helpers.DecodeWTF8Rune`). A JS string with lone
   surrogates is the exact analogue, so `helpers.UTF16ToString(x)` → `x`,
   `helpers.StringToUTF16(x)` → `x`. **But** plain Go `for range`/`utf8.DecodeRune`
-  over a WTF-8 string yields U+FFFD per byte for surrogates; if such code is
-  reachable with lone surrogates, replicate that or `bail()`.
-- The input source never contains lone surrogates (the API sanitises it like
-  `TextEncoder` would).
+  over a WTF-8 string yields U+FFFD per byte for surrogates; replicate that
+  where such code is reachable with lone surrogates.
+- Raw bytes of invalid UTF-8 (Go keeps them in its strings) are carried as the
+  lone surrogates U+DC80..U+DCFF (`helpers.decodeGoString` decodes bytes
+  like Go's string(bytes), `goStringBytes` encodes them back): lexers read
+  them as U+FFFD with a width of one byte, printers write the byte, quoting
+  prints `\xNN`. (So a genuine lone surrogate U+DC80..U+DCFF in a string
+  value is taken for a raw byte.)
 
 ## 4. Structs and value semantics
 
@@ -140,42 +147,70 @@ Go copies structs on assignment; JS objects are references.
 
 ## 5. Options: what the fast path supports
 
-The API layer only calls the port when all of these hold, so code guarded by
-the opposite may be **dropped** (keep a short `// (minify only)` style note):
+Every option and every mode is supported (there is no fallback), so every
+branch must be ported:
 
-- `MinifySyntax`, `MinifyWhitespace`, `MinifyIdentifiers` are false.
-- `MangleProps`/`ReserveProps` nil, `MangleQuoted` false, no mangle cache.
-- `KeepNames`, `DropDebugger` false; `DropLabels` empty; no `Pure` list.
-- `UnsupportedJSFeatures` is empty (target `esnext`) → every
-  `p.options.unsupportedJSFeatures.Has(compat.X)` is false and lowering
-  branches guarded by it can be dropped. (Keep code that runs regardless.)
-- `LineLimit` 0; `ProfilerNames` false. `SourceMap` may be anything but
-  linked (source maps are ported: `sourcemap.mjs`), but there is never an
-  input source map (`InputFile.InputSourceMap` is nil).
-- Mode is `ModePassThrough` or `ModeConvertFormat` (never `ModeBundle`) —
-  bundle-only branches can be dropped.
-- No injected files, no plugins, no Yarn PnP, no CSS, not JSON loader.
+- `MinifySyntax`, `MinifyWhitespace`, `MinifyIdentifiers`, `KeepNames`,
+  `DropDebugger`, `DropLabels`, `Pure` (defines with
+  `CallCanBeUnwrappedIfUnused`), drop console (a `console` define with
+  `MethodCallsMustBeReplacedWithUndefined`), `LineLimit`, `MangleProps`,
+  `ReserveProps`, `MangleQuoted` and a mangle cache: all supported, port
+  faithfully. (`MangleProps`/`ReserveProps` are objects with Go's
+  `matchString(name)`; the flag parser only accepts regular expressions whose
+  RE2 semantics it can reproduce.)
+- `UnsupportedJSFeatures` may be any target's feature set with any
+  `--supported:` overrides applied (see compat below), so every lowering
+  branch must be ported.
+- `ProfilerNames` is `!MinifyIdentifiers`. Source maps of every kind, input
+  source maps included.
+- `transform()` runs `ModePassThrough` or `ModeConvertFormat`; `build()`
+  (api_build.mjs, bundler_scan.mjs) every mode with plugins, the resolver,
+  inject, every loader (CSS too), code splitting, output paths and hashes,
+  the metafile, `write: true` and watch mode. `serve()` answers like
+  esbuild-wasm (`The "serve" API is not supported when using WebAssembly`).
 - `IgnoreDCEAnnotations` may be either; `TreeShaking` may be either;
   `ASCIIOnly` may be either; `Platform` any; `OutputFormat` preserve/esm/cjs/iife.
 - JSX options, defines, TS options: supported, port faithfully.
 
 When unsure whether a branch is reachable, port it.
 
-## 6. Errors, warnings, bailing
+## 6. Errors, warnings, panics
 
-- `import { BAIL, bail, LexerPanic, LEXER_PANIC } from "./bail.mjs"`.
-- Any log message of kind Error or Warning (`log.AddError`, `AddID` with
-  `logger.Warning`/`logger.Error`, `AddIDWithNotes`, …) → call the matching
-  method on the `Log` object from logger.mjs; it throws `BAIL`. Messages of
-  kind Debug/Verbose/Info are ignored (they never reach transform results),
-  but still port the surrounding logic. Do not bother building message text
-  for Error/Warning (the method throws anyway) — just call `log.addError()` /
-  `log.addID(id, kind)` etc. with whatever arguments are handy.
+- `import { LEXER_PANIC, GoPanic } from "./gopanic.mjs"`.
+- Every log message (`log.AddError`, `AddID`, `AddIDWithNotes`, `AddMsg`,
+  `AddMsgID`, …, of every kind) → the matching method on the `Log` object
+  from logger.mjs, with the exact text (`fmt.Sprintf`'s `%q` is
+  `goQuote` from gostd.mjs), tracker, range (UTF-16 offsets: the tracker
+  converts to UTF-8 columns; a Go range whose length is `len(someString)`
+  is a `ByteRange`), notes, suggestion and ID. Messages are text built
+  where Go builds them, in the same order (the stderr log prints as messages
+  arrive, like Go). The resolver's debug logs (`r.debugLogs`) are built
+  like Go builds them, at the log levels `debug` and `verbose`.
+- Go's parse caches parse into a temporary deferred log whose sorted
+  messages are then added (`parseWithTempLog`); keep that where Go has it.
 - The lexer's `panic(LexerPanic{})` → `throw LEXER_PANIC`. Code that
   `recover()`s a `LexerPanic` (TypeScript backtracking) → `catch (e) { if (e !==
   LEXER_PANIC) throw e; … }`.
-- Anything unsupported / unported / "should be impossible" → `bail()`.
-  Never guess: if a code path is not ported, `bail()` there so we fall back.
+- Go's `panic(...)` and Go runtime errors (index out of range, ...) →
+  `throw new GoPanic(value)` with Go's text. Where Go `recover()`s
+  (bundler.parseFile, the linker's recoverInternalError) the port catches
+  it (recover.mjs) and logs Go's message; anywhere else it ends the service,
+  like a crash of esbuild's process.
+- Stack overflow (JS-only, `deep.mts`): Go's stacks grow, a JavaScript
+  thread's does not. The build (`tools/gen-deep.mjs`) gives every function of
+  the bundled engine that is part of a recursion a generator copy
+  (`name$deep`) that runs on an explicit stack. A step that overflows the
+  call stack runs again in deep mode: a file's parse (`parseWithTempLog`,
+  with a fresh temporary log), the printing of a file by the linker, and a
+  transform as a whole (`deepRetry`). So a step that may run again must be
+  safe to run again (no messages logged or shared state changed before it
+  can fail); add new retry points only where that holds. Keep recursive
+  code plain enough for gen-deep: function declarations and methods, local
+  functions only called by name, no `arguments`/`super` in them, no
+  recursion through getters, constructors or callbacks passed to built-ins
+  (these still recurse on the call stack). `node test/depth.mjs` measures
+  the nesting each construct reaches. The source modules run without the
+  copies (`__deepCompiled` is false: nothing runs again).
 
 ## 6b. Writing files — IMPORTANT
 
@@ -213,7 +248,7 @@ Imports are resolved mechanically from where the Go symbol is *defined*
 | internal/js_ast/js_ast_helpers.go                    | js_ast_helpers.mjs        |
 | internal/js_ast/js_ident.go, unicode.go              | js_ident.mjs              |
 | internal/config                                      | config.mjs                |
-| internal/compat                                      | (none: see below)         |
+| internal/compat (JavaScript part)                    | compat.mjs (generated by tools/gen_compat.mjs) |
 | internal/js_lexer (js_lexer.go, tables.go)           | js_lexer.mjs              |
 | internal/js_printer                                  | js_printer.mjs            |
 | internal/renamer                                     | renamer.mjs               |
@@ -227,11 +262,56 @@ Imports are resolved mechanically from where the Go symbol is *defined*
 | js_parser.go lines 13277-17250                       | js_parser_visit_expr.mjs  |
 | ts_parser.go                                         | ts_parser.mjs             |
 | js_parser_lower.go, js_parser_lower_class.go         | js_parser_lower.mjs       |
-| internal/linker, internal/bundler (transform subset) | linker.mjs / transform.mjs |
+| internal/linker                                      | linker.mjs                |
+| internal/bundler (the transform API's subset)        | bundler.mjs (+ transform.mjs: the transform API) |
+| internal/css_lexer                                   | css_lexer.mjs             |
+| internal/css_ast (css_ast.go, css_decl_table.go)     | css_ast.mjs               |
+| css_parser.go, css_parser_media.go                   | css_parser.mjs (class `parser`, mixes in the method objects below) |
+| css_parser_selector.go                               | css_parser_selector.mjs (`selectorMethods`) |
+| css_nesting.go                                       | css_nesting.mjs (`nestingMethods`) |
+| css_decls.go, css_decls_{animation,border_radius,box,box_shadow,composes,container,font,font_family,font_weight,list_style,transform}.go | css_decls.mjs (`declsMethods`) |
+| css_decls_color.go, css_color_spaces.go, css_decls_gradient.go | css_decls_color.mjs (`colorMethods`) |
+| css_reduce_calc.go                                   | css_reduce_calc.mjs (`calcMethods`) |
+| internal/css_printer                                 | css_printer.mjs           |
+| internal/compat/css_table.go                         | compat_css.mjs (generated by tools/gen_compat_css.mjs) |
+| CSS parts of internal/bundler and internal/linker    | linker_css.mjs            |
+| Go standard library behaviour (strconv, strings, math) | gostd.mjs               |
+| internal/bundler/bundler.go (scan phase, Compile)    | bundler_scan.mjs          |
+| pkg/api (build, context, plugins, watch, serve)      | api_build.mjs, build.mjs, api_validate.mjs (+ build_deps.mjs: the fs/resolver/cache imports) |
+| pkg/cli (flag parsing)                               | cli.mjs                   |
+| cmd/esbuild/service.go, stdio_protocol.go            | service.mjs, service_protocol.mjs |
+| cmd/esbuild/main.go (+ main_wasm.go)                 | cli_main.mjs              |
+| internal/fs/watcher (pkg/api/watcher.go)             | watcher.mjs               |
+| internal/helpers/timer.go                            | timer.mjs                 |
+| internal/resolver (resolver.go, package_json.go, tsconfig_json.go, dataurl.go, yarnpnp.go) | resolver.mjs, package_json.mjs, tsconfig.mjs, dataurl.mjs, yarnpnp.mjs |
+| internal/fs (fs_real.go, fs_zip.go, filepath.go)     | fs.mjs                    |
+| archive/zip, compress/flate, hash/crc32 (Go stdlib)  | zip.mjs                   |
+| internal/cache (CacheSet, SourceIndexCache, FSCache, JSONCache, JSCache) | cache.mjs |
+| Go's panics and recover()                            | gopanic.mjs, recover.mjs  |
+| the hosts (not Go code)                              | glue.mjs (browser builds), node_host.mjs (lib/main.js, bin/esbuild), engine.mjs |
+| pkg/api validators (validatePath, externals, alias)  | build_options.mjs         |
+| internal/xxhash                                      | xxhash.mjs (XXH64 in JS and a 549-byte wasm kernel, tools/gen_xxhash_wasm.mjs) |
+| net/url, net/http.DetectContentType (Go stdlib)      | gourl.mjs, sniff.mjs      |
+| internal/sourcemap (ParseSourceMap)                  | sourcemap_parser.mjs      |
 
-**compat**: the fast path always runs with `UnsupportedJSFeatures == 0`
-(target esnext), so `x.Has(compat.Anything)` is `false`; do not port compat.
-Where a compat value is merely passed along, pass `0`.
+**The service** (`src/service.mjs`): the port of service.go reads the
+same packets esbuild's JavaScript API writes to Go's stdin and writes the
+same packets back (goroutines are microtasks; the requests a synchronous
+call needs are answered synchronously). The file system is what Go's
+js/wasm `os` package sees: Node's `fs` for lib/main.js and node.mjs,
+`globalThis.fs` for the browser builds with `worker: false` when it is
+set, else nothing (every call fails with ENOSYS, like wasm_exec.js's stub).
+
+**compat**: `compat.JSFeature` is a uint64 bit set in Go, which JS numbers
+cannot hold. `compat.mjs` represents a set as an immutable `JSFeature` object
+with two 32-bit halves; the feature constants keep their Go names and are
+single-bit sets. `features.Has(compat.X)` -> `jsFeatureHas(features, X)`,
+`a | b` -> `jsFeatureOr(a, b)`, Go's `0` -> `JSFeatureNone`,
+`compat.SymbolFeature(kind)` -> `symbolFeature(kind)`. The version tables and
+`UnsupportedJSFeatures(constraints)` are generated from js_table.go; the
+target flag parsing (`parseTargets`, `validateFeatures`) is in transform.mjs.
+`compat.CSSFeature` fits a number: `cssFeatureHas(features, X)`, `|` as usual
+(compat_css.mjs).
 
 ### Parser methods (all js_parser/*.go files)
 
@@ -316,7 +396,8 @@ marked "JS-only" in the source and relies on the invariant stated here.
   (cached per map) filters the per-expression lookups.
 - **Runtime print cache** (`linker.printRuntimeCached`): the printed code of
   the runtime helpers is reused when the live runtime parts, the printer
-  options and every (ref, name) pair the renamer returned are the same.
+  options (including the minify options, the line limit and the target's
+  features) and every (ref, name) pair the renamer returned are the same.
 - **Runtime linker memo** (`linker.sharedStep5Memos`): step 5 of
   scanImportsAndExports (namespace export part, symbol uses and dependencies
   of every part) is a pure function of the cached runtime AST.
@@ -338,6 +419,130 @@ marked "JS-only" in the source and relies on the invariant stated here.
 - **Multiple return values** are read by index (`const r = f(); r[0]`), not
   by array destructuring (which goes through the iterator protocol), and
   loops over known arrays use indices instead of `for...of`.
+- **Runtime AST snapshot** (`snapshot.mjs`): the built engine decodes the
+  runtime's AST from a snapshot made with this parser at build time instead
+  of parsing `runtime.mjs` on the first transform (bundler.runtimeCache). The
+  decoded objects are constructed like the parsed ones (same classes, field
+  order, identity of shared objects and of the module singletons).
+- **Minification and lowering** (each marked "JS-only" at the site):
+  - Character frequency (`js_parser.computeCharacterFrequency`): the source
+    and the comments are counted with a histogram per string instead of one
+    `Scan` per character; symbols with a use count of 0 are skipped (their
+    delta is 0).
+  - `simplifyUnusedExpr` (js_ast_helpers) returns the comma expression
+    itself when `JoinWithComma` would rebuild an identical one, and the
+    printer remembers comma expressions that simplification left unchanged:
+    Go re-simplifies long comma chains at every level (quadratic).
+  - The printer's late constant folding (`lateConstantFoldUnaryOrBinaryOrIfExpr`)
+    is skipped when the file has no inlined constants or enum values, and
+    the unused-call inlining check when no symbol is flagged
+    `IsEmptyFunction`/`IsIdentityFunction` (neither can change anything
+    then). The printer caches its `!UnsupportedFeatures.Has(compat.X)`
+    checks in booleans.
+  - `convertSymbolUseToCall` updates the use counters in place (like
+    `recordUsage`); `lowerAssign` returns early for identifier targets and
+    only allocates its callback when object rest can apply.
+  - `renamer.assignNestedScopeSlots` passes Go's by-value `slot` array as
+    four numbers.
+  - The lexer's `allComments` is shared by `lexer.clone()`; every TS
+    backtracking site truncates it back (`ts_parser.restoreLexer`) to get
+    Go's slice semantics.
+- **Go on wasm, not amd64**: Go's float to int conversion of NaN is
+  platform-defined (0 on wasm, MinInt64 on amd64). The port follows
+  esbuild-wasm (`js_ast_helpers.approximatePrintedIntCharCount`), so
+  "1 >>> NaN" folds under minifySyntax like esbuild-wasm does (native esbuild
+  keeps it). The tests re-check such differences against esbuild-wasm
+  ("okWasm"). Float to int conversions saturate like on wasm
+  (`gostd.goIntFromFloat` and friends).
+- **build()**:
+  - `ast.Ref` is one number: `(sourceIndex << 18) | innerIndex` (a small
+    integer) for up to 4096 files and 262143 symbols per file, beyond that
+    `2^30 + sourceIndex * 2^26 + innerIndex` (see ast.mjs).
+  - The scanner's goroutines are async functions on one thread; the result
+    channel is a queue of promises (`scanner.send`/`receive`). Plugin
+    callbacks are awaited in Go's order per file.
+  - Go links each entry point of a multi-entry build without code splitting
+    on a copy of the graph; the port deep-clones the ASTs
+    (`cloneLinkerGraph(..., deepClone)`) for all but the last link.
+  - Contents of binary loaders are byte strings (latin1: one char per byte),
+    text loaders decode like Go's string(bytes) (section 3).
+  - xxhash (output hashes): XXH64 on 32-bit halves in JS for short inputs,
+    a small wasm kernel for inputs of 256 bytes and more (same results).
 - **Test hook**: with `globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__` set
-  (test/diff.mjs, test/fuzz.mjs) every cache/memo hit above is checked
-  against a fresh computation and a mismatch throws (reported as CRASH).
+  (test/diff.mjs, test/fuzz.mjs, test/api.mjs) every cache/memo hit above,
+  and the runtime snapshot, is checked against a fresh computation and a
+  mismatch throws (reported as CRASH).
+
+## 10. CSS
+
+`transform()` with loader `css`, `local-css` or `global-css` runs the port of
+the CSS pipeline: css_lexer, css_parser (with nesting lowering, the
+declaration minifiers, colors, gradients and calc()), css_printer, and the CSS
+half of the bundler and linker for a transform (linker_css.mjs: import order
+with external `@import` hoisting and condition merging, `mangleLocalCSS` for
+local names, `generateChunkCSS`, banners, legal comments, source maps).
+Warnings and errors are reported exactly like in JavaScript: every
+`log.Add...` is ported with its text and condition.
+
+Value semantics (the most common source of bugs in this port):
+
+- `css_ast.Token` is a mutable class with `clone()`. Go copies it on every
+  assignment: wherever Go copies a token (or a slice of tokens, or a
+  `[4]Token` array) and either copy is mutated afterwards, the port clones.
+  `*token.Children = x` replaces the slice for every copy that shares the
+  pointer (css_decls replaces the array's contents in place for that).
+- `CompoundSelector` has `copy()` (Go's `a := b`) and `clone()` (Go's
+  `Clone()`); `NamespacedName`, `NameToken`, `NthIndex` are mutable with
+  `clone()`; `Combinator`, `Rule` and `MediaQuery` are immutable pairs.
+- nil vs empty matters to the printer: `RKnownAt.rules`, `RAtLayer.rules`,
+  `RUnknownAt.block`, `SSPseudoClass.args`, `MQPlainOrBoolean.valueOrNil`,
+  `MQType.andOrNull` are `null` for Go's nil.
+- `(check *CrossFileEqualityCheck) RefsAreEquivalent` is called on a nil
+  receiver in Go: `refsAreEquivalent(check, a, b)`.
+- Methods returning `(value, bool)` return `[value, bool]`; pointer out
+  parameters such as `wouldClipColor *bool` are `{ value: boolean }` objects.
+
+Go standard library (gostd.mjs): `strconv.ParseFloat` -> `strconvParseFloat`
+(range errors included, never `Number()`), `strconv.FormatFloat(x, 'f', n)` /
+`%.Nf` -> `formatFloatFixed` (exact, half to even), `strings.ToLower` /
+`strings.EqualFold` -> `goToLower` / `goEqualFold` (Unicode simple case
+mapping), and the `math` functions behind `helpers.F64` (`goSin`, `goCos`,
+`goCbrt`, `goPow`, `goAtan2`, `goLog2`, `goExp`, `goLog`, `goRound`, ...),
+ported from Go's pure-Go implementations, which is what esbuild-wasm runs.
+Native esbuild on amd64 uses assembly for `math.Exp` and `math.Log`, so a few
+colors computed through `Pow` differ from native esbuild in the last bit and
+can print differently; the tests re-check those against esbuild-wasm
+("okWasm"). `helpers.F64` needs no wrapper: it only prevents fused
+multiply-add, which JavaScript never does. Go constant expressions that
+JavaScript would round differently (e.g. `0.3457 / 0.3585`) are written as
+their correctly rounded values. Float to int conversions that are
+platform-defined in Go (huge values) follow wasm.
+
+JS-only deviations (none changes the output):
+
+- **No JavaScript runtime or JavaScript linking for CSS**
+  (`linker_css.transformBundleCSS`): Go parses the runtime and runs the whole
+  linker, but for a CSS entry point the runtime is never live, no JavaScript
+  chunk exists and `mangleProps` has no JavaScript file to work on (the mangle
+  cache comes back unchanged). The `<define:...>` files keep their source
+  indices but are not parsed (nothing can import them).
+- **Lexer**: the token being built lives in lexer fields and one Token object
+  is created per token; comment bodies are skipped with `charCodeAt` up to the
+  next `*` (the newline count is kept exact).
+- **Parser**: `convertTokensHelperAt(tokens, start, end, ...)` takes a range of
+  `p.tokens` instead of a copied sub-slice; the method objects are mixed into
+  the `parser` class on the first `parse()` (module load order).
+- **Hashing** (`css_ast.mjs`): `hashCombineString` has an ASCII fast path; the
+  hash of an `RDeclaration` is memoized (`hashMemo`: declarations are hashed
+  by the dead rule remover of their block and again by every enclosing rule,
+  and are never modified after `processDeclarations`); the typo check for
+  unknown properties (`maybeCorrectDeclarationTypo`, only its "ok" is used)
+  remembers its answer per name.
+- **Printer** (`css_printer.mjs`): the output is a growable UTF-8
+  `Uint8Array` like js_printer's (source maps and `--line-limit` count bytes
+  like Go), with one spare buffer reused by the next `print()`;
+  `printTokensOpts` is passed as three arguments; ASCII fast paths in
+  `printIdent` and `printQuotedWithQuote`.
+- **Test hook**: `__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__` (set by
+  test/css-diff.mjs and test/css-fuzz.mjs) checks every memoized declaration
+  hash against a fresh one.

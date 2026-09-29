@@ -80,8 +80,8 @@ for (let i = 0; i < all.length; i++) {
   // truncation (error path) now and then
   if (i % 10 === 0) jobs.push(cmp(`${name} trunc`, src.slice(0, rint(src.length)), nodepod(f)));
   await Promise.all(jobs);
-  if (i % 100 === 0) process.stderr.write(`  ${i}/${all.length} ${((Date.now() - t0) / 1000).toFixed(0)}s fails=${T.fails} fast=${stats.fast} bail=${stats.bail}\n`);
+  if (i % 100 === 0) process.stderr.write(`  ${i}/${all.length} ${((Date.now() - t0) / 1000).toFixed(0)}s fails=${T.fails} fast=${stats.fast} error=${stats.error}\n`);
 }
-console.log("fast path stats:", JSON.stringify({ fast: stats.fast, bail: stats.bail, error: stats.error }));
+console.log("fast path stats:", JSON.stringify({ fast: stats.fast, error: stats.error }));
 await O.stop?.();
 process.exit(T.report() ? 1 : 0);

@@ -12,26 +12,28 @@
 //   are UTF-16 indices. "codePoint" is a full code point (surrogate pairs are
 //   decoded) and step() advances by 1 or 2 code units.
 // - js_lexer.MaybeSubstring is a plain JS string, []uint16 is a JS string.
-// - Error/warning messages are not built: every logged error or warning throws
-//   BAIL (see logger.mjs). panic(LexerPanic{}) is "throw LEXER_PANIC".
+// - panic(LexerPanic{}) is "throw LEXER_PANIC".
 // - A few loops (whitespace, comments, string bodies, identifiers) scan ahead
 //   with charCodeAt and then step() onto the next interesting character. This
 //   has exactly the same effect as stepping one code point at a time.
-import { LEXER_PANIC } from "./bail.mjs";
+import { LEXER_PANIC } from "./gopanic.mjs";
 import {
   Range,
   RANGE_ZERO,
   Span,
   LineColumnTracker,
+  Msg,
+  MsgData,
   Error as KindError,
   Warning as KindWarning,
   MsgID_JS_HTMLCommentInJS,
 } from "./logger.mjs";
 import { TSOptions } from "./config.mjs";
 import { parseFloat64 } from "./helpers.mjs";
+import { goQuote } from "./gostd.mjs";
 import { isIdentifier, isIdentifierStart, isIdentifierContinue, isWhitespace } from "./js_ident.mjs";
 
-export { LexerPanic, LEXER_PANIC } from "./bail.mjs";
+export { LexerPanic, LEXER_PANIC } from "./gopanic.mjs";
 
 // ---------------------------------------------------------------------------
 // T (token kinds). If you add a new token, remember to add it to
@@ -292,7 +294,16 @@ function decodeRune(text, i) {
     }
   }
   runeWidth = 1;
+  // (a lone surrogate in source text is a raw byte of invalid UTF-8)
+  if (c >= 0xd800 && c <= 0xdfff) return 0xfffd;
   return c;
+}
+
+// The value of a run of source text: raw bytes of invalid UTF-8 (lone
+// surrogates, see helpers.decodeGoString) decode as U+FFFD, like Go's
+// utf8.DecodeRuneInString
+function sourceRunValue(text: string): string {
+  return text.isWellFormed() ? text : text.toWellFormed();
 }
 
 // Appending a rune to a []uint16 like the Go code does:
@@ -304,17 +315,6 @@ function runeToUTF16(c) {
   return String.fromCharCode(0xd800 + ((c >> 10) & 0x3ff), 0xdc00 + (c & 0x3ff));
 }
 
-// Minimal logger.Msg stand-in (only "kind" is looked at by Log.addMsg)
-class LexerMsg {
-  declare kind: any;
-  declare data: any;
-  declare notes: any;
-  constructor(kind) {
-    this.kind = kind;
-    this.data = null;
-    this.notes = null;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -586,20 +586,40 @@ export class Lexer {
 
   syntaxError() {
     const loc = this.end;
-    // (The message text is not built: errors abort the fast path.)
-    this.addRangeError(new Range(loc, 0), "Syntax error");
+    let message = "Unexpected end of file";
+    const contents = this.source.contents;
+    if (this.end < contents.length) {
+      const c = decodeRune(contents, this.end);
+      if (c < 0x20) {
+        message = 'Syntax error "\\x' + c.toString(16).toUpperCase().padStart(2, "0") + '"';
+      } else if (c >= 0x80) {
+        message = 'Syntax error "\\u{' + c.toString(16) + '}"';
+      } else if (c !== 34) {
+        message = 'Syntax error "' + String.fromCharCode(c) + '"';
+      } else {
+        message = "Syntax error '\"'";
+      }
+    }
+    this.addRangeError(new Range(loc, 0), message);
     throw LEXER_PANIC;
   }
 
   expectedString(text) {
     // Provide a friendly error message about "await" without "async"
     if (this.prevTokenWasAwaitKeyword) {
-      this.addRangeErrorWithNotes(
-        rangeOfIdentifier(this.source, this.awaitKeywordLoc),
-        '"await" can only be used inside an "async" function',
-        null,
-      );
+      let notes = null;
+      if (this.fnOrArrowStartLoc !== -1) {
+        const note = this.tracker.msgData(new Range(this.fnOrArrowStartLoc, 0), 'Consider adding the "async" keyword here:');
+        note.location.suggestion = "async";
+        notes = [note];
+      }
+      this.addRangeErrorWithNotes(rangeOfIdentifier(this.source, this.awaitKeywordLoc), '"await" can only be used inside an "async" function', notes);
       throw LEXER_PANIC;
+    }
+
+    let found = goQuote(this.raw());
+    if (this.start === this.source.contents.length) {
+      found = "end of file";
     }
 
     let suggestion = "";
@@ -607,7 +627,7 @@ export class Lexer {
       suggestion = text.slice(1, text.length - 1);
     }
 
-    this.addRangeErrorWithSuggestion(this.range(), "Expected " + text + this.errorSuffix, suggestion);
+    this.addRangeErrorWithSuggestion(this.range(), "Expected " + text + this.errorSuffix + " but found " + found, suggestion);
     throw LEXER_PANIC;
   }
 
@@ -621,7 +641,11 @@ export class Lexer {
   }
 
   unexpected() {
-    this.addRangeError(this.range(), "Unexpected" + this.errorSuffix);
+    let found = goQuote(this.raw());
+    if (this.start === this.source.contents.length) {
+      found = "end of file";
+    }
+    this.addRangeError(this.range(), "Unexpected " + found + this.errorSuffix);
     throw LEXER_PANIC;
   }
 
@@ -799,15 +823,37 @@ export class Lexer {
               //   JSXTextCharacter :
               //     * SourceCharacter but not one of {, <, > or }
               //
-              const msg = new LexerMsg(KindError);
+              let replacement;
+              if (this.codePoint === 125) {
+                replacement = "{'}'}";
+              } else {
+                replacement = "{'>'}";
+              }
+              const msg = new Msg(
+                null,
+                "",
+                this.tracker.msgData(new Range(this.end, 1), 'The character "' + String.fromCharCode(this.codePoint) + '" is not valid inside a JSX element'),
+                KindError,
+              );
 
               // Attempt to provide a better error message if this looks like an arrow function
               if (this.couldBeBadArrowInTSX > 0 && this.codePoint === 62 && this.contents.charCodeAt(this.end - 1) === 61) {
-                // (notes only)
-              } else if (!this.ts.parse) {
-                // TypeScript treats this as an error but Babel doesn't treat this
-                // as an error yet, so allow this in JS for now.
-                msg.kind = KindWarning;
+                msg.notes = [
+                  this.tracker.msgData(
+                    this.badArrowInTSXRange,
+                    "TypeScript's TSX syntax interprets arrow functions with a single generic type parameter as an opening JSX element. " +
+                      "If you want it to be interpreted as an arrow function instead, you need to add a trailing comma after the type parameter to disambiguate:",
+                  ),
+                ];
+                msg.notes[0].location.suggestion = this.badArrowInTSXSuggestion;
+              } else {
+                msg.notes = [new MsgData(null, null, "Did you mean to escape it as " + goQuote(replacement) + " instead?")];
+                msg.data.location.suggestion = replacement;
+                if (!this.ts.parse) {
+                  // TypeScript treats this as an error but Babel doesn't treat this
+                  // as an error yet, so allow this in JS for now.
+                  msg.kind = KindWarning;
+                }
               }
 
               this.log.addMsg(msg);
@@ -928,6 +974,7 @@ export class Lexer {
             case 42: {
               // '*'
               this.step();
+              const startRange = this.range();
               multiLineComment: for (;;) {
                 switch (this.codePoint) {
                   case 42: // '*'
@@ -948,7 +995,9 @@ export class Lexer {
 
                   case -1: // This indicates the end of the file
                     this.start = this.end;
-                    this.addRangeErrorWithNotes(new Range(this.start, 0), 'Expected "*/" to terminate multi-line comment', null);
+                    this.addRangeErrorWithNotes(new Range(this.start, 0), 'Expected "*/" to terminate multi-line comment', [
+                      this.tracker.msgData(startRange, "The multi-line comment starts here:"),
+                    ]);
                     throw LEXER_PANIC;
 
                   default:
@@ -1426,6 +1475,7 @@ export class Lexer {
             case 42: {
               // '*'
               this.step();
+              const startRange = this.range();
               // (JS-only: scan for "*/" with charCodeAt. Same effect as the Go loop,
               // which steps one code point at a time and sets "hasNewlineBefore"
               // for every newline, including "approximateNewlineCount".)
@@ -1458,7 +1508,9 @@ export class Lexer {
                 this.current = n;
                 this.step();
                 this.start = this.end;
-                this.addRangeErrorWithNotes(new Range(this.start, 0), 'Expected "*/" to terminate multi-line comment', null);
+                this.addRangeErrorWithNotes(new Range(this.start, 0), 'Expected "*/" to terminate multi-line comment', [
+                  this.tracker.msgData(startRange, "The multi-line comment starts here:"),
+                ]);
                 throw LEXER_PANIC;
               }
               this.current = i + 2;
@@ -1906,7 +1958,7 @@ export class Lexer {
       identifier = identifier.slice(1); // Skip over the "#"
     }
     if (!isIdentifier(identifier)) {
-      this.addRangeError(new Range(this.start, this.end - this.start), "Invalid identifier");
+      this.addRangeError(new Range(this.start, this.end - this.start), "Invalid identifier: " + goQuote(text));
     }
 
     // Escaped keywords are not allowed to work as actual keywords, but they are
@@ -2258,8 +2310,15 @@ export class Lexer {
                 const bit = 1 << (this.codePoint - 97);
                 if ((bit & bits) !== 0) {
                   // Reject duplicate flags (Go logs this directly, ignoring "isLogDisabled")
+                  const r1 = new Range(this.start, 1);
                   const r2 = new Range(this.end, 1);
-                  this.log.addErrorWithNotes(this.tracker, r2, "Duplicate flag in regular expression", null);
+                  while (r1.loc < r2.loc && this.source.contents.charCodeAt(r1.loc) !== this.codePoint) {
+                    r1.loc++;
+                  }
+                  const flag = String.fromCharCode(this.codePoint);
+                  this.log.addErrorWithNotes(this.tracker, r2, 'Duplicate flag "' + flag + '" in regular expression', [
+                    this.tracker.msgData(r1, 'The first "' + flag + '" was here:'),
+                  ]);
                 } else {
                   bits |= bit;
                 }
@@ -2311,7 +2370,7 @@ export class Lexer {
   // If this fails, this returns "[null, false, end]" where "end" is the value to
   // store to "lexer.end" before calling "lexer.syntaxError()" if relevant.
   // Otherwise returns "[decoded, true, 0]".
-  tryToDecodeEscapeSequences(start, text, reportErrors) {
+  tryToDecodeEscapeSequences(start, text, reportErrors): [any, boolean, number] {
     // (JS-only: the decoded pieces, joined at the end; appending with += would
     // build a deep rope for strings with many escapes)
     const decoded = [];
@@ -2328,7 +2387,7 @@ export class Lexer {
         i++;
         continue;
       }
-      if (runStart < i) decoded.push(text.slice(runStart, i));
+      if (runStart < i) decoded.push(sourceRunValue(text.slice(runStart, i)));
       const width = 1;
       i += width;
 
@@ -2582,8 +2641,8 @@ export class Lexer {
       runStart = i;
     }
 
-    if (runStart === 0) return [text, true, 0];
-    if (runStart < n) decoded.push(text.slice(runStart));
+    if (runStart === 0) return [sourceRunValue(text), true, 0];
+    if (runStart < n) decoded.push(sourceRunValue(text.slice(runStart)));
     return [decoded.join(""), true, 0];
   }
 
@@ -2610,11 +2669,14 @@ export class Lexer {
     if (i < contents.length) {
       codePoint = contents.charCodeAt(i);
       width = 1;
-      if ((codePoint & 0xfc00) === 0xd800 && i + 1 < contents.length) {
-        const c2 = contents.charCodeAt(i + 1);
-        if ((c2 & 0xfc00) === 0xdc00) {
-          codePoint = ((codePoint - 0xd800) << 10) + (c2 - 0xdc00) + 0x10000;
+      if ((codePoint & 0xf800) === 0xd800) {
+        if ((codePoint & 0xfc00) === 0xd800 && i + 1 < contents.length && (contents.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+          codePoint = ((codePoint - 0xd800) << 10) + (contents.charCodeAt(i + 1) - 0xdc00) + 0x10000;
           width = 2;
+        } else {
+          // A raw byte of invalid UTF-8 (see helpers.decodeGoString): Go
+          // decodes it as utf8.RuneError
+          codePoint = 0xfffd;
         }
       }
 
@@ -2652,7 +2714,9 @@ export class Lexer {
     this.prevErrorLoc = r.loc;
 
     if (!this.isLogDisabled) {
-      this.log.addMsg(new LexerMsg(KindError));
+      const data = this.tracker.msgData(r, text);
+      data.location.suggestion = suggestion;
+      this.log.addMsg(new Msg(null, "", data, KindError));
     }
   }
 
@@ -2945,14 +3009,14 @@ export function decodeJSXEntities(decoded, text) {
         }
       }
       if (ok) {
-        decoded += text.slice(runStart, amp) + runeToUTF16(c);
+        decoded += sourceRunValue(text.slice(runStart, amp)) + runeToUTF16(c);
         i += length + 1;
         runStart = i;
       }
     }
   }
 
-  return decoded + (runStart === 0 ? text : text.slice(runStart));
+  return decoded + sourceRunValue(runStart === 0 ? text : text.slice(runStart));
 }
 
 export function fixWhitespaceAndDecodeJSXEntities(text) {

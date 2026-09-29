@@ -52,7 +52,7 @@ for (const [name, code] of files) {
   let r;
   for (let i = 0; i < Math.min(reps, 20); i++) r = fastTransform(flags, code);
   if (r === undefined) {
-    console.log(`${name}: BAIL/ERROR`, stats.lastError && String(stats.lastError.stack).split("\n").slice(0, 4).join(" | "));
+    console.log(`${name}: ERROR`, stats.lastError && String(stats.lastError.stack).split("\n").slice(0, 4).join(" | "));
     continue;
   }
   let best = Infinity;

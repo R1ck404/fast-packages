@@ -1,25 +1,30 @@
-// Port of the parts of internal/resolver that a transform runs for the
-// "tsconfigRaw" option:
+// Port of internal/resolver/tsconfig_json.go (ParseTSConfigJSON and its
+// helpers, used by both the transform and the build API: resolver.mjs calls
+// it with the real file system and processes "extends"), plus the parts of
+// internal/resolver that a transform runs for the "tsconfigRaw" option:
 //
-//   - tsconfig_json.go: ParseTSConfigJSON and its helpers
 //   - resolver.go: the "tsconfig.json" override of NewResolver
 //     (applyTSConfigOverride below), parseTSConfigFromSource for a transform
 //     (visited == nil, so "extends" is deliberately not processed), and
 //     getProperty/getString/getBool
-//   - config.go: TSConfigJSX and its ApplyTo method (defined locally since
-//     config.mjs does not have it)
+//   - config.go: TSConfigJSX with its ApplyTo and ApplyExtendedConfig methods,
+//     and TSConfig.ApplyExtendedConfig (defined locally since config.mjs does
+//     not have them)
 //
 // A transform uses a mock file system ("fs.MockFS(..., fs.MockUnix, "/")")
 // whose current directory is "/", so the raw tsconfig's key path is
 // "/<tsconfig.json>", which is never inside "node_modules": every warning
-// below is reported (and therefore bails).
-import { bail } from "./bail.mjs";
+// below is reported.
+import { goQuote } from "./gostd.mjs";
 import {
   Source,
   Path,
   PrettyPaths,
   Range,
   LineColumnTracker,
+  Msg,
+  newDeferLog,
+  DeferLogAll,
   Warning,
   MsgID_TSConfigJSON_InvalidTarget,
   MsgID_TSConfigJSON_InvalidImportsNotUsedAsValues,
@@ -41,6 +46,9 @@ import {
   TSJSXReactJSXDev,
   True,
   False,
+  Unspecified,
+  TSImportsNotUsedAsValues_None,
+  TSTargetUnspecified,
   TSImportsNotUsedAsValues_Remove,
   TSImportsNotUsedAsValues_Preserve,
   TSImportsNotUsedAsValues_Error,
@@ -68,7 +76,21 @@ export class TSConfigJSX {
     this.jsx = TSJSXNone;
   }
 
-  // (ApplyExtendedConfig is only used for "extends", which a transform skips)
+  // This is used for "extends" in "tsconfig.json"
+  applyExtendedConfig(base: TSConfigJSX) {
+    if (base.jsxFactory !== null) {
+      this.jsxFactory = base.jsxFactory;
+    }
+    if (base.jsxFragmentFactory !== null) {
+      this.jsxFragmentFactory = base.jsxFragmentFactory;
+    }
+    if (base.jsxImportSource !== null) {
+      this.jsxImportSource = base.jsxImportSource;
+    }
+    if (base.jsx !== TSJSXNone) {
+      this.jsx = base.jsx;
+    }
+  }
 
   applyTo(jsxOptions) {
     switch (this.jsx) {
@@ -154,7 +176,27 @@ export class TSConfigJSON {
     this.settings = new TSConfig();
   }
 
-  // (applyExtendedConfig is only used for "extends", which a transform skips)
+  // (Go passes "base" by value; nothing here mutates it)
+  applyExtendedConfig(base: TSConfigJSON) {
+    if (base.tsTargetKey.range.len > 0) {
+      this.tsTargetKey = base.tsTargetKey;
+    }
+    if (base.tsStrict !== null) {
+      this.tsStrict = base.tsStrict;
+    }
+    if (base.tsAlwaysStrict !== null) {
+      this.tsAlwaysStrict = base.tsAlwaysStrict;
+    }
+    if (base.baseURL !== null) {
+      this.baseURL = base.baseURL;
+    }
+    if (base.paths !== null) {
+      this.paths = base.paths;
+      this.baseURLForPaths = base.baseURLForPaths;
+    }
+    this.jsxSettings.applyExtendedConfig(base.jsxSettings);
+    tsConfigApplyExtendedConfig(this.settings, base.settings);
+  }
 
   tsAlwaysStrictOrStrict() {
     if (this.tsAlwaysStrict !== null) {
@@ -163,6 +205,29 @@ export class TSConfigJSON {
 
     // If "alwaysStrict" is absent, it defaults to "strict" instead
     return this.tsStrict;
+  }
+}
+
+// config.go: TSConfig.ApplyExtendedConfig (this is used for "extends" in
+// "tsconfig.json")
+export function tsConfigApplyExtendedConfig(derived: TSConfig, base: TSConfig) {
+  if (base.experimentalDecorators !== Unspecified) {
+    derived.experimentalDecorators = base.experimentalDecorators;
+  }
+  if (base.importsNotUsedAsValues !== TSImportsNotUsedAsValues_None) {
+    derived.importsNotUsedAsValues = base.importsNotUsedAsValues;
+  }
+  if (base.preserveValueImports !== Unspecified) {
+    derived.preserveValueImports = base.preserveValueImports;
+  }
+  if (base.target !== TSTargetUnspecified) {
+    derived.target = base.target;
+  }
+  if (base.useDefineForClassFields !== Unspecified) {
+    derived.useDefineForClassFields = base.useDefineForClassFields;
+  }
+  if (base.verbatimModuleSyntax !== Unspecified) {
+    derived.verbatimModuleSyntax = base.verbatimModuleSyntax;
   }
 }
 
@@ -233,6 +298,9 @@ function mockIsAbs(p) {
   return p.charCodeAt(0) === 47; // '/'
 }
 
+// The mock file system as seen by parseTSConfigJSON
+const MOCK_FS = { isAbs: mockIsAbs, join: mockJoin };
+
 // mockFS.Dir (Go's path.Dir)
 function mockDir(p) {
   const slash = p.lastIndexOf("/");
@@ -263,7 +331,7 @@ function goStringsToLower(s) {
 }
 
 // resolver.go
-function getProperty(json, name) {
+export function getProperty(json, name): [any, number, boolean] {
   if (json.data instanceof EObject) {
     for (let $i110 = 0, $a110 = json.data.properties; $i110 < $a110.length; $i110++) {
       const prop = $a110[$i110];
@@ -276,25 +344,26 @@ function getProperty(json, name) {
   return [null, 0, false];
 }
 
-// (helpers.UTF16ToString turns lone surrogates into WTF-8. Comparing that with
-// an ASCII string, or looking at its ASCII characters, gives the same results
-// as doing so on the JS string; values that reach the output or are decoded
-// rune by rune bail on lone surrogates where they are used.)
-function getString(json) {
+// (helpers.UTF16ToString turns lone surrogates into WTF-8; the port keeps
+// them as lone surrogates, see helpers.decodeGoString)
+export function getString(json): [string, boolean] {
   if (json.data instanceof EString) {
     return [json.data.value, true];
   }
   return ["", false];
 }
 
-function getBool(json) {
+export function getBool(json): [boolean, boolean] {
   if (json.data instanceof EBoolean) {
     return [json.data.value, true];
   }
   return [false, false];
 }
 
-export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
+// "fs" is the file system (only isAbs() and join() are used) and "jsonCache"
+// is a cache.JSONCache or null (a transform: each transform has a fresh
+// cache, so it always misses).
+export function parseTSConfigJSON(log, source, jsonCache, fs, fileDir, configDir, extends_) {
   // Unfortunately "tsconfig.json" isn't actually JSON. It's some other
   // format that appears to be defined by the implementation details of the
   // TypeScript compiler.
@@ -303,8 +372,8 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
   // these particular files. This is likely not a completely accurate
   // emulation of what the TypeScript compiler does (e.g. string escape
   // behavior may also be different).
-  // (jsonCache.Parse: each transform has a fresh cache, so this always misses)
-  const [json, ok] = parseJSON(log, source, new JSONOptions(0, FlavorTSConfigJSON));
+  const jsonOptions = new JSONOptions(undefined, FlavorTSConfigJSON);
+  const [json, ok] = jsonCache !== null ? jsonCache.parse(log, source, jsonOptions) : parseJSON(log, source, jsonOptions);
   if (!ok) {
     return null;
   }
@@ -321,7 +390,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
       if (ok) {
         const base = extends_(value, source.rangeOfString(valueJSON.loc));
         if (base !== null) {
-          bail(); // (applyExtendedConfig: "extends" is only processed when building)
+          result.applyExtendedConfig(base);
         }
       } else if (valueJSON.data instanceof EArray) {
         for (let $i111 = 0, $a111 = valueJSON.data.items; $i111 < $a111.length; $i111++) {
@@ -330,7 +399,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
           if (ok) {
             const base = extends_(str, source.rangeOfString(item.loc));
             if (base !== null) {
-              bail(); // (applyExtendedConfig: "extends" is only processed when building)
+              result.applyExtendedConfig(base);
             }
           }
         }
@@ -347,9 +416,9 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
       if (ok) {
         let [value, ok] = getString(valueJSON);
         if (ok) {
-          value = getSubstitutedPathWithConfigDirTemplate(value, configDir);
-          if (!mockIsAbs(value)) {
-            value = mockJoin(fileDir, value);
+          value = getSubstitutedPathWithConfigDirTemplate(fs, value, configDir);
+          if (!fs.isAbs(value)) {
+            value = fs.join(fileDir, value);
           }
           result.baseURL = value;
         }
@@ -411,9 +480,6 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
       if (ok) {
         const [value, ok] = getString(valueJSON);
         if (ok) {
-          // (This ends up in an import path. Go would carry lone surrogates
-          // along as WTF-8; not worth replicating.)
-          if (!value.isWellFormed()) bail();
           result.jsxSettings.jsxImportSource = value;
         }
       }
@@ -482,7 +548,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
             default:
               ok = false;
               if (!isInsideNodeModules(source.keyPath.text)) {
-                log.addID(MsgID_TSConfigJSON_InvalidTarget, Warning, tracker, source.rangeOfString(valueJSON.loc), "Unrecognized target environment");
+                log.addID(MsgID_TSConfigJSON_InvalidTarget, Warning, tracker, source.rangeOfString(valueJSON.loc), "Unrecognized target environment " + goQuote(value));
               }
           }
 
@@ -534,7 +600,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
               result.settings.importsNotUsedAsValues = TSImportsNotUsedAsValues_Error;
               break;
             default:
-              log.addID(MsgID_TSConfigJSON_InvalidImportsNotUsedAsValues, Warning, tracker, source.rangeOfString(valueJSON.loc), "Invalid value");
+              log.addID(MsgID_TSConfigJSON_InvalidImportsNotUsedAsValues, Warning, tracker, source.rangeOfString(valueJSON.loc), "Invalid value " + goQuote(value) + ' for "importsNotUsedAsValues"');
           }
         }
       }
@@ -596,7 +662,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
                   let [str, ok] = getString(item);
                   if (ok) {
                     if (isValidTSConfigPathPattern(str, log, source, tracker, item.loc)) {
-                      str = getSubstitutedPathWithConfigDirTemplate(str, configDir);
+                      str = getSubstitutedPathWithConfigDirTemplate(fs, str, configDir);
                       let list = result.paths.map.get(key);
                       if (list === undefined) result.paths.map.set(key, (list = []));
                       list.push(new TSConfigPath(str, item.loc));
@@ -604,7 +670,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
                   }
                 }
               } else {
-                log.addID(MsgID_TSConfigJSON_InvalidPaths, Warning, tracker, source.rangeOfString(prop.valueOrNil.loc), "Substitutions should be an array");
+                log.addID(MsgID_TSConfigJSON_InvalidPaths, Warning, tracker, source.rangeOfString(prop.valueOrNil.loc), "Substitutions for pattern " + goQuote(key) + " should be an array");
               }
             }
           }
@@ -636,7 +702,7 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
           case "target":
           case "useDefineForClassFields":
           case "verbatimModuleSyntax":
-            log.addIDWithNotes(MsgID_TSConfigJSON_InvalidTopLevelOption, Warning, tracker, source.rangeOfString(prop.key.loc), "Expected the option to be nested inside a \"compilerOptions\" object", []);
+            log.addIDWithNotes(MsgID_TSConfigJSON_InvalidTopLevelOption, Warning, tracker, source.rangeOfString(prop.key.loc), "Expected the " + goQuote(key) + ' option to be nested inside a "compilerOptions" object', []);
             break loop;
         }
       }
@@ -647,9 +713,9 @@ export function parseTSConfigJSON(log, source, fileDir, configDir, extends_) {
 }
 
 // See: https://github.com/microsoft/TypeScript/pull/58042
-function getSubstitutedPathWithConfigDirTemplate(value, basePath) {
+function getSubstitutedPathWithConfigDirTemplate(fs, value, basePath) {
   if (value.startsWith("${configDir}")) {
-    return mockJoin(basePath, "./" + value.slice(12));
+    return fs.join(basePath, "./" + value.slice(12));
   }
   return value;
 }
@@ -662,7 +728,7 @@ function parseMemberExpressionForJSX(log, source, tracker, loc, text) {
   for (const part of parts) {
     if (!isIdentifier(part)) {
       const warnRange = source.rangeOfString(loc);
-      log.addID(MsgID_TSConfigJSON_InvalidJSX, Warning, tracker, warnRange, "Invalid JSX member expression");
+      log.addID(MsgID_TSConfigJSON_InvalidJSX, Warning, tracker, warnRange, "Invalid JSX member expression: " + goQuote(text));
       return null;
     }
   }
@@ -676,7 +742,7 @@ function isValidTSConfigPathPattern(text, log, source, tracker, loc) {
       // '*'
       if (foundAsterisk) {
         const r = source.rangeOfString(loc);
-        log.addID(MsgID_TSConfigJSON_InvalidPaths, Warning, tracker, r, "Invalid pattern, must have at most one \"*\" character");
+        log.addID(MsgID_TSConfigJSON_InvalidPaths, Warning, tracker, r, "Invalid pattern " + goQuote(text) + ', must have at most one "*" character');
         return false;
       }
       foundAsterisk = true;
@@ -692,7 +758,7 @@ function isSlash(c) {
 // (Only the first three characters and the length are inspected. The
 // comparisons are all against ASCII characters, so UTF-16 code units give the
 // same results as Go's bytes.)
-function isValidTSConfigPathNoBaseURLPattern(text, log, source, tracker, loc) {
+export function isValidTSConfigPathNoBaseURLPattern(text, log, source, tracker, loc) {
   let c0 = 0;
   let c1 = 0;
   let c2 = 0;
@@ -729,7 +795,10 @@ function isValidTSConfigPathNoBaseURLPattern(text, log, source, tracker, loc) {
   }
 
   const r = source.rangeOfString(loc);
-  log.addID(MsgID_TSConfigJSON_InvalidPaths, Warning, tracker, r, "Non-relative path is not allowed when \"baseUrl\" is not set");
+  if (tracker === null) {
+    tracker = new LineColumnTracker(source);
+  }
+  log.addID(MsgID_TSConfigJSON_InvalidPaths, Warning, tracker, r, "Non-relative path " + goQuote(text) + ' is not allowed when "baseUrl" is not set (did you forget a leading "./"?)');
   return false;
 }
 
@@ -742,7 +811,7 @@ function parseTSConfigFromSource(log, source, configDir) {
   const fileDir = mockDir(source.keyPath.text);
   const isExtends = false; // len(visited) > 1
 
-  const result = parseTSConfigJSON(log, source, fileDir, configDir, (extends_, extendsRange) => {
+  const result = parseTSConfigJSON(log, source, null, MOCK_FS, fileDir, configDir, (extends_, extendsRange) => {
     // If this is nil, then we're in a "transform" API call. In that case we
     // deliberately skip processing "extends" fields. This is because the
     // "transform" API is supposed to be without a file system.
@@ -758,8 +827,8 @@ function parseTSConfigFromSource(log, source, configDir) {
   // URL specified. This must be done here instead of when we're parsing the
   // original file because TypeScript allows one "tsconfig.json" file to
   // specify "baseUrl" and inherit a "paths" from another file via "extends".
-  // (Go iterates over a map here; the order doesn't matter since any warning
-  // bails.)
+  // (Go iterates over a map here; the order doesn't matter: the log sorts
+  // the warnings, which are at different locations)
   if (!isExtends && result.paths !== null && result.baseURL === null) {
     for (const [key, paths] of result.paths.map) {
       let end = 0;
@@ -778,14 +847,17 @@ function parseTSConfigFromSource(log, source, configDir) {
   return result;
 }
 
-// Parsed raw tsconfigs. Parsing is deterministic and a successful parse logs
-// nothing (any error or warning bails), so results are shared between
-// transforms with the same "tsconfigRaw". They are never mutated.
+// Parsed raw tsconfigs. Parsing is deterministic, so results (and the
+// messages the parse logged, replayed into each transform's log in the same
+// order) are shared between transforms with the same "tsconfigRaw". They are
+// never mutated.
 const parsedRawCache = new Map();
 
 function parseTSConfigRaw(log, contents) {
-  let result = parsedRawCache.get(contents);
-  if (result === undefined) {
+  let entry = parsedRawCache.get(contents);
+  if (entry === undefined) {
+    // (log-override is applied when the messages are replayed below)
+    const parseLog = newDeferLog(DeferLogAll, null);
     const cwd = "/"; // fs.Cwd() of the transform's mock file system
     const source = new Source(
       new PrettyPaths("<tsconfig.json>", "<tsconfig.json>"),
@@ -793,16 +865,20 @@ function parseTSConfigRaw(log, contents) {
       contents,
       new Path(mockJoin(cwd, "<tsconfig.json>"), "file"),
     );
-    result = parseTSConfigFromSource(log, source, cwd);
-
-    // A failed parse always comes with a logged error in Go ("Cannot read
-    // file" is only for real files), which bails
-    if (result === null) bail();
-
+    const result = parseTSConfigFromSource(parseLog, source, cwd);
+    entry = { result, msgs: parseLog.msgs.slice() };
     if (parsedRawCache.size >= 16) parsedRawCache.clear();
-    parsedRawCache.set(contents, result);
+    parsedRawCache.set(contents, entry);
   }
-  return result;
+  for (const m of entry.msgs) {
+    const copy = new Msg(m.notes, m.pluginName, m.data, m.kind, m.id);
+    if (m.id !== 0) log.addMsgID(m.id, copy);
+    else log.addMsg(copy);
+  }
+
+  // (a failed parse always comes with a logged error: "Cannot read file" is
+  // only for real files; the override is then not applied)
+  return entry.result;
 }
 
 // The "tsconfig.json" override of resolver.NewResolver for a transform
@@ -813,6 +889,7 @@ function parseTSConfigRaw(log, contents) {
 export function applyTSConfigOverride(log, options) {
   if (options.tsConfigRaw === "") return;
   const tsConfigOverride = parseTSConfigRaw(log, options.tsConfigRaw);
+  if (tsConfigOverride === null) return;
 
   // Mutate the provided options by settings from "tsconfig.json" if present
   const s = tsConfigOverride.settings;

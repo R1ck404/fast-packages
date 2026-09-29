@@ -1,7 +1,7 @@
 {
   "name": "@r1ck404/fast-esbuild-wasm",
   "version": "0.28.2",
-  "description": "Faster drop-in replacement for esbuild-wasm 0.28.2: transform() runs a JavaScript port of esbuild's pipeline with byte-identical output, falling back to the official Go wasm for everything else",
+  "description": "Faster drop-in replacement for esbuild-wasm 0.28.2: esbuild ported to JavaScript (transform, build, context, the CLI and every other API), with byte-identical output and no WebAssembly binary",
   "keywords": [
     "esbuild",
     "esbuild-wasm",
@@ -40,9 +40,6 @@
     "esm/browser.min.js",
     "esm/browser.d.ts",
     "bin/esbuild",
-    "esbuild.wasm",
-    "wasm_exec.js",
-    "wasm_exec_node.js",
     "node.mjs",
     "LICENSE.md"
   ],
@@ -52,8 +49,8 @@
   "scripts": {
     "build": "node build.mjs",
     "prepack": "node build.mjs",
-    "test": "node test/smoke.mjs && node test/api.mjs",
-    "test:full": "node test/diff.mjs && node test/bailreasons.mjs && node test/smoke.mjs && node test/api.mjs && node test/fuzz.mjs --n 3000"
+    "test": "node test/smoke.mjs && node test/api.mjs && node test/no-go.mjs",
+    "test:full": "node test/smoke.mjs && node test/api.mjs && node test/no-go.mjs && node test/node-api.mjs && node test/cli.mjs && node test/diff.mjs && node test/css-diff.mjs && node test/defines.mjs && node test/messages.mjs && node test/fuzz.mjs --n 3000 && node test/css-fuzz.mjs --n 3000 --seed 1 && node test/flags.mjs && node test/input-sourcemaps.mjs && node test/goregexp.mjs && node test/invalid-utf8.mjs && node test/build-plugins.mjs && node test/build-css.mjs && node test/build-diff.mjs && node test/build-diff.mjs --fs real && node test/yarnpnp.mjs && node test/depth.mjs"
   },
   "devDependencies": {
     "esbuild-wasm": "0.28.2",

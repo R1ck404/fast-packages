@@ -8,12 +8,14 @@
 // - Multiple return values are arrays: [value, ok], [a, b, ok], ...
 // - Go compares Expr structs with "==" (same Loc and same Data pointer). This
 //   is replicated by exprIdentical() below.
-// - Numeric folding must match esbuild-wasm (the fallback) bit for bit. On
-//   wasm, Go's math.Pow/Exp/Log/Frexp/Ldexp/Mod are the pure-Go versions (no
-//   assembly), and float->int conversions are saturating. Those functions are
-//   ported below ("Go math" section) and checked against Go by
-//   tools/numcheck_go.go + tools/numcheck.mjs.
-import { bail } from "./bail.mjs";
+// - Numeric folding must match esbuild-wasm bit for bit. On wasm, Go's
+//   math.Pow/Exp/Log/Frexp/Ldexp/Mod are the pure-Go versions (no assembly),
+//   and float->int conversions are saturating. Those functions are ported
+//   below ("Go math" section; they were checked against Go compiled for
+//   js/wasm while porting).
+import { GoPanic } from "./gopanic.mjs";
+import { goIntFromFloat } from "./gostd.mjs";
+import { jsFeatureHas, TypeofExoticObjectIsObject, OptionalChain, NullishCoalescing } from "./compat.mjs";
 import { utf16EqualsString, utf16EqualsUTF16 } from "./helpers.mjs";
 import {
   Expr,
@@ -295,7 +297,7 @@ export function goMathLog(x) {
 }
 
 // The float64 value of Go's untyped constant expression "1 / math.Ln10"
-// (verified by tools/numcheck_go.go).
+// (verified against Go while porting).
 const INV_LN10 = 0.4342944819032518;
 
 // math.Log10
@@ -447,13 +449,6 @@ function exprIdentical(a, b) {
   return a.data === b.data && a.loc === b.loc;
 }
 
-// compat features are never unsupported in the fast path (target esnext).
-// Only compat.InlineScript (1 << 36, set for non-browser platforms) can be
-// unsupported in the fast path, and none of these helpers look at it.
-function checkNoUnsupportedFeatures(unsupportedFeatures) {
-  if (unsupportedFeatures && unsupportedFeatures !== 68719476736) bail();
-}
-
 export class HelperContext {
   declare isUnbound: any;
   constructor(isUnbound = null) {
@@ -599,7 +594,6 @@ export function maybeSimplifyNot(expr) {
 // This function intentionally avoids mutating the input AST so it can be
 // called after the AST has been frozen (i.e. after parsing ends).
 export function maybeSimplifyEqualityComparison(loc, e, unsupportedFeatures) {
-  checkNoUnsupportedFeatures(unsupportedFeatures);
   let value = e.left;
   let primitive = e.right;
 
@@ -625,8 +619,7 @@ export function maybeSimplifyEqualityComparison(loc, e, unsupportedFeatures) {
 
   // "typeof x != 'undefined'" => "typeof x < 'u'"
   // "typeof x == 'undefined'" => "typeof x > 'u'"
-  // (compat.TypeofExoticObjectIsObject is never unsupported in the fast path)
-  {
+  if (!jsFeatureHas(unsupportedFeatures, TypeofExoticObjectIsObject)) {
     // Only do this optimization if we know that the "typeof" operator won't
     // return something random. The only case of this happening was Internet
     // Explorer returning "unknown" for some objects, which messes with this
@@ -1037,7 +1030,7 @@ export function convertBindingToExpr(binding, wrapIdentifier) {
     }
 
     default:
-      bail(); // panic("Internal error")
+      throw new GoPanic("Internal error");
   }
 }
 
@@ -1275,8 +1268,21 @@ Object.assign(HelperContext.prototype, {
           // such as "toString" or "valueOf". They must also never throw any exceptions.
           case BinOpStrictEq:
           case BinOpStrictNe:
-          case BinOpComma:
-            return joinWithComma(ctx.simplifyUnusedExpr(left, unsupportedFeatures), ctx.simplifyUnusedExpr(right, unsupportedFeatures));
+          case BinOpComma: {
+            const l = ctx.simplifyUnusedExpr(left, unsupportedFeatures);
+            const r = ctx.simplifyUnusedExpr(right, unsupportedFeatures);
+            // JS-only: when "JoinWithComma" would rebuild this very comma
+            // expression (same operands, same loc), return it instead of an
+            // equal new node. Re-simplifying the already simplified left
+            // operand of every comma in a long chain (see "visitRightAndFinish")
+            // then allocates nothing. The only observable difference is object
+            // identity, which callers only use to decide whether to rebuild an
+            // equal node (EBinary.isParenthesized is only read while parsing).
+            if (e.op === BinOpComma && l === left && r === right && expr.loc === left.loc && !e.isParenthesized) {
+              return expr;
+            }
+            return joinWithComma(l, r);
+          }
 
           // We can simplify "==" and "!=" even though they can call "toString" and/or
           // "valueOf" if we can statically determine that the types of both sides are
@@ -1308,9 +1314,7 @@ Object.assign(HelperContext.prototype, {
             }
 
             // Try to take advantage of the optional chain operator to shorten code
-            // (compat.OptionalChain is never unsupported in the fast path)
-            checkNoUnsupportedFeatures(unsupportedFeatures);
-            {
+            if (!jsFeatureHas(unsupportedFeatures, OptionalChain)) {
               const binary = left.data;
               if (binary.k === E_BINARY) {
                 // "a != null && a.b()" => "a?.b()"
@@ -1522,7 +1526,7 @@ function simplifyUnusedStringAdditionChain(expr) {
 // The first step only succeeds when "f" is exactly an int32 value, whatever the
 // platform's out-of-range conversion does. "math.Mod" is exact, so the rest is
 // "sign(f) * (trunc(|f|) mod 2^32)" wrapped to int32, which is exactly the
-// ECMAScript ToInt32 operation, i.e. "f | 0" (checked by tools/numcheck).
+// ECMAScript ToInt32 operation, i.e. "f | 0".
 export function toInt32(f) {
   return f | 0;
 }
@@ -1748,15 +1752,10 @@ export function stringCompareUCS2(a, b) {
 // Go: 1 + int(math.Max(0, math.Floor(math.Log10(math.Abs(intValue))))), plus
 // one for negative values. Only reachable when minifying.
 export function approximatePrintedIntCharCount(intValue) {
-  let f = Math.max(0, Math.floor(goMathLog10(Math.abs(intValue))));
-  if (f !== f) {
-    // Go on wasm (Go >= 1.26, or GOWASM=satconv): int(NaN) is 0 (saturating
-    // conversion). Native amd64 would give MinInt64 here.
-    f = 0;
-  } else if (f === Infinity) {
-    bail(); // Go: int(+Inf) saturates and the arithmetic below wraps around
-  }
-  let count = 1 + f;
+  // (Go's int(float64) on wasm saturates: NaN is 0, +Inf is MaxInt64, and
+  // "1 + MaxInt64" wraps around to MinInt64)
+  const f = goIntFromFloat(Math.max(0, Math.floor(goMathLog10(Math.abs(intValue)))));
+  let count = f >= 9223372036854775807 ? -9223372036854775808 : 1 + f;
   if (intValue < 0) {
     count++;
   }
@@ -2502,10 +2501,10 @@ function joinStrings(a, b) {
 // Returns [string, ok]. Go: "if i := int32(n); float64(i) == n" holds exactly
 // when n is an int32 value (including -0), i.e. when "(n | 0) === n".
 // strconv.FormatInt uses lowercase digits like Number.prototype.toString.
-export function tryToStringOnNumberSafely(n, radix) {
+export function tryToStringOnNumberSafely(n, radix): [string, boolean] {
   const i = n | 0;
   if (i === n) {
-    if (radix < 2 || radix > 36) bail(); // strconv.FormatInt panics
+    if (radix < 2 || radix > 36) throw new GoPanic("strconv: illegal AppendInt/FormatInt base");
     return [i.toString(radix), true];
   }
   if (n !== n) {
@@ -3257,7 +3256,7 @@ Object.assign(HelperContext.prototype, {
               break;
 
             default:
-              bail(); // panic("Internal error")
+              throw new GoPanic("Internal error");
           }
           break;
         }
@@ -3698,7 +3697,7 @@ Object.assign(HelperContext.prototype, {
 });
 
 // Returns [number, ok]
-export function stringToEquivalentNumberValue(value) {
+export function stringToEquivalentNumberValue(value): [number, boolean] {
   if (value.length > 0) {
     let intValue = 0; // int32 (wrapping arithmetic)
     let isNegative = false;
@@ -3820,7 +3819,6 @@ Object.assign(HelperContext.prototype, {
   // called after the AST has been frozen (i.e. after parsing ends).
   mangleIfExpr(loc, e, unsupportedFeatures) {
     const ctx = this;
-    checkNoUnsupportedFeatures(unsupportedFeatures);
     let test = e.test;
     let yes = e.yes;
     let no = e.no;
@@ -4023,15 +4021,15 @@ Object.assign(HelperContext.prototype, {
 
         if (ctx.exprCanBeRemovedIfUnused(check)) {
           // "a != null ? a : b" => "a ?? b"
-          // (compat.NullishCoalescing is never unsupported in the fast path)
-          if (valuesLookTheSame(check.data, whenNonNull.data)) {
+          if (!jsFeatureHas(unsupportedFeatures, NullishCoalescing) && valuesLookTheSame(check.data, whenNonNull.data)) {
             return joinWithLeftAssociativeOp(BinOpNullishCoalescing, check, whenNull);
           }
 
           // "a != null ? a.b.c[d](e) : undefined" => "a?.b.c[d](e)"
-          // (compat.OptionalChain is never unsupported in the fast path)
-          if (whenNull.data.k === E_UNDEFINED && tryToInsertOptionalChain(check, whenNonNull)) {
-            return whenNonNull;
+          if (!jsFeatureHas(unsupportedFeatures, OptionalChain)) {
+            if (whenNull.data.k === E_UNDEFINED && tryToInsertOptionalChain(check, whenNonNull)) {
+              return whenNonNull;
+            }
           }
         }
       }
@@ -4078,6 +4076,6 @@ export function forEachIdentifierBinding(binding, callback) {
       break;
 
     default:
-      bail(); // panic("Internal error")
+      throw new GoPanic("Internal error");
   }
 }

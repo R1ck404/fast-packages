@@ -5,7 +5,9 @@
 //
 // Package-level functions are named exports; *parser methods live in
 // `visitStmtMethods` (mixed into Parser.prototype by js_parser.mjs).
-import { bail } from "./bail.mjs";
+import { goQuote } from "./gostd.mjs";
+import { GoPanic, goIndexOutOfRange } from "./gopanic.mjs";
+import { jsFeatureHas, ConstAndLet, OptionalCatchBinding } from "./compat.mjs";
 import { Warning, Debug, MsgID_JS_DuplicateCase, MsgID_JS_DuplicateObjectKey, MsgID_JS_DuplicateClassMember } from "./logger.mjs";
 import { hashCombine, hashCombineString } from "./helpers.mjs";
 import {
@@ -154,6 +156,7 @@ import {
   bindingOpts,
   exprIn,
   ifElseFunctionStmt,
+  relocateVarsNormal,
 } from "./js_parser_types.mjs";
 
 // ---------------------------------------------------------------------------
@@ -290,17 +293,30 @@ export class duplicateCaseChecker {
         for (let $i54 = 0, $a54 = this.cases; $i54 < $a54.length; $i54++) {
           const c = $a54[$i54];
           if (c.hash === hash) {
-            // (The second result, "couldBeIncorrect", and the ranges only
-            // affect the message text, which is never materialised: see
-            // logger.mjs.)
             const $d161 = duplicateCaseEquals(c.value, expr);
-            const equals = $d161[0];
+            const equals = $d161[0], couldBeIncorrect = $d161[1];
             if (equals) {
+              let laterRange;
+              let earlierRange;
+              if (expr.data instanceof EString) {
+                laterRange = p.source.rangeOfString(expr.loc);
+              } else {
+                laterRange = p.source.rangeOfOperatorBefore(expr.loc, "case");
+              }
+              if (c.value.data instanceof EString) {
+                earlierRange = p.source.rangeOfString(c.value.loc);
+              } else {
+                earlierRange = p.source.rangeOfOperatorBefore(c.value.loc, "case");
+              }
+              let text = "This case clause will never be evaluated because it duplicates an earlier case clause";
+              if (couldBeIncorrect) {
+                text = "This case clause may never be evaluated because it likely duplicates an earlier case clause";
+              }
               let kind = Warning;
               if (p.suppressWarningsAboutWeirdCode) {
                 kind = Debug;
               }
-              p.log.addIDWithNotes(MsgID_JS_DuplicateCase, kind);
+              p.log.addIDWithNotes(MsgID_JS_DuplicateCase, kind, p.tracker, laterRange, text, [p.tracker.msgData(earlierRange, "The earlier case clause is here:")]);
             }
             return;
           }
@@ -513,7 +529,7 @@ export class scopeOrderSlice {
     if (end !== undefined) {
       return this.array.slice(this.start + start, this.start + end);
     }
-    if (start < 0 || this.start + start > this.array.length) bail(); // Go: slice bounds out of range
+    if (start < 0 || this.start + start > this.array.length) throw new GoPanic("runtime error: slice bounds out of range [" + (this.start + start) + ":" + this.array.length + "]");
     return new scopeOrderSlice(this.array, this.start + start);
   }
 }
@@ -807,7 +823,9 @@ export const visitStmtMethods = {
             keys = instanceKeys;
           }
           const key = str.value;
-          const prevKind = keys.get(key) ?? keyMissing;
+          // (JS-only: Go's existingKey {kind, loc} packed into one number)
+          const prevKey = keys.get(key) ?? keyMissing;
+          const prevKind = prevKey % 8;
           let nextKind = keyNormal;
 
           if (property.kind === PropertyGetter) {
@@ -825,19 +843,28 @@ export const visitStmtMethods = {
               nextKind = keyGetAndSet;
             } else {
               let id = 0;
+              let what = "";
+              let where = "";
               switch (in_) {
                 case duplicatePropertiesInObject:
                   id = MsgID_JS_DuplicateObjectKey;
+                  what = "key";
+                  where = "object literal";
                   break;
                 case duplicatePropertiesInClass:
                   id = MsgID_JS_DuplicateClassMember;
+                  what = "member";
+                  where = "class body";
                   break;
               }
-              p.log.addIDWithNotes(id, Warning);
+              const r = rangeOfIdentifier(p.source, property.key.loc);
+              p.log.addIDWithNotes(id, Warning, p.tracker, r, "Duplicate " + what + " " + goQuote(key) + " in " + where, [
+                p.tracker.msgData(rangeOfIdentifier(p.source, Math.floor(prevKey / 8)), "The original " + what + " " + goQuote(key) + " is here:"),
+              ]);
             }
           }
 
-          keys.set(key, nextKind);
+          keys.set(key, nextKind + property.key.loc * 8);
         }
       }
     }
@@ -855,13 +882,13 @@ export const visitStmtMethods = {
       array = array.array;
     }
     if (array === null || array === undefined || start >= array.length) {
-      bail(); // Go: index out of range panic
+      goIndexOutOfRange(0, 0);
     }
     const order = array[start];
 
     // Sanity-check that the scopes generated by the first and second passes match
     if (order.loc !== loc || order.scope.kind !== kind) {
-      bail(); // Go: panic("Expected scope ...")
+      throw new GoPanic("Expected scope (" + kind + ", " + loc + ") in " + goQuote(p.source.prettyPaths.select(p.options.logPathStyle)) + ", found scope (" + order.scope.kind + ", " + order.loc + ")");
     }
 
     p.scopesInOrder = new scopeOrderSlice(array, start + 1);
@@ -889,7 +916,8 @@ export const visitStmtMethods = {
 
       // Forbid referencing "arguments" inside class bodies
       if (s.forbidArguments && name === "arguments" && !didForbidArguments) {
-        p.log.addError(); // "Cannot access %q here:"
+        const r = rangeOfIdentifier(p.source, loc);
+        p.log.addError(p.tracker, r, "Cannot access " + goQuote(name) + " here:");
         didForbidArguments = true;
       }
 
@@ -968,7 +996,8 @@ export const visitStmtMethods = {
       }
     }
 
-    p.log.addError(); // "There is no containing label named %q"
+    const r = rangeOfIdentifier(p.source, loc);
+    p.log.addError(p.tracker, r, "There is no containing label named " + goQuote(name));
 
     // Allocate an "unbound" symbol
     const ref = p.newSymbol(SymbolUnbound, name);
@@ -1193,15 +1222,23 @@ export const visitStmtMethods = {
 
       // Reuse memory from "before"
       before = [];
-      // (lowering only: "var" instead of "let" if ConstAndLet is unsupported)
-      const localKind = LocalLet;
+      let localKind = LocalLet;
+      if (jsFeatureHas(p.options.unsupportedJSFeatures, ConstAndLet)) {
+        localKind = LocalVar;
+      }
       if (letDecls.length > 0) {
         before.push(new Stmt(new SLocal(letDecls, localKind), letDecls[0].valueOrNil.loc));
       }
       if (varDecls.length > 0) {
         // Potentially relocate "var" declarations to the top level
-        // (bundle only: maybeRelocateVarsToTopLevel returns ok=false unless ModeBundle)
-        before.push(new Stmt(new SLocal(varDecls, LocalVar), varDecls[0].valueOrNil.loc));
+        const $r = p.maybeRelocateVarsToTopLevel(varDecls, relocateVarsNormal);
+        if ($r[1]) {
+          if ($r[0] !== null) {
+            before.push($r[0]);
+          }
+        } else {
+          before.push(new Stmt(new SLocal(varDecls, LocalVar), varDecls[0].valueOrNil.loc));
+        }
       }
       for (const stmt of nonFnStmts) {
         before.push(stmt);
@@ -1222,8 +1259,11 @@ export const visitStmtMethods = {
     p.isControlFlowDead = oldIsControlFlowDead;
 
     // Lower using declarations
-    // (lowering only: shouldLowerUsingDeclarations is always false when no
-    // JS features are unsupported)
+    if (p.shouldLowerUsingDeclarations(visited)) {
+      const ctx = p.lowerUsingDeclarationContext();
+      ctx.scanStmts(p, visited);
+      visited = ctx.finalize(p, visited, p.currentScope.parent === null);
+    }
 
     // Stop now if we're not mangling
     if (!p.options.minifySyntax) {
@@ -1623,8 +1663,7 @@ export const visitStmtMethods = {
 
         case S_TRY:
           // Drop an unused identifier binding if the optional catch binding feature is supported
-          // (OptionalCatchBinding is always supported: no unsupported JS features)
-          if (s.catch !== null) {
+          if (!jsFeatureHas(p.options.unsupportedJSFeatures, OptionalCatchBinding) && s.catch !== null) {
             if (s.catch.bindingOrNil !== null && s.catch.bindingOrNil.data.k === B_IDENTIFIER) {
               const id = s.catch.bindingOrNil.data;
               const symbol = p.symbols[refInner(id.ref)];
@@ -1873,7 +1912,7 @@ export const visitStmtMethods = {
       case S_LOCAL: {
         // Only try substituting into the initializer for the first declaration
         if (s.decls.length === 0) {
-          bail(); // Go: index out of range panic
+          goIndexOutOfRange(0, 0);
         }
         const first = s.decls[0];
         if (first.valueOrNil !== null) {
@@ -2317,14 +2356,13 @@ export const visitStmtMethods = {
             d.valueOrNil = p.visitExpr(d.valueOrNil);
           }
         }
-        // (lowering only: "s.Decls = p.lowerObjectRestInDecls(s.Decls)" returns
-        // the decls unchanged unless ObjectRestSpread is unsupported)
+        s.decls = p.lowerObjectRestInDecls(s.decls);
         s.kind = p.selectLocalKind(s.kind);
         break;
       }
 
       default:
-        bail(); // Go: panic("Internal error")
+        throw new GoPanic("Internal error");
     }
 
     return stmt;
@@ -2365,7 +2403,9 @@ export const visitStmtMethods = {
           const r = rangeOfIdentifier(p.source, binding.loc);
           const firstRange = duplicateArgCheck.get(name);
           if (firstRange !== undefined && firstRange.len > 0) {
-            p.log.addErrorWithNotes(); // "%q cannot be bound multiple times in the same parameter list"
+            p.log.addErrorWithNotes(p.tracker, r, goQuote(name) + " cannot be bound multiple times in the same parameter list", [
+              p.tracker.msgData(firstRange, "The name " + goQuote(name) + " was originally bound here:"),
+            ]);
           } else {
             duplicateArgCheck.set(name, r);
           }
@@ -2417,7 +2457,7 @@ export const visitStmtMethods = {
       }
 
       default:
-        bail(); // Go: panic("Internal error")
+        throw new GoPanic("Internal error");
     }
   },
 

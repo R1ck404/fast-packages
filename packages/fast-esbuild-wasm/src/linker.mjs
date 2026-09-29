@@ -1,7 +1,4 @@
-// Port of internal/linker/linker.go: the subset that is reachable from
-// api.Transform (exactly one JS entry point plus the runtime file, no code
-// splitting, no CSS, no metafile, no minification, no property mangling; source
-// maps without input source maps). Everything else bails. See CONVENTIONS.md.
+// Port of internal/linker/linker.go (the CSS parts are in linker_css.mjs)
 //
 // The Go code runs several steps on goroutines; this port runs them
 // sequentially in the same order. Output paths are not computed (see
@@ -17,9 +14,29 @@
 //   (createExportsForFile)
 // - ast.FollowAllSymbols is skipped (it only exists for goroutine safety)
 // - Go's unstable sorts are only used on unique keys here
-import { bail } from "./bail.mjs";
-import { Error as MsgError, Warning as MsgWarning, Debug as MsgDebug, MsgID_Bundler_ImportIsUndefined } from "./logger.mjs";
-import { Joiner, quoteForJSON, escapeClosingTag, isInsideNodeModules } from "./helpers.mjs";
+import { rangeOfIdentifier as cssRangeOfIdentifier } from "./css_lexer.mjs";
+import { TypoDetector } from "./css_ast.mjs";
+import { goQuote } from "./gostd.mjs";
+                                         
+import { goPathClean } from "./package_json.mjs";
+import { GoPanic, goTypeName } from "./gopanic.mjs";
+import { isStackOverflow, recoverLinkerPanic } from "./recover.mjs";
+import { canRetryDeep, runDeep } from "./deep.mjs";
+import { BufferedDigest as Digest } from "./xxhash.mjs";
+import { parseGoURL, isFileURL, filePathFromFileURL } from "./gourl.mjs";
+import { pathRelativeToOutbase, hashForFileName } from "./bundler_scan.mjs";
+import { makePrettyPaths } from "./build_deps.mjs";
+import {
+  Path,
+  RANGE_ZERO,
+  Msg,
+  MsgData,
+  LineColumnTracker,
+  goStringLess,
+  MsgID_Bundler_AmbiguousReexport,
+} from "./logger.mjs";
+import { Log, Error as MsgError, Warning as MsgWarning, Debug as MsgDebug, MsgID_Bundler_ImportIsUndefined } from "./logger.mjs";
+import { Joiner, quoteForJSON, escapeClosingTag, isInsideNodeModules, utf8Len, goStringBytes } from "./helpers.mjs";
 import {
   InvalidRef,
   LocRef,
@@ -50,12 +67,21 @@ import {
   IsEmptyFunction,
   IsIdentityFunction,
   CouldPotentiallyBeMutated,
+  newSlotCounts,
+  slotCountsUnionMax,
+  newCharFreq,
+  charFreqInclude,
+  DefaultNameMinifierJS,
+  ImportRecord,
+  ShouldNotBeExternalInMetafile,
+  ContainsUniqueKey,
 } from "./ast.mjs";
 import {
   Expr,
   Stmt,
   Binding,
   Part,
+  AST,
   Dependency,
   DeclaredSymbol,
   SymbolUse,
@@ -99,6 +125,8 @@ import {
   S_CLASS,
   S_LOCAL,
   S_EXPR,
+  E_OBJECT,
+  E_STRING,
   PropertyField,
   PropertyMethod,
   PropertySpread,
@@ -143,7 +171,17 @@ import {
   LoaderJSON,
   LoaderWithTypeJSON,
   LoaderText,
+  LoaderFile,
   loaderIsTypeScript,
+  PathTemplate,
+  PathPlaceholders,
+  HashPlaceholder,
+  substituteTemplate,
+  hasPlaceholder,
+  templateToString,
+  metafileFormatMaybeRemoveWhitespace,
+  prettyPrintTargetEnvironment,
+  loaderIsCSS,
 } from "./config.mjs";
 import {
   JSRepr,
@@ -165,12 +203,28 @@ import {
   cloneLinkerGraph,
   cloneAST,
   newBitSet,
+  compareStringsUTF8,
+  sortStringsUTF8,
 } from "./graph.mjs";
 import { assign, assignStmt, joinWithComma, convertBindingToExpr, forEachIdentifierBindingInDecls } from "./js_ast_helpers.mjs";
-import { isIdentifier, isIdentifierES5AndESNext } from "./js_ident.mjs";
-import { Keywords } from "./js_lexer.mjs";
-import { print as printJS, Options as PrinterOptions, PrintResult, INLINE_SCRIPT_FEATURE } from "./js_printer.mjs";
-import { computeReservedNames, newNumberRenamer } from "./renamer.mjs";
+import { isIdentifier } from "./js_ident.mjs";
+import {
+  Keywords,
+  rangeOfIdentifier,
+} from "./js_lexer.mjs";
+import { print as printJS, Options as PrinterOptions, PrintResult, quoteIdentifier, canEscapeIdentifier } from "./js_printer.mjs";
+import {
+  jsFeatureHas,
+  jsFeatureEqual,
+  InlineScript,
+  Arrow,
+  ObjectExtensions,
+  DynamicImport,
+  ArbitraryModuleNamespaceNames,
+  LogicalAssignment,
+  JSFeatureNone,
+} from "./compat.mjs";
+import { computeReservedNames, newNumberRenamer, newMinifyRenamer, sortStableSymbolCountArray, StableSymbolCount, ExportRenamer } from "./renamer.mjs";
 import {
   LineColumnOffset,
   SourceMapPieces,
@@ -206,14 +260,12 @@ export function loaderCanHaveSourceMap(loader) {
 // encoding of the JS string "text"
 const base64StdChars = new Uint8Array(64);
 for (let i = 0; i < 64; i++) base64StdChars[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".charCodeAt(i);
-let utf8Encoder = null;
 let asciiDecoder = null;
-function base64StdEncodeUTF8(text) {
-  if (utf8Encoder === null) {
-    utf8Encoder = new TextEncoder();
+export function base64StdEncodeUTF8(text) {
+  if (asciiDecoder === null) {
     asciiDecoder = new TextDecoder();
   }
-  const bytes = utf8Encoder.encode(text);
+  const bytes = goStringBytes(text);
   const n = bytes.length;
   const out = new Uint8Array(Math.ceil(n / 3) * 4);
   let o = 0;
@@ -239,8 +291,11 @@ function base64StdEncodeUTF8(text) {
 // ---------------------------------------------------------------------------
 // Types
 
-class linkerContext {
+export class linkerContext {
   ;                    
+  ;                           
+  ;                
+  ;               
   ;                
   ;                  
   ;                     
@@ -264,7 +319,10 @@ class linkerContext {
   ;                                              
   constructor(options, log, uniqueKeyPrefix) {
     this.options = options;
+    this.timer = null;
     this.log = log;
+    this.fs = null;
+    this.res = null;
     this.graph = null; // LinkerGraph
     this.chunks = []; // []chunkInfo
 
@@ -317,6 +375,7 @@ class chunkInfo {
   ;                                
   ;                      
   ;                            
+  ;                            
   ;                                     
   ;                                        
   ;                               
@@ -324,12 +383,19 @@ class chunkInfo {
   ;                           
   ;                             
   ;                             
+  ;                                      
+  ;                                       
   constructor() {
+    this.jsonMetadataChunkCallback = null; // func(finalOutputSize int) helpers.Joiner
+    // JS-only: Go computes this on a goroutine and waits for it only when
+    // needed (waitForIsolatedHash); here it is computed on first use
+    this.isolatedHash = null;
     this.uniqueKey = "";
     this.filesWithPartsInChunk = null; // Set<number> (Go: map[uint32]bool)
     this.entryBits = null; // BitSet
     this.crossChunkImports = []; // []chunkImport
     this.chunkRepr = null; // chunkReprJS
+    this.finalTemplate = null; // []config.PathTemplate
     this.finalRelPath = "";
     this.externalLegalComments = "";
     this.outputSourceMap = new SourceMapPieces(); // sourcemap.SourceMapPieces
@@ -365,9 +431,195 @@ class chunkReprJS {
   }
 }
 
-// Only the "joiner" form exists in the port: output containing the unique key
-// prefix bails (see breakJoinerIntoPieces).
-class intermediateOutput {
+class chunkReprCSS {
+  ;                                    
+  constructor(importsInChunkInOrder        = []) {
+    this.importsInChunkInOrder = importsInChunkInOrder;
+  }
+}
+
+class chunkImport {
+  ;                          
+  ;                          
+  constructor(chunkIndex        , importKind        ) {
+    this.chunkIndex = chunkIndex;
+    this.importKind = importKind;
+  }
+}
+
+class crossChunkImport {
+  ;                                                 
+  ;                          
+  constructor(sortedImportItems                        , chunkIndex        ) {
+    this.sortedImportItems = sortedImportItems;
+    this.chunkIndex = chunkIndex;
+  }
+}
+
+class crossChunkImportItem {
+  ;                           
+  ;                   
+  constructor(exportAlias        , ref        ) {
+    this.exportAlias = exportAlias;
+    this.ref = ref;
+  }
+}
+
+// outputPieceIndexKind
+const outputPieceNone = 0;
+const outputPieceAssetIndex = 1;
+const outputPieceChunkIndex = 2;
+
+// This is a chunk of source code followed by a reference to another chunk. For
+// example, the file "@import 'CHUNK0001'; body { color: black; }" would be
+// represented by two pieces, one with the data "@import '" and another with the
+// data "'; body { color: black; }". The first would have the chunk index 1 and
+// the second would have an invalid chunk index.
+class outputPiece {
+                       
+                        
+                       
+  constructor(data        , index = 0, kind = outputPieceNone) {
+    this.data = data;
+    this.index = index;
+    this.kind = kind;
+  }
+}
+
+function hashWriteUint32(hash        , value        ) {
+  const lengthBytes = new Uint8Array(4);
+  lengthBytes[0] = value & 0xff;
+  lengthBytes[1] = (value >>> 8) & 0xff;
+  lengthBytes[2] = (value >>> 16) & 0xff;
+  lengthBytes[3] = value >>> 24;
+  hash.write(lengthBytes);
+}
+
+// Hash the data in length-prefixed form because boundary locations are
+// important. We don't want "a" + "bc" to hash the same as "ab" + "c".
+// (The data is a JS string: its UTF-8 bytes are hashed, like Go's []byte.)
+function hashWriteLengthPrefixed(hash        , data        ) {
+  const bytes = goStringBytes(data);
+  hashWriteUint32(hash, bytes.length);
+  hash.write(bytes);
+}
+
+function joinWithPublicPath(publicPath        , relPath        )         {
+  if (relPath.startsWith("./")) {
+    relPath = relPath.slice(2);
+
+    // Strip any amount of further no-op slashes (i.e. ".///././/x/y" => "x/y")
+    for (;;) {
+      if (relPath.startsWith("/")) {
+        relPath = relPath.slice(1);
+      } else if (relPath.startsWith("./")) {
+        relPath = relPath.slice(2);
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Use a relative path if there is no public path
+  if (publicPath === "") {
+    publicPath = ".";
+  }
+
+  // Join with a slash
+  let slash = "/";
+  if (publicPath.endsWith("/")) {
+    slash = "";
+  }
+  return publicPath + slash + relPath;
+}
+
+// Go's url.URL{Path: path}.EscapedPath(): the UTF-8 bytes that
+// shouldEscape(c, encodePath) says must be escaped become "%XX"
+const hexUpper = "0123456789ABCDEF";
+function goURLEscapePath(path        )         {
+  let needsEscape = false;
+  for (let i = 0; i < path.length; i++) {
+    if (goURLShouldEscapePathChar(path.charCodeAt(i))) {
+      needsEscape = true;
+      break;
+    }
+  }
+  if (!needsEscape) return path;
+  const bytes = goStringBytes(path);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const c = bytes[i];
+    if (goURLShouldEscapePathChar(c)) out += "%" + hexUpper[c >> 4] + hexUpper[c & 15];
+    else out += String.fromCharCode(c);
+  }
+  return out;
+}
+
+function goURLShouldEscapePathChar(c        )          {
+  // Section 2.3 Unreserved characters (alphanum)
+  if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)) return false;
+  switch (c) {
+    case 45: // -
+    case 95: // _
+    case 46: // .
+    case 126: // ~
+      return false;
+    case 36: // $
+    case 38: // &
+    case 43: // +
+    case 44: // ,
+    case 47: // /
+    case 58: // :
+    case 59: // ;
+    case 61: // =
+    case 64: // @
+      return false;
+    case 63: // ?
+      return true;
+  }
+  // Everything else must be escaped (including every non-ASCII byte)
+  return true;
+}
+
+// helpers.FileURLFromFilePath(path).Path
+function fileURLPathFromFilePath(filePath        )         {
+  // Append a trailing slash so that resolving the URL includes the trailing
+  // directory, and turn Windows-style paths with volumes into URL-style paths:
+  //
+  //   "/Users/User/Desktop" => "/Users/User/Desktop/"
+  //   "C:\\Users\\User\\Desktop" => "/C:/Users/User/Desktop/"
+  //
+  filePath = filePath.replaceAll("\\", "/");
+  if (!filePath.startsWith("/")) {
+    filePath = "/" + filePath;
+  }
+  return filePath;
+}
+
+// helpers.FilePathFromFileURL(fs, url) given the URL's path
+function filePathFromFileURLPath(fs     , path        )         {
+  // Convert URL-style paths back into Windows-style paths if needed:
+  //
+  //   "/C:/Users/User/foo.js.map" => "C:\\Users\\User\\foo.js.map"
+  //
+  if (!fs.cwd().startsWith("/")) {
+    if (path.startsWith("/")) path = path.slice(1);
+    path = path.replaceAll("/", "\\"); // This is needed for "filepath.Rel()" to work
+  }
+  return path;
+}
+
+// Go's url.URL{Path: path}.String() for a relative path (no scheme or host)
+function goURLStringForRelativePath(path        )         {
+  const escaped = goURLEscapePath(path);
+  // RFC 3986 Section 4.2: a first path segment with a colon needs a "./" prefix
+  const slash = escaped.indexOf("/");
+  const segment = slash < 0 ? escaped : escaped.slice(0, slash);
+  if (segment.includes(":")) return "./" + escaped;
+  return escaped;
+}
+
+export class intermediateOutput {
   ;                   
   ;                   
   constructor(pieces, joiner) {
@@ -419,7 +671,7 @@ class compileResultJS {
   }
 }
 
-class compileResultForSourceMap {
+export class compileResultForSourceMap {
   ;                           
   ;                            
   ;                        
@@ -444,7 +696,7 @@ class RequireOrImportMeta {
   }
 }
 
-class legalCommentEntry {
+export class legalCommentEntry {
   ;                        
   ;                     
   constructor(sourceIndex, comments) {
@@ -459,11 +711,92 @@ class legalCommentEntry {
 // Same parameter list as Go's linker.Link (timer, fs and res are unused and
 // may be null; dataForSourceMaps is a function returning the
 // []bundler.DataForSourceMap, only called when source maps are enabled).
+// JS-only: "mangleCache" (a Map<string, string | false> or null) is what Go
+// hands to the linker through options.ExclusiveMangleCacheUpdate.
 // Returns []OutputFile.
-export function link(options, timer, log, fs, res, inputFiles, entryPoints, uniqueKeyPrefix, reachableFiles, dataForSourceMaps) {
+import { findImportedFilesInCSSOrder, mangleLocalCSS as mangleLocalCSSImpl, generateChunkCSS, cssImportSourceIndex } from "./linker_css.mjs";
+import { ENameOfSymbol, TemplatePart, ETemplate } from "./js_ast.mjs";
+import { LoaderEmpty } from "./config.mjs";
+import { WasLoadedWithEmptyLoader } from "./ast.mjs";
+import { MsgID_CSS_UndefinedComposesFrom } from "./logger.mjs";
+
+// path.Clean(config.TemplateToString(chunk.finalTemplate)), the name of a
+// chunk in the timing information. (A transform does not compute the
+// templates, see computeChunks: its only chunk is named after the base name
+// of the output file, "<stdin>-out" or "<sourcefile>-out", on Go's mock file
+// system for Unix.)
+export function chunkNameForTimer(c, chunk)         {
+  if (c.fs === null) {
+    const p         = c.options.absOutputFile;
+    return goPathClean(p.slice(p.lastIndexOf("/") + 1));
+  }
+  return goPathClean(templateToString(chunk.finalTemplate));
+}
+
+// wrappedLog: the log with its own "has errors" flag, which only counts the
+// errors added through it (Link runs once per entry point without code
+// splitting, with the same log)
+// (a class, not Object.create(log): making the log a prototype on every link
+// is slow)
+class LinkLog extends Log {
+  ;                  
+  ;                              
+  constructor(inner) {
+    super(inner.level, inner.overrides);
+    this.inner = inner;
+    this.linkHasErrors = false;
+  }
+  addMsg(msg) {
+    if (msg.kind === MsgError) {
+      this.linkHasErrors = true;
+    }
+    this.inner.addMsg(msg);
+  }
+  hasErrors() {
+    return this.linkHasErrors;
+  }
+}
+function wrappedLog(log) {
+  return new LinkLog(log);
+}
+
+export function link(
+  options,
+  timer,
+  log,
+  fs,
+  res,
+  inputFiles,
+  entryPoints,
+  uniqueKeyPrefix,
+  reachableFiles,
+  dataForSourceMaps,
+  mangleCache = null,
+  deepClone = false,
+  cssUsedLocalNames                              = null,
+) {
+  if (timer === null) {
+    return linkImpl(options, timer, log, fs, res, inputFiles, entryPoints, uniqueKeyPrefix, reachableFiles, dataForSourceMaps, mangleCache, deepClone, cssUsedLocalNames);
+  }
+  timer?.begin("Link");
+  try {
+    return linkImpl(options, timer, log, fs, res, inputFiles, entryPoints, uniqueKeyPrefix, reachableFiles, dataForSourceMaps, mangleCache, deepClone, cssUsedLocalNames);
+  } finally {
+    timer?.end("Link");
+  }
+}
+
+function linkImpl(options, timer              , log, fs, res, inputFiles, entryPoints, uniqueKeyPrefix, reachableFiles, dataForSourceMaps, mangleCache, deepClone         , cssUsedLocalNames                             ) {
+  log = wrappedLog(log);
+
+  timer?.begin("Clone linker graph");
   const c = new linkerContext(options, log, uniqueKeyPrefix);
+  c.timer = timer;
+  c.fs = fs;
+  c.res = res;
   c.dataForSourceMaps = dataForSourceMaps;
-  c.graph = cloneLinkerGraph(inputFiles, reachableFiles, entryPoints, options.codeSplitting);
+  c.graph = cloneLinkerGraph(inputFiles, reachableFiles, entryPoints, options.codeSplitting, deepClone);
+  timer?.end("Clone linker graph");
 
   // Use a smaller version of these functions if we don't need profiler names
   const runtimeRepr = c.graph.files[RUNTIME_SOURCE_INDEX].inputFile.repr;
@@ -515,7 +848,13 @@ export function link(options, timer, log, fs, res, inputFiles, entryPoints, uniq
 
   c.scanImportsAndExports();
 
-  // (Errors throw BAIL, so there is no "stop now if there were errors" check)
+  // Stop now if there were errors
+  if (c.log.hasErrors()) {
+    // (Go calls ExclusiveMangleCacheUpdate with a callback that does nothing:
+    // "Always do this so that we don't cause other entry points when there
+    // are errors")
+    return [];
+  }
 
   c.treeShakingAndCodeSplitting();
 
@@ -530,8 +869,10 @@ export function link(options, timer, log, fs, res, inputFiles, entryPoints, uniq
 
   // Merge mangled properties before chunks are generated since the names must
   // be consistent across all chunks, or the generated code will break
-  c.mangleProps(null);
-  c.mangleLocalCSS(null);
+  c.timer?.begin("Waiting for mangle cache");
+  c.timer?.end("Waiting for mangle cache");
+  c.mangleProps(mangleCache);
+  c.mangleLocalCSS(cssUsedLocalNames === null ? new Map() : cssUsedLocalNames);
 
   // Go calls ast.FollowAllSymbols() here so that calls to "ast.FollowSymbols()"
   // in parallel goroutines after this won't hit concurrent map mutation
@@ -542,57 +883,367 @@ export function link(options, timer, log, fs, res, inputFiles, entryPoints, uniq
 }
 
 Object.assign(linkerContext.prototype, {
-  // Property mangling is not supported by the fast path. With no mangled
-  // properties Go's mangleProps just produces an empty map.
+  // "mangleCache" is a Map<string, string | false> (Go's
+  // map[string]interface{} with string or false values) or null (Go: nil)
   mangleProps(mangleCache) {
+    const c = this;
+    if (c.timer === null) {
+      return c.manglePropsImpl(mangleCache);
+    }
+    c.timer?.begin("Mangle props");
+    try {
+      return c.manglePropsImpl(mangleCache);
+    } finally {
+      c.timer?.end("Mangle props");
+    }
+  },
+
+  manglePropsImpl(mangleCache) {
     const c = this;
     const mangledProps = new Map();
     c.mangledProps = mangledProps;
 
+    // JS-only: without a mangled property in any file (always the case
+    // without "--mangle-props") the result is an empty map and the mangle
+    // cache is not changed, so the work below (keyword set, character
+    // frequency shuffle, ...) is skipped
+    let hasMangledProps = false;
+    for (const sourceIndex of c.graph.reachableFiles) {
+      if (sourceIndex === RUNTIME_SOURCE_INDEX) continue;
+      const repr = c.graph.files[sourceIndex].inputFile.repr;
+      if (repr instanceof JSRepr && repr.ast.mangledProps !== null && repr.ast.mangledProps.size > 0) {
+        hasMangledProps = true;
+        break;
+      }
+    }
+    if (!hasMangledProps) return;
+
+    // Reserve all JS keywords
+    const reservedProps = new Set();
+    for (const keyword of Keywords.keys()) {
+      reservedProps.add(keyword);
+    }
+
+    // Reserve all target properties in the cache
+    if (mangleCache !== null) {
+      for (const [original, remapped] of mangleCache) {
+        if (remapped === false) {
+          reservedProps.add(original);
+        } else {
+          reservedProps.add(remapped);
+        }
+      }
+    }
+
+    // Merge all mangled property symbols together
+    const freq = newCharFreq();
+    const mergedProps = new Map();
     for (const sourceIndex of c.graph.reachableFiles) {
       // Don't mangle anything in the runtime code
-      if (sourceIndex === RUNTIME_SOURCE_INDEX) continue;
+      if (sourceIndex === RUNTIME_SOURCE_INDEX) {
+        continue;
+      }
 
+      // For each file
       const repr = c.graph.files[sourceIndex].inputFile.repr;
       if (repr instanceof JSRepr) {
-        if (repr.ast.mangledProps !== null && repr.ast.mangledProps.size > 0) bail(); // (mangle props only)
+        // Reserve all non-mangled properties
+        if (repr.ast.reservedProps !== null) {
+          for (const prop of repr.ast.reservedProps.keys()) {
+            reservedProps.add(prop);
+          }
+        }
+
+        // Merge each mangled property with other ones of the same name
+        if (repr.ast.mangledProps !== null) {
+          for (const [name, ref] of repr.ast.mangledProps) {
+            const existing = mergedProps.get(name);
+            if (existing !== undefined) {
+              writableSymbolChain(c.graph.symbols, ref);
+              writableSymbolChain(c.graph.symbols, existing);
+              mergeSymbols(c.graph.symbols, ref, existing);
+            } else {
+              mergedProps.set(name, ref);
+            }
+          }
+        }
+
+        // Include this file's frequency histogram, which affects the mangled names
+        if (repr.ast.charFreq !== null) {
+          charFreqInclude(freq, repr.ast.charFreq);
+        }
       }
+    }
+
+    // Sort by use count (note: does not currently account for live vs. dead code)
+    // (Go iterates the map in random order; the sort key is unique per ref)
+    const sorted = [];
+    const stableSourceIndices = c.graph.stableSourceIndices;
+    for (const ref of mergedProps.values()) {
+      sorted.push(new StableSymbolCount(stableSourceIndices[refSource(ref)], ref, c.graph.symbols.get(ref).useCountEstimate));
+    }
+    sortStableSymbolCountArray(sorted);
+
+    // Assign names in order of use count
+    const minifier = DefaultNameMinifierJS.shuffleByCharFreq(freq);
+    let nextName = 0;
+    for (let i = 0; i < sorted.length; i++) {
+      const symbolCount = sorted[i];
+      const symbol = c.graph.symbols.get(symbolCount.ref);
+
+      // Don't change existing mappings
+      if (mangleCache !== null && mangleCache.has(symbol.originalName)) {
+        const existing = mangleCache.get(symbol.originalName);
+        if (existing !== false) {
+          mangledProps.set(symbolCount.ref, existing);
+        }
+        continue;
+      }
+
+      // Generate a new name
+      let name = minifier.numberToMinifiedName(nextName);
+      nextName++;
+
+      // Avoid reserved properties
+      while (reservedProps.has(name)) {
+        name = minifier.numberToMinifiedName(nextName);
+        nextName++;
+      }
+
+      // Track the new mapping
+      if (mangleCache !== null) {
+        mangleCache.set(symbol.originalName, name);
+      }
+      mangledProps.set(symbolCount.ref, name);
+    }
+  },
+
+  validateComposesFromProperties(rootFile, rootRepr) {
+    const c = this;
+    for (const local of rootRepr.ast.localSymbols) {
+      const visited = new Set        ();
+      // (propertyInFile: {file, loc}; a null file means "don't warn again")
+      const properties = new Map                                    ();
+
+      const visit = (file, repr, ref) => {
+        if (visited.has(ref)) {
+          return;
+        }
+        visited.add(ref);
+
+        const composes = repr.ast.composes.get(ref);
+        if (composes === undefined) {
+          return;
+        }
+
+        for (const name of composes.importedNames) {
+          const record = repr.ast.importRecords[name.importRecordIndex];
+          if (record.sourceIndex >= 0) {
+            const otherFile = c.graph.files[record.sourceIndex];
+            const otherRepr = otherFile.inputFile.repr;
+            if (otherRepr instanceof CSSRepr) {
+              const otherName = otherRepr.ast.localScope.get(name.alias);
+              if (otherName !== undefined) {
+                visit(otherFile, otherRepr, otherName.ref);
+              }
+            }
+          }
+        }
+
+        for (const name of composes.names) {
+          visit(file, repr, name.ref);
+        }
+
+        // Warn about cross-file composition with the same CSS properties
+        // (Go iterates a map: the messages are sorted by the log later)
+        for (const [keyText, keyLoc] of composes.properties) {
+          const property = properties.get(keyText);
+          if (property === undefined) {
+            properties.set(keyText, { file, loc: keyLoc });
+            continue;
+          }
+          if (property.file === file || property.file === null) {
+            continue;
+          }
+
+          const localOriginalName = c.graph.symbols.get(local.ref).originalName;
+          c.log.addMsgID(
+            MsgID_CSS_UndefinedComposesFrom,
+            new Msg(
+              [
+                property.file.lineColumnTracker().msgData(cssRangeOfIdentifier(property.file.inputFile.source, property.loc), "The first definition of " + goQuote(keyText) + " is here:"),
+                file.lineColumnTracker().msgData(cssRangeOfIdentifier(file.inputFile.source, keyLoc), "The second definition of " + goQuote(keyText) + " is here:"),
+                new MsgData(
+                  null,
+                  null,
+                  'The specification of "composes" does not define an order when class declarations from separate files are composed together. ' +
+                    "The value of the " +
+                    goQuote(keyText) +
+                    " property for " +
+                    goQuote(localOriginalName) +
+                    " may change unpredictably as the code is edited. " +
+                    "Make sure that all definitions of " +
+                    goQuote(keyText) +
+                    " for " +
+                    goQuote(localOriginalName) +
+                    " are in a single file.",
+                ),
+              ],
+              "",
+              rootFile.lineColumnTracker().msgData(cssRangeOfIdentifier(rootFile.inputFile.source, local.loc), "The value of " + goQuote(keyText) + " in the " + goQuote(localOriginalName) + " class is undefined"),
+              MsgWarning,
+            ),
+          );
+
+          // Don't warn more than once
+          property.file = null;
+          properties.set(keyText, property);
+        }
+      };
+
+      visit(rootFile, rootRepr, local.ref);
     }
   },
 
   mangleLocalCSS(usedLocalNames) {
+    if (this.timer === null) {
+      mangleLocalCSSImpl(this, usedLocalNames, 0);
+      return;
+    }
+    this.timer?.begin("Mangle local CSS");
+    try {
+      mangleLocalCSSImpl(this, usedLocalNames, 0);
+    } finally {
+      this.timer?.end("Mangle local CSS");
+    }
+  },
+
+  enforceNoCyclicChunkImports() {
     const c = this;
-    for (const sourceIndex of c.graph.reachableFiles) {
-      if (c.graph.files[sourceIndex].inputFile.repr instanceof CSSRepr) bail(); // (CSS only)
+    // DFS memoization with 3-colors, more space efficient
+    // 0: white (unvisited), 1: gray (visiting), 2: black (visited)
+    const colors = new Map                ();
+    const validate = (chunkIndex        )          => {
+      const color = colors.get(chunkIndex) ?? 0;
+      if (color === 1) {
+        c.log.addError(null, RANGE_ZERO, "Internal error: generated chunks contain a circular import");
+        return true;
+      }
+
+      if (color === 2) {
+        return false;
+      }
+
+      colors.set(chunkIndex, 1);
+
+      for (const chunkImport of c.chunks[chunkIndex].crossChunkImports) {
+        // Ignore cycles caused by dynamic "import()" expressions. These are fine
+        // because they don't necessarily cause initialization order issues and
+        // they don't indicate a bug in our chunk generation algorithm. They arise
+        // normally in real code (e.g. two files that import each other).
+        if (chunkImport.importKind !== ImportDynamic) {
+          // Recursively validate otherChunkIndex
+          if (validate(chunkImport.chunkIndex)) {
+            return true;
+          }
+        }
+      }
+
+      colors.set(chunkIndex, 2);
+      return false;
+    };
+
+    for (let i = 0; i < c.chunks.length; i++) {
+      if (validate(i)) {
+        break;
+      }
     }
   },
 
   generateChunksInParallel(additionalFiles) {
     const c = this;
+    if (c.timer === null) {
+      return c.generateChunksInParallelImpl(additionalFiles);
+    }
+    c.timer?.begin("Generate chunks");
+    try {
+      return c.generateChunksInParallelImpl(additionalFiles);
+    } finally {
+      c.timer?.end("Generate chunks");
+    }
+  },
+
+  generateChunksInParallelImpl(additionalFiles) {
+    const c = this;
 
     // Generate each chunk. When a chunk needs to reference the path of another
-    // chunk, it will use a temporary path called the "uniqueKey" (code
-    // splitting only).
+    // chunk, it will use a temporary path called the "uniqueKey" since the
+    // final path hasn't been computed yet (and is in general uncomputable at
+    // this point because paths have hashes that include information about
+    // chunk dependencies, and chunk dependencies can be cyclic due to dynamic
+    // imports).
     for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
       const chunk = c.chunks[chunkIndex];
-      if (chunk.chunkRepr instanceof chunkReprJS) {
-        c.generateChunkJS(chunkIndex);
-      } else {
-        bail(); // (CSS only)
+      // (Go: "defer c.recoverInternalError(...)" in both, and the forked
+      // timer's "defer c.timer.Join(timer)" and "defer timer.End(timeName)")
+      try {
+        if (c.timer === null) {
+          if (chunk.chunkRepr instanceof chunkReprJS) c.generateChunkJS(chunkIndex, null);
+          else generateChunkCSS(c, chunk, null);
+          continue;
+        }
+        const timer = c.timer === null ? null : c.timer.fork();
+        const timeName = timer === null ? "" : "Generate chunk " + goQuote(chunkNameForTimer(c, chunk));
+        timer?.begin(timeName);
+        try {
+          if (chunk.chunkRepr instanceof chunkReprJS) {
+            c.generateChunkJS(chunkIndex, timer);
+          } else {
+            generateChunkCSS(c, chunk, timer);
+          }
+        } finally {
+          timer?.end(timeName);
+          c.timer?.join(timer);
+        }
+      } catch (e) {
+        recoverLinkerPanic(e, c.log, null);
       }
     }
-    // (enforceNoCyclicChunkImports: there are no cross-chunk imports)
+    c.enforceNoCyclicChunkImports();
 
-    // Compute the final paths of each chunk. The transform API only looks at
-    // the relative lengths of the output paths (see the top of this file), so
-    // the path templates are not evaluated and a non-empty placeholder is used
-    // instead. There is no "[hash]" placeholder in the transform API's entry
-    // path template.
+    // Compute the final hashes of each chunk, then use those to create the final
+    // paths of each chunk. This can technically be done in parallel but it
+    // probably doesn't matter so much because we're not hashing that much data.
+    const visited = new Array(c.chunks.length).fill(0);
     for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
-      c.chunks[chunkIndex].finalRelPath = "<chunk" + chunkIndex + ">";
+      const chunk = c.chunks[chunkIndex];
+      let hashSubstitution = null;
+
+      // JS-only: the transform API only looks at the relative lengths of the
+      // output paths (a transform produces exactly one chunk, so the chunk file
+      // is always the shortest output path and the legal comments file is
+      // always "<chunk path>.LEGAL.txt"), so the path templates are not
+      // evaluated and a placeholder is used instead
+      if (c.fs === null) {
+        chunk.finalRelPath = "<chunk" + chunkIndex + ">";
+        continue;
+      }
+
+      // Only wait for the hash if necessary
+      if (hasPlaceholder(chunk.finalTemplate, HashPlaceholder)) {
+        // Compute the final hash using the isolated hashes of the dependencies
+        const hash = new Digest();
+        c.appendIsolatedHashesForImportedChunks(hash, chunkIndex, visited, ~chunkIndex >>> 0);
+        hashSubstitution = hashForFileName(hash.sum());
+      }
+
+      // Render the last remaining placeholder in the template
+      chunk.finalRelPath = templateToString(substituteTemplate(chunk.finalTemplate, new PathPlaceholders(null, null, hashSubstitution, null)));
     }
 
-    // Generate the final output files by joining file pieces together
+    // Generate the final output files by joining file pieces together and
+    // substituting the temporary paths for the final paths
+    c.timer?.begin("Generate final output files");
     const results = new Array(c.chunks.length);
     for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
       const chunk = c.chunks[chunkIndex];
@@ -600,26 +1251,54 @@ Object.assign(linkerContext.prototype, {
 
       // Each file may optionally contain additional files to be copied to the
       // output directory. This is used by the "file" and "copy" loaders.
-      // (Only JS chunks exist here.)
-      for (const sourceIndex of chunk.chunkRepr.filesInChunkInOrder) {
-        for (const f of c.graph.files[sourceIndex].inputFile.additionalFiles) outputFiles.push(f);
+      let commentPrefix = "";
+      let commentSuffix = "";
+      if (chunk.chunkRepr instanceof chunkReprJS) {
+        for (const sourceIndex of chunk.chunkRepr.filesInChunkInOrder) {
+          for (const f of c.graph.files[sourceIndex].inputFile.additionalFiles) outputFiles.push(f);
+        }
+        commentPrefix = "//";
+      } else {
+        for (const entry of chunk.chunkRepr.importsInChunkInOrder) {
+          if (entry.kind === cssImportSourceIndex) {
+            for (const f of c.graph.files[entry.sourceIndex].inputFile.additionalFiles) outputFiles.push(f);
+          }
+        }
+        commentPrefix = "/*";
+        commentSuffix = " */";
       }
-      const commentPrefix = "//";
-      const commentSuffix = "";
 
       // Path substitution for the chunk itself
-      const $d215 = c.substituteFinalPaths(chunk.intermediateOutput);
-      const outputContentsJoiner = $d215[0], outputSourceMapShifts = $d215[1];
+      const finalRelDir = c.fs === null ? "" : c.fs.dir(chunk.finalRelPath);
+      const outputPath = (relPath) => (c.fs === null ? relPath : c.fs.join(c.options.absOutputDir, relPath));
+      const $s = c.substituteFinalPaths(chunk.intermediateOutput, (finalRelPathForImport) => c.pathBetweenChunks(finalRelDir, finalRelPathForImport));
+      const outputContentsJoiner = $s[0],
+        outputSourceMapShifts = $s[1];
 
       // Generate the optional legal comments file for this chunk
       if (chunk.externalLegalComments.length > 0) {
         const finalRelPathForLegalComments = chunk.finalRelPath + ".LEGAL.txt";
 
         // Link the file to the legal comments
-        if (c.options.legalComments === LegalCommentsLinkedWithComment) bail(); // (build only)
+        if (c.options.legalComments === LegalCommentsLinkedWithComment) {
+          let importPath = c.pathBetweenChunks(finalRelDir, finalRelPathForLegalComments);
+          if (importPath.startsWith("./")) importPath = importPath.slice(2);
+          outputContentsJoiner.ensureNewlineAtEnd();
+          outputContentsJoiner.addString("/*! For license information please see ");
+          outputContentsJoiner.addString(importPath);
+          outputContentsJoiner.addString(" */\n");
+        }
 
         // Write the external legal comments file
-        outputFiles.push(new OutputFile("", finalRelPathForLegalComments, chunk.externalLegalComments));
+        outputFiles.push(
+          new OutputFile(
+            metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, '{\n      "imports": [],\n      "exports": [],\n      "inputs": {},\n      "bytes": ') +
+              utf8Len(chunk.externalLegalComments) +
+              metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, "\n    }"),
+            outputPath(finalRelPathForLegalComments),
+            chunk.externalLegalComments,
+          ),
+        );
       }
 
       // Generate the optional source map for this chunk
@@ -629,9 +1308,17 @@ Object.assign(linkerContext.prototype, {
 
         // Potentially write a trailing source map comment
         switch (c.options.sourceMap) {
-          case SourceMapLinkedWithComment:
-            bail(); // (build only: transforms reject linked source maps)
+          case SourceMapLinkedWithComment: {
+            let importPath = c.pathBetweenChunks(finalRelDir, finalRelPathForSourceMap);
+            if (importPath.startsWith("./")) importPath = importPath.slice(2);
+            outputContentsJoiner.ensureNewlineAtEnd();
+            outputContentsJoiner.addString(commentPrefix);
+            outputContentsJoiner.addString("# sourceMappingURL=");
+            outputContentsJoiner.addString(goURLEscapePath(importPath));
+            outputContentsJoiner.addString(commentSuffix);
+            outputContentsJoiner.addString("\n");
             break;
+          }
 
           case SourceMapInline:
           case SourceMapInlineAndExternal:
@@ -649,7 +1336,15 @@ Object.assign(linkerContext.prototype, {
           case SourceMapLinkedWithComment:
           case SourceMapInlineAndExternal:
           case SourceMapExternalWithoutComment:
-            outputFiles.push(new OutputFile("", finalRelPathForSourceMap, outputSourceMap));
+            outputFiles.push(
+              new OutputFile(
+                metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, '{\n      "imports": [],\n      "exports": [],\n      "inputs": {},\n      "bytes": ') +
+                  utf8Len(outputSourceMap) +
+                  metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, "\n    }"),
+                outputPath(finalRelPathForSourceMap),
+                outputSourceMap,
+              ),
+            );
             break;
         }
       }
@@ -657,13 +1352,25 @@ Object.assign(linkerContext.prototype, {
       // Finalize the output contents
       const outputContents = outputContentsJoiner.done();
 
+      // Path substitution for the JSON metadata
+      let jsonMetadataChunk = "";
+      if (c.options.needsMetafile) {
+        const jsonMetadataChunkPieces = c.breakJoinerIntoPieces(chunk.jsonMetadataChunkCallback(utf8Len(outputContents)));
+        const jsonMetadataChunkBytes = c.substituteFinalPaths(jsonMetadataChunkPieces, (finalRelPathForImport) => {
+          const prettyPaths = makePrettyPaths(c.fs, new Path(c.fs.join(c.options.absOutputDir, finalRelPathForImport), "file"));
+          return prettyPaths.select(c.options.metafilePathStyle);
+        })[0];
+        jsonMetadataChunk = jsonMetadataChunkBytes.done();
+      }
+
       // Generate the output file for this chunk
-      outputFiles.push(new OutputFile("", chunk.finalRelPath, outputContents, chunk.isExecutable));
+      outputFiles.push(new OutputFile(jsonMetadataChunk, outputPath(chunk.finalRelPath), outputContents, chunk.isExecutable));
 
       results[chunkIndex] = outputFiles;
     }
+    c.timer?.end("Generate final output files");
 
-    // Merge the output files together in order
+    // Merge the output files from the different goroutines together in order
     const outputFiles = additionalFiles.slice();
     for (const result of results) for (const f of result) outputFiles.push(f);
     return outputFiles;
@@ -672,21 +1379,422 @@ Object.assign(linkerContext.prototype, {
   // Given a set of output pieces (i.e. a buffer already divided into the spans
   // between import paths), substitute the final import paths in and then join
   // everything into a single buffer. Returns [joiner, []sourcemap.SourceMapShift].
-  substituteFinalPaths(intermediateOutput) {
+  substituteFinalPaths(intermediateOutput, modifyPath) {
+    const c = this;
+
     // Optimization: If there can be no substitutions, just reuse the initial
     // joiner that was used when generating the intermediate chunk output
     // instead of creating another one and copying the whole file into it.
     if (intermediateOutput.pieces === null) return [intermediateOutput.joiner, [new SourceMapShift()]];
-    bail(); // (code splitting / "file" and "copy" loaders only)
+
+    const j = new Joiner();
+    const shift = new SourceMapShift();
+    const shifts = [new SourceMapShift(shift.before.clone(), shift.after.clone())];
+
+    for (const piece of intermediateOutput.pieces) {
+      const dataOffset = new LineColumnOffset();
+      j.addString(piece.data);
+      dataOffset.advanceString(piece.data);
+      shift.before.add(dataOffset);
+      shift.after.add(dataOffset);
+
+      switch (piece.kind) {
+        case outputPieceAssetIndex: {
+          const file = c.graph.files[piece.index];
+          if (file.inputFile.additionalFiles.length !== 1) throw new GoPanic("Internal error");
+          let relPath = c.fs.rel(c.options.absOutputDir, file.inputFile.additionalFiles[0].absPath)[0];
+
+          // Make sure to always use forward slashes, even on Windows
+          relPath = relPath.replaceAll("\\", "/");
+
+          const importPath = modifyPath(relPath);
+          j.addString(importPath);
+          shift.before.advanceString(file.inputFile.uniqueKeyForAdditionalFile);
+          shift.after.advanceString(importPath);
+          shifts.push(new SourceMapShift(shift.before.clone(), shift.after.clone()));
+          break;
+        }
+
+        case outputPieceChunkIndex: {
+          const chunk = c.chunks[piece.index];
+          const importPath = modifyPath(chunk.finalRelPath);
+          j.addString(importPath);
+          shift.before.advanceString(chunk.uniqueKey);
+          shift.after.advanceString(importPath);
+          shifts.push(new SourceMapShift(shift.before.clone(), shift.after.clone()));
+          break;
+        }
+      }
+    }
+
+    return [j, shifts];
+  },
+
+  // (a byte count, like Go)
+  accurateFinalByteCount(output, chunkFinalRelDir) {
+    const c = this;
+    let count = 0;
+
+    // Note: The paths generated here must match "substituteFinalPaths" above
+    for (const piece of output.pieces) {
+      count += utf8Len(piece.data);
+
+      switch (piece.kind) {
+        case outputPieceAssetIndex: {
+          const file = c.graph.files[piece.index];
+          if (file.inputFile.additionalFiles.length !== 1) throw new GoPanic("Internal error");
+          let relPath = c.fs.rel(c.options.absOutputDir, file.inputFile.additionalFiles[0].absPath)[0];
+
+          // Make sure to always use forward slashes, even on Windows
+          relPath = relPath.replaceAll("\\", "/");
+
+          const importPath = c.pathBetweenChunks(chunkFinalRelDir, relPath);
+          count += utf8Len(importPath);
+          break;
+        }
+
+        case outputPieceChunkIndex: {
+          const chunk = c.chunks[piece.index];
+          const importPath = c.pathBetweenChunks(chunkFinalRelDir, chunk.finalRelPath);
+          count += utf8Len(importPath);
+          break;
+        }
+      }
+    }
+
+    return count;
+  },
+
+  pathBetweenChunks(fromRelDir, toRelPath) {
+    const c = this;
+
+    // Join with the public path if it has been configured
+    if (c.options.publicPath !== "") {
+      return joinWithPublicPath(c.options.publicPath, toRelPath);
+    }
+
+    // Otherwise, return a relative path
+    const $rel = c.fs.rel(fromRelDir, toRelPath);
+    if (!$rel[1]) {
+      c.log.addError(null, RANGE_ZERO, "Cannot traverse from directory " + goQuote(fromRelDir) + " to chunk " + goQuote(toRelPath));
+      return "";
+    }
+    let relPath = $rel[0];
+
+    // Make sure to always use forward slashes, even on Windows
+    relPath = relPath.replaceAll("\\", "/");
+
+    // Make sure the relative path doesn't start with a name, since that could
+    // be interpreted as a package path instead of a relative path
+    if (!relPath.startsWith("./") && !relPath.startsWith("../")) {
+      relPath = "./" + relPath;
+    }
+
+    return relPath;
   },
 
   computeCrossChunkDependencies() {
+    const c = this;
+    if (c.timer === null) {
+      return c.computeCrossChunkDependenciesImpl();
+    }
+    c.timer?.begin("Compute cross-chunk dependencies");
+    try {
+      return c.computeCrossChunkDependenciesImpl();
+    } finally {
+      c.timer?.end("Compute cross-chunk dependencies");
+    }
+  },
+
+  computeCrossChunkDependenciesImpl() {
     const c = this;
     if (!c.options.codeSplitting) {
       // No need to compute cross-chunk dependencies if there can't be any
       return;
     }
-    bail(); // (code splitting only)
+
+    // chunkMeta: {imports: Set<Ref>, exports: Set<Ref>, dynamicImports: Set<number> | null}
+    const chunkMetas = new Array(c.chunks.length);
+
+    // For each chunk, see what symbols it uses from other chunks
+    for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
+      const chunk = c.chunks[chunkIndex];
+      const imports = new Set        ();
+      const chunkMeta = { imports, exports: new Set        (), dynamicImports: null                       };
+      chunkMetas[chunkIndex] = chunkMeta;
+
+      // Go over each file in this chunk (Go iterates a map; the result is a
+      // set, so the order doesn't matter)
+      for (const sourceIndex of chunk.filesWithPartsInChunk) {
+        // Go over each part in this file that's marked for inclusion in this chunk
+        const repr = c.graph.files[sourceIndex].inputFile.repr;
+        if (!(repr instanceof JSRepr)) continue;
+        const parts = repr.ast.parts;
+        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+          const part = parts[partIndex];
+          if (!part.isLive) {
+            continue;
+          }
+
+          // Rewrite external dynamic imports to point to the chunk for that entry point
+          for (const importRecordIndex of part.importRecordIndices) {
+            const record = repr.ast.importRecords[importRecordIndex];
+            if (record.sourceIndex >= 0 && c.isExternalDynamicImport(record, sourceIndex)) {
+              const otherChunkIndex = c.graph.files[record.sourceIndex].entryPointChunkIndex;
+              const clone = record.clone();
+              clone.path = new Path(c.chunks[otherChunkIndex].uniqueKey, record.path.namespace, record.path.ignoredSuffix, record.path.importAttributes, record.path.flags);
+              clone.sourceIndex = -1;
+              clone.flags |= ShouldNotBeExternalInMetafile | ContainsUniqueKey;
+              repr.ast.importRecords[importRecordIndex] = clone;
+
+              // Track this cross-chunk dynamic import so we make sure to
+              // include its hash when we're calculating the hashes of all
+              // dependencies of this chunk.
+              if (otherChunkIndex !== chunkIndex) {
+                if (chunkMeta.dynamicImports === null) {
+                  chunkMeta.dynamicImports = new Set();
+                }
+                chunkMeta.dynamicImports.add(otherChunkIndex);
+              }
+            }
+          }
+
+          // Remember what chunk each top-level symbol is declared in. Symbols
+          // with multiple declarations such as repeated "var" statements with
+          // the same name should already be marked as all being in a single
+          // chunk. In that case this will overwrite the same value below which
+          // is fine.
+          for (const declared of part.declaredSymbols) {
+            if (declared.isTopLevel) {
+              writableSymbol(c.graph.symbols, declared.ref).chunkIndex = chunkIndex;
+            }
+          }
+
+          // Record each symbol used in this part. This will later be matched up
+          // with our map of which chunk a given symbol is declared in to
+          // determine if the symbol needs to be imported from another chunk.
+          for (let ref of part.symbolUses.keys()) {
+            let symbol = c.graph.symbols.get(ref);
+
+            // Ignore unbound symbols, which don't have declarations
+            if (symbol.kind === SymbolUnbound) {
+              continue;
+            }
+
+            // Ignore symbols that are going to be replaced by undefined
+            if (symbol.importItemStatus === ImportItemMissing) {
+              continue;
+            }
+
+            // If this is imported from another file, follow the import
+            // reference and reference the symbol in that file instead
+            const importData = repr.meta.importsToBind.get(ref);
+            if (importData !== undefined) {
+              ref = importData.ref;
+              symbol = c.graph.symbols.get(ref);
+            } else if (repr.meta.wrap === WrapCJS && ref !== repr.ast.wrapperRef) {
+              // The only internal symbol that wrapped CommonJS files export
+              // is the wrapper itself.
+              continue;
+            }
+
+            // If this is an ES6 import from a CommonJS file, it will become a
+            // property access off the namespace symbol instead of a bare
+            // identifier. In that case we want to pull in the namespace symbol
+            // instead. The namespace symbol stores the result of "require()".
+            if (symbol.namespaceAlias !== null) {
+              ref = symbol.namespaceAlias.namespaceRef;
+            }
+
+            // We must record this relationship even for symbols that are not
+            // imports. Due to code splitting, the definition of a symbol may
+            // be moved to a separate chunk than the use of a symbol even if
+            // the definition and use of that symbol are originally from the
+            // same source file.
+            imports.add(ref);
+          }
+        }
+      }
+
+      // Include the exports if this is an entry point chunk
+      if (chunk.isEntryPoint) {
+        const repr = c.graph.files[chunk.sourceIndex].inputFile.repr;
+        if (repr instanceof JSRepr) {
+          if (repr.meta.wrap !== WrapCJS) {
+            for (const alias of repr.meta.sortedAndFilteredExportAliases) {
+              const export_ = repr.meta.resolvedExports.get(alias);
+              let targetRef = export_.ref;
+
+              // If this is an import, then target what the import points to
+              const importData = c.graph.files[export_.sourceIndex].inputFile.repr.meta.importsToBind.get(targetRef);
+              if (importData !== undefined) {
+                targetRef = importData.ref;
+              }
+
+              // If this is an ES6 import from a CommonJS file, it will become a
+              // property access off the namespace symbol instead of a bare
+              // identifier. In that case we want to pull in the namespace symbol
+              // instead. The namespace symbol stores the result of "require()".
+              const symbol = c.graph.symbols.get(targetRef);
+              if (symbol.namespaceAlias !== null) {
+                targetRef = symbol.namespaceAlias.namespaceRef;
+              }
+
+              imports.add(targetRef);
+            }
+          }
+
+          // Ensure "exports" is included if the current output format needs it
+          if (repr.meta.forceIncludeExportsForEntryPoint) {
+            imports.add(repr.ast.exportsRef);
+          }
+
+          // Include the wrapper if present
+          if (repr.meta.wrap !== WrapNone) {
+            imports.add(repr.ast.wrapperRef);
+          }
+        }
+      }
+    }
+
+    // Mark imported symbols as exported in the chunk from which they are declared
+    for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
+      const chunk = c.chunks[chunkIndex];
+      const chunkRepr = chunk.chunkRepr;
+      if (!(chunkRepr instanceof chunkReprJS)) continue;
+      const chunkMeta = chunkMetas[chunkIndex];
+
+      // Find all uses in this chunk of symbols from other chunks
+      chunkRepr.importsFromOtherChunks = new Map();
+      for (const importRef of chunkMeta.imports) {
+        // Ignore uses that aren't top-level symbols
+        const otherChunkIndex = c.graph.symbols.get(importRef).chunkIndex;
+        if (otherChunkIndex >= 0) {
+          if (otherChunkIndex !== chunkIndex) {
+            let items = chunkRepr.importsFromOtherChunks.get(otherChunkIndex);
+            if (items === undefined) chunkRepr.importsFromOtherChunks.set(otherChunkIndex, (items = []));
+            items.push(new crossChunkImportItem("", importRef));
+            chunkMetas[otherChunkIndex].exports.add(importRef);
+          }
+        }
+      }
+
+      // If this is an entry point, make sure we import all chunks belonging to
+      // this entry point, even if there are no imports. We need to make sure
+      // these chunks are evaluated for their side effects too.
+      if (chunk.isEntryPoint) {
+        for (let otherChunkIndex = 0; otherChunkIndex < c.chunks.length; otherChunkIndex++) {
+          const otherChunk = c.chunks[otherChunkIndex];
+          if (otherChunk.chunkRepr instanceof chunkReprJS && chunkIndex !== otherChunkIndex && otherChunk.entryBits.hasBit(chunk.entryPointBit)) {
+            if (!chunkRepr.importsFromOtherChunks.has(otherChunkIndex)) chunkRepr.importsFromOtherChunks.set(otherChunkIndex, []);
+          }
+        }
+      }
+
+      // Make sure we also track dynamic cross-chunk imports. These need to be
+      // tracked so we count them as dependencies of this chunk for the purpose
+      // of hash calculation.
+      if (chunkMeta.dynamicImports !== null) {
+        const sortedDynamicImports = [...chunkMeta.dynamicImports].sort((a, b) => a - b);
+        for (const otherChunkIndex of sortedDynamicImports) {
+          chunk.crossChunkImports.push(new chunkImport(otherChunkIndex, ImportDynamic));
+        }
+      }
+    }
+
+    // Generate cross-chunk exports. These must be computed before cross-chunk
+    // imports because of export alias renaming, which must consider all export
+    // aliases simultaneously to avoid collisions.
+    for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
+      const chunk = c.chunks[chunkIndex];
+      const chunkRepr = chunk.chunkRepr;
+      if (!(chunkRepr instanceof chunkReprJS)) continue;
+
+      chunkRepr.exportsToOtherChunks = new Map();
+      if (c.options.outputFormat !== FormatESModule) throw new GoPanic("Internal error");
+      const r = new ExportRenamer();
+      const items = [];
+      for (const export_ of c.sortedCrossChunkExportItems(chunkMetas[chunkIndex].exports)) {
+        let alias;
+        if (c.options.minifyIdentifiers) {
+          alias = r.nextMinifiedName();
+        } else {
+          alias = r.nextRenamedName(c.graph.symbols.get(export_.ref).originalName);
+        }
+        items.push(new ClauseItem(alias, "", 0, new LocRef(0, export_.ref)));
+        chunkRepr.exportsToOtherChunks.set(export_.ref, alias);
+      }
+      if (items.length > 0) {
+        chunkRepr.crossChunkSuffixStmts = [new Stmt(new SExportClause(items), 0)];
+      }
+    }
+
+    // Generate cross-chunk imports. These must be computed after cross-chunk
+    // exports because the export aliases must already be finalized so they can
+    // be embedded in the generated import statements.
+    for (let chunkIndex = 0; chunkIndex < c.chunks.length; chunkIndex++) {
+      const chunk = c.chunks[chunkIndex];
+      const chunkRepr = chunk.chunkRepr;
+      if (!(chunkRepr instanceof chunkReprJS)) continue;
+
+      const crossChunkPrefixStmts = [];
+
+      for (const crossChunkImport_ of c.sortedCrossChunkImports(chunkRepr.importsFromOtherChunks)) {
+        if (c.options.outputFormat !== FormatESModule) throw new GoPanic("Internal error");
+        const items = [];
+        for (const item of crossChunkImport_.sortedImportItems) {
+          items.push(new ClauseItem(item.exportAlias, "", 0, new LocRef(0, item.ref)));
+        }
+        const importRecordIndex = chunk.crossChunkImports.length;
+        chunk.crossChunkImports.push(new chunkImport(crossChunkImport_.chunkIndex, ImportStmt));
+        if (items.length > 0) {
+          // "import {a, b} from './chunk.js'"
+          const s = new SImport();
+          s.items = items;
+          s.importRecordIndex = importRecordIndex;
+          crossChunkPrefixStmts.push(new Stmt(s, 0));
+        } else {
+          // "import './chunk.js'"
+          const s = new SImport();
+          s.importRecordIndex = importRecordIndex;
+          crossChunkPrefixStmts.push(new Stmt(s, 0));
+        }
+      }
+
+      chunkRepr.crossChunkPrefixStmts = crossChunkPrefixStmts;
+    }
+  },
+
+  // Sort cross-chunk imports by chunk name for determinism
+  sortedCrossChunkImports(importsFromOtherChunks) {
+    const c = this;
+    const result = [];
+
+    for (const [otherChunkIndex, importItems] of importsFromOtherChunks) {
+      // Sort imports from a single chunk by alias for determinism
+      const otherChunk = c.chunks[otherChunkIndex];
+      const exportsToOtherChunks = otherChunk.chunkRepr.exportsToOtherChunks;
+      for (const item of importItems) {
+        item.exportAlias = exportsToOtherChunks.get(item.ref);
+      }
+      // (the aliases are unique within a chunk: an unstable sort is fine)
+      importItems.sort((a, b) => compareStringsUTF8(a.exportAlias, b.exportAlias));
+      result.push(new crossChunkImport(importItems, otherChunkIndex));
+    }
+
+    result.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    return result;
+  },
+
+  // Sort cross-chunk exports by chunk name for determinism
+  sortedCrossChunkExportItems(exportRefs) {
+    const c = this;
+    const result = [];
+    for (const ref of exportRefs) {
+      result.push({ stableSourceIndex: c.graph.stableSourceIndices[refSource(ref)], ref });
+    }
+    result.sort((a, b) => (a.stableSourceIndex !== b.stableSourceIndex ? a.stableSourceIndex - b.stableSourceIndex : refInner(a.ref) - refInner(b.ref)));
+    return result;
   },
 });
 
@@ -696,18 +1804,107 @@ Object.assign(linkerContext.prototype, {
 Object.assign(linkerContext.prototype, {
   scanImportsAndExports() {
     const c = this;
+    if (c.timer === null) {
+      return c.scanImportsAndExportsImpl();
+    }
+    c.timer?.begin("Scan imports and exports");
+    try {
+      return c.scanImportsAndExportsImpl();
+    } finally {
+      c.timer?.end("Scan imports and exports");
+    }
+  },
+
+  scanImportsAndExportsImpl() {
+    const c = this;
     const graph = c.graph;
     const files = graph.files;
     const reachableFiles = graph.reachableFiles;
 
     // Step 1: Figure out what modules must be CommonJS
+    c.timer?.begin("Step 1");
     for (const sourceIndex of reachableFiles) {
       const file = files[sourceIndex];
-      const additionalFiles = file.inputFile.additionalFiles;
+      let additionalFiles = file.inputFile.additionalFiles;
       const repr = file.inputFile.repr;
 
       if (repr instanceof CSSRepr) {
-        bail(); // (CSS only)
+        // Inline URLs for non-CSS files into the CSS file
+        const cssRecords = repr.ast.importRecords;
+        for (let importRecordIndex = 0; importRecordIndex < cssRecords.length; importRecordIndex++) {
+          const record = cssRecords[importRecordIndex];
+          if (record.sourceIndex >= 0) {
+            const otherFile = files[record.sourceIndex];
+            const otherRepr = otherFile.inputFile.repr;
+            if (otherRepr instanceof JSRepr) {
+              record.path = new Path(otherRepr.ast.urlForCSS, "", record.path.ignoredSuffix, record.path.importAttributes, record.path.flags);
+              record.sourceIndex = -1;
+              if (otherFile.inputFile.loader === LoaderEmpty) {
+                record.flags |= WasLoadedWithEmptyLoader;
+              } else {
+                record.flags |= ShouldNotBeExternalInMetafile;
+              }
+              if (otherRepr.ast.urlForCSS.includes(c.uniqueKeyPrefix)) {
+                record.flags |= ContainsUniqueKey;
+              }
+
+              // Copy the additional files to the output directory
+              additionalFiles = additionalFiles.concat(otherFile.inputFile.additionalFiles);
+            }
+          } else if (record.copySourceIndex >= 0) {
+            const otherFile = files[record.copySourceIndex];
+            const otherRepr = otherFile.inputFile.repr;
+            if (otherRepr instanceof CopyRepr) {
+              record.path = new Path(otherRepr.urlForCode, "", record.path.ignoredSuffix, record.path.importAttributes, record.path.flags);
+              record.copySourceIndex = -1;
+              record.flags |= ShouldNotBeExternalInMetafile | ContainsUniqueKey;
+
+              // Copy the additional files to the output directory
+              additionalFiles = additionalFiles.concat(otherFile.inputFile.additionalFiles);
+            }
+          }
+        }
+
+        // Validate cross-file "composes: ... from" named imports
+        for (const composes of repr.ast.composes.values()) {
+          for (const name of composes.importedNames) {
+            const record = repr.ast.importRecords[name.importRecordIndex];
+            if (record.sourceIndex >= 0) {
+              const otherFile = files[record.sourceIndex];
+              const otherRepr = otherFile.inputFile.repr;
+              if (otherRepr instanceof CSSRepr) {
+                if (!otherRepr.ast.localScope.has(name.alias)) {
+                  const global = otherRepr.ast.globalScope.get(name.alias);
+                  if (global !== undefined) {
+                    let hint;
+                    if (otherFile.inputFile.loader === LoaderCSS) {
+                      hint = 'Use the "local-css" loader for ' + goQuote(otherFile.inputFile.source.prettyPaths.select(c.options.logPathStyle)) + " to enable local names.";
+                    } else {
+                      hint = 'Use the ":local" selector to change ' + goQuote(name.alias) + " into a local name.";
+                    }
+                    c.log.addErrorWithNotes(
+                      file.lineColumnTracker(),
+                      cssRangeOfIdentifier(file.inputFile.source, name.aliasLoc),
+                      "Cannot use global name " + goQuote(name.alias) + ' with "composes"',
+                      [
+                        otherFile.lineColumnTracker().msgData(cssRangeOfIdentifier(otherFile.inputFile.source, global.loc), "The global name " + goQuote(name.alias) + " is defined here:"),
+                        new MsgData(null, null, hint),
+                      ],
+                    );
+                  } else {
+                    c.log.addError(
+                      file.lineColumnTracker(),
+                      cssRangeOfIdentifier(file.inputFile.source, name.aliasLoc),
+                      "The name " + goQuote(name.alias) + " never appears in " + goQuote(otherFile.inputFile.source.prettyPaths.select(c.options.logPathStyle)),
+                    );
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        c.validateComposesFromProperties(file, repr);
       } else if (repr instanceof JSRepr) {
         const records = repr.ast.importRecords;
         for (let importRecordIndex = 0; importRecordIndex < records.length; importRecordIndex++) {
@@ -715,14 +1912,25 @@ Object.assign(linkerContext.prototype, {
           if (!(record.sourceIndex >= 0)) {
             if (record.copySourceIndex >= 0) {
               const otherFile = files[record.copySourceIndex];
-              if (otherFile.inputFile.repr instanceof CopyRepr) bail(); // ("copy" loader only)
+              const otherRepr = otherFile.inputFile.repr;
+              if (otherRepr instanceof CopyRepr) {
+                // (the record may be shared with other links: replace it)
+                const clone = record.clone();
+                clone.path = new Path(otherRepr.urlForCode, "", record.path.ignoredSuffix, record.path.importAttributes, record.path.flags);
+                clone.copySourceIndex = -1;
+                clone.flags |= ShouldNotBeExternalInMetafile | ContainsUniqueKey;
+                records[importRecordIndex] = clone;
+
+                // Copy the additional files to the output directory
+                additionalFiles = additionalFiles.concat(otherFile.inputFile.additionalFiles);
+              }
             }
             continue;
           }
 
           const otherFile = files[record.sourceIndex];
           const otherRepr = otherFile.inputFile.repr;
-          if (!(otherRepr instanceof JSRepr)) bail(); // Go: type assertion panic
+          if (!(otherRepr instanceof JSRepr)) throw new GoPanic("interface conversion: graph.InputFileRepr is " + goTypeName("graph", otherRepr) + ", not *graph.JSRepr");
 
           switch (record.kind) {
             case ImportStmt:
@@ -797,10 +2005,13 @@ Object.assign(linkerContext.prototype, {
       file.inputFile.additionalFiles = additionalFiles;
     }
 
+    c.timer?.end("Step 1");
+
     // Step 2: Propagate dynamic export status for export star statements that
     // are re-exports from a module whose exports are not statically analyzable.
     // In this case the export star must be evaluated at run time instead of at
     // bundle time.
+    c.timer?.begin("Step 2");
     for (const sourceIndex of reachableFiles) {
       const repr = files[sourceIndex].inputFile.repr;
       if (!(repr instanceof JSRepr)) continue;
@@ -831,9 +2042,12 @@ Object.assign(linkerContext.prototype, {
       }
     }
 
+    c.timer?.end("Step 2");
+
     // Step 3: Resolve "export * from" statements. This must be done after we
     // discover all modules that can have dynamic exports because export stars
     // are ignored for those modules.
+    c.timer?.begin("Step 3");
     const exportStarStack = [];
     for (const sourceIndex of reachableFiles) {
       const repr = files[sourceIndex].inputFile.repr;
@@ -857,8 +2071,11 @@ Object.assign(linkerContext.prototype, {
       repr.meta.resolvedExportStar = new ExportData(EMPTY_ARRAY, repr.ast.exportsRef, 0, sourceIndex);
     }
 
+    c.timer?.end("Step 3");
+
     // Step 4: Match imports with exports. This must be done after we process all
     // export stars because imports can bind to export star re-exports.
+    c.timer?.begin("Step 4");
     for (const sourceIndex of reachableFiles) {
       const file = files[sourceIndex];
       const repr = file.inputFile.repr;
@@ -890,9 +2107,12 @@ Object.assign(linkerContext.prototype, {
       c.createWrapperForFile(sourceIndex);
     }
 
+    c.timer?.end("Step 4");
+
     // Step 5: Create namespace exports for every file. This is always necessary
     // for CommonJS files, and is also necessary for other files if they are
     // imported using an import star statement.
+    c.timer?.begin("Step 5");
     for (const sourceIndex of reachableFiles) {
       const repr = files[sourceIndex].inputFile.repr;
       if (!(repr instanceof JSRepr)) continue;
@@ -903,8 +2123,7 @@ Object.assign(linkerContext.prototype, {
       const memoizable = files[sourceIndex].inputFile.astIsShared && sharedStep5IsMemoizable(repr);
       if (memoizable) {
         memo = sharedStep5Memos.get(repr.ast.namedExports);
-        if (memo !== undefined && !globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__) {
-          restoreSharedStep5(c, sourceIndex, repr, memo);
+        if (memo !== undefined && !globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__ && restoreSharedStep5(c, sourceIndex, repr, memo)) {
           continue;
         }
       }
@@ -924,21 +2143,45 @@ Object.assign(linkerContext.prototype, {
         // export. These names cannot be used and should not end up in generated code.
         if (export_.potentiallyAmbiguousExportStarRefs.length > 0) {
           let mainRef = export_.ref;
+          let mainLoc = export_.nameLoc;
           const imported = otherRepr.meta.importsToBind.get(export_.ref);
           if (imported !== undefined) {
             mainRef = imported.ref;
+            mainLoc = imported.nameLoc;
           }
 
           for (const ambiguousExport of export_.potentiallyAmbiguousExportStarRefs) {
-            const ambiguousRepr = files[ambiguousExport.sourceIndex].inputFile.repr;
+            const ambiguousFile = files[ambiguousExport.sourceIndex].inputFile;
+            const ambiguousRepr = ambiguousFile.repr;
             let ambiguousRef = ambiguousExport.ref;
+            let ambiguousLoc = ambiguousExport.nameLoc;
             const imported2 = ambiguousRepr.meta.importsToBind.get(ambiguousExport.ref);
             if (imported2 !== undefined) {
               ambiguousRef = imported2.ref;
+              ambiguousLoc = imported2.nameLoc;
             }
 
             if (mainRef !== ambiguousRef) {
-              // (a Debug message about the ambiguous re-export is dropped here)
+              const file = files[sourceIndex].inputFile;
+              const otherTracker = new LineColumnTracker(otherFile.source);
+              const ambiguousTracker = new LineColumnTracker(ambiguousFile.source);
+              c.log.addIDWithNotes(
+                MsgID_Bundler_AmbiguousReexport,
+                MsgDebug,
+                null,
+                RANGE_ZERO,
+                "Re-export of " + goQuote(alias) + " in " + goQuote(file.source.prettyPaths.select(c.options.logPathStyle)) + " is ambiguous and has been removed",
+                [
+                  otherTracker.msgData(
+                    rangeOfIdentifier(otherFile.source, mainLoc),
+                    "One definition of " + goQuote(alias) + " comes from " + goQuote(otherFile.source.prettyPaths.select(c.options.logPathStyle)) + " here:",
+                  ),
+                  ambiguousTracker.msgData(
+                    rangeOfIdentifier(ambiguousFile.source, ambiguousLoc),
+                    "Another definition of " + goQuote(alias) + " comes from " + goQuote(ambiguousFile.source.prettyPaths.select(c.options.logPathStyle)) + " here:",
+                  ),
+                ],
+              );
               continue nextAlias;
             }
           }
@@ -951,7 +2194,13 @@ Object.assign(linkerContext.prototype, {
           continue;
         }
 
-        // (the ArbitraryModuleNamespaceNames check needs a lowered target)
+        if (
+          c.options.outputFormat === FormatESModule &&
+          jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames) &&
+          c.graph.files[sourceIndex].isEntryPoint()
+        ) {
+          c.maybeForbidArbitraryModuleNamespaceIdentifier("export", export_.sourceIndex, export_.nameLoc, alias);
+        }
 
         aliases.push(alias);
       }
@@ -974,9 +2223,12 @@ Object.assign(linkerContext.prototype, {
       }
     }
 
+    c.timer?.end("Step 5");
+
     // Step 6: Bind imports to exports. This adds non-local dependencies on the
     // parts that declare the export to all parts that use the import. Also
     // generate wrapper parts for wrapped files.
+    c.timer?.begin("Step 6");
     for (const sourceIndex of reachableFiles) {
       const file = files[sourceIndex];
       const repr = file.inputFile.repr;
@@ -1114,9 +2366,11 @@ Object.assign(linkerContext.prototype, {
           // Don't follow external imports (this includes import() expressions)
           if (!(record.sourceIndex >= 0) || c.isExternalDynamicImport(record, sourceIndex)) {
             // This is an external import. Check if it will be a "require()" call.
-            if (record.kind === ImportRequire || !formatKeepESMImportExportSyntax(c.options.outputFormat)) {
-              // (the "import()" lowering case needs a lowered target)
-
+            if (
+              record.kind === ImportRequire ||
+              !formatKeepESMImportExportSyntax(c.options.outputFormat) ||
+              (record.kind === ImportDynamic && jsFeatureHas(c.options.unsupportedJSFeatures, DynamicImport))
+            ) {
               // We should use "__require" instead of "require" if we're not
               // generating a CommonJS output file, since it won't exist otherwise
               if (shouldCallRuntimeRequire(c.options.mode, c.options.outputFormat)) {
@@ -1244,6 +2498,7 @@ Object.assign(linkerContext.prototype, {
         graph.generateRuntimeSymbolImportAndUse(sourceIndex, partIndex, "__reExport", reExportUses);
       }
     }
+    c.timer?.end("Step 6");
   },
 
   // The second half of step 5 of scanImportsAndExports for one file (a
@@ -1374,8 +2629,148 @@ Object.assign(linkerContext.prototype, {
     }
   },
 
+  // (In the fast path only the JSON values of "--define" are lazy exports)
   generateCodeForLazyExport(sourceIndex) {
-    bail(); // (only for non-JS loaders, which the fast path never uses)
+    const c = this;
+    const file = c.graph.files[sourceIndex];
+    const repr = file.inputFile.repr;
+
+    // Grab the lazy expression
+    if (repr.ast.parts.length < 1) throw new GoPanic("Internal error");
+    const part = repr.ast.parts[repr.ast.parts.length - 1];
+    if (part.stmts.length !== 1) throw new GoPanic("Internal error");
+    let lazyValue = part.stmts[0].data.value;
+
+    // If this JavaScript file is a stub from a CSS file, populate the exports of
+    // this JavaScript stub with the local names from that CSS file. This is done
+    // now instead of earlier because we need the whole bundle to be present.
+    if (repr.cssSourceIndex >= 0) {
+      const cssSourceIndex = repr.cssSourceIndex;
+      const css = c.graph.files[cssSourceIndex].inputFile.repr;
+      if (css instanceof CSSRepr) {
+        const exports = new EObject();
+
+        for (const local of css.ast.localSymbols) {
+          let value = new Expr(new ENameOfSymbol(local.ref), local.loc);
+          const visited = new Set        ([local.ref]);
+          const parts                 = [];
+          let visitComposes                                  ;
+
+          const visitName = (repr     , ref        ) => {
+            if (!visited.has(ref)) {
+              visited.add(ref);
+              visitComposes(repr, ref);
+              parts.push(new TemplatePart(new Expr(new ENameOfSymbol(ref), 0), "", " "));
+            }
+          };
+
+          visitComposes = (repr     , ref        ) => {
+            const composes = repr.ast.composes.get(ref);
+            if (composes !== undefined) {
+              for (const name of composes.importedNames) {
+                const record = repr.ast.importRecords[name.importRecordIndex];
+                if (record.sourceIndex >= 0) {
+                  const otherFile = c.graph.files[record.sourceIndex];
+                  const otherRepr = otherFile.inputFile.repr;
+                  if (otherRepr instanceof CSSRepr) {
+                    const otherName = otherRepr.ast.localScope.get(name.alias);
+                    if (otherName !== undefined) {
+                      visitName(otherRepr, otherName.ref);
+                    }
+                  }
+                }
+              }
+
+              for (const name of composes.names) {
+                visitName(repr, name.ref);
+              }
+            }
+          };
+
+          visitComposes(css, local.ref);
+
+          if (parts.length > 0) {
+            parts.push(new TemplatePart(value));
+            value = new Expr(new ETemplate(null, "", "", parts), value.loc);
+          }
+
+          exports.properties.push(new Property(null, new Expr(new EString(c.graph.symbols.get(local.ref).originalName), local.loc), value));
+        }
+
+        lazyValue = new Expr(exports, lazyValue.loc);
+      }
+    }
+
+    // Use "module.exports = value" for CommonJS-style modules
+    if (repr.ast.exportsKind === ExportsCommonJS) {
+      part.stmts = [
+        assignStmt(new Expr(new EDot(new Expr(new EIdentifier(repr.ast.moduleRef), lazyValue.loc), "exports", lazyValue.loc), lazyValue.loc), lazyValue),
+      ];
+      c.graph.generateSymbolImportAndUse(sourceIndex, 0, repr.ast.moduleRef, 1, sourceIndex);
+      return;
+    }
+
+    // Otherwise, generate ES6 export statements. These are added as additional
+    // parts so they can be tree shaken individually.
+    part.stmts = [];
+
+    // Generate a new symbol and link the export into the graph for tree shaking
+    const generateExport = (loc, name, alias) => {
+      const ref = c.graph.generateNewSymbol(sourceIndex, SymbolOther, name);
+      const newPart = new Part();
+      newPart.declaredSymbols = [new DeclaredSymbol(ref, true)];
+      newPart.canBeRemovedIfUnused = true;
+      const partIndex = c.graph.addPartToFile(sourceIndex, newPart);
+      c.graph.generateSymbolImportAndUse(sourceIndex, partIndex, repr.ast.moduleRef, 1, sourceIndex);
+      repr.meta.topLevelSymbolToPartsOverlay.set(ref, [partIndex]);
+      repr.meta.resolvedExports.set(alias, new ExportData(EMPTY_ARRAY, ref, loc, sourceIndex));
+      return [ref, partIndex];
+    };
+
+    // Unwrap JSON objects into separate top-level variables. This improves tree-
+    // shaking by letting you only import part of a JSON file.
+    //
+    // But don't do this for files loaded via "with { type: 'json' }" as that
+    // behavior is specified to not export anything except for the "default"
+    // export: https://github.com/tc39/proposal-json-modules
+    if (lazyValue.data.k === E_OBJECT && file.inputFile.loader !== LoaderWithTypeJSON) {
+      const object = lazyValue.data;
+      for (let $i = 0; $i < object.properties.length; $i++) {
+        const property = object.properties[$i];
+        if (
+          property.key.data.k === E_STRING &&
+          (!file.isEntryPoint() || isIdentifier(property.key.data.value) || !jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames))
+        ) {
+          const name = property.key.data.value; // helpers.UTF16ToString
+          if (name !== "default") {
+            const $d = generateExport(property.key.loc, name, name);
+            const ref = $d[0], partIndex = $d[1];
+
+            // This initializes the generated variable with a copy of the property
+            // value, which is INCORRECT for values that are objects/arrays because
+            // they will have separate object identity. This is fixed up later in
+            // "generateCodeForFileInChunkJS" by changing the object literal to
+            // reference this generated variable instead.
+            //
+            // Changing the object literal is deferred until that point instead of
+            // doing it now because we only want to do this for top-level variables
+            // that actually end up being used, and we don't know which ones will
+            // end up actually being used at this point (since import binding hasn't
+            // happened yet). So we need to wait until after tree shaking happens.
+            repr.ast.parts[partIndex].stmts = [
+              new Stmt(new SLocal([new Decl(new Binding(new BIdentifier(ref), property.key.loc), property.valueOrNil)], undefined, true), property.key.loc),
+            ];
+          }
+        }
+      }
+    }
+
+    // Generate the default export
+    const $d = generateExport(lazyValue.loc, file.inputFile.source.identifierName + "_default", "default");
+    const ref = $d[0], partIndex = $d[1];
+    repr.ast.parts[partIndex].stmts = [
+      new Stmt(new SExportDefault(new Stmt(new SExpr(lazyValue), lazyValue.loc), new LocRef(lazyValue.loc, ref)), lazyValue.loc),
+    ];
   },
 });
 
@@ -1586,13 +2981,18 @@ Object.assign(linkerContext.prototype, {
 
       // Add a getter property
       const body = new FnBody(new SBlock([new Stmt(new SReturn(value), value.loc)]), 0);
-      // (compat.Arrow is always supported by the fast path)
-      const getter = new Expr(new EArrow(EMPTY_ARRAY, body, false, false, true), 0);
+      let getter;
+      if (jsFeatureHas(c.options.unsupportedJSFeatures, Arrow)) {
+        // (Go's zero Fn has ArgumentsRef {0, 0}, which the printer never reads)
+        getter = new Expr(new EFunction(new Fn(null, EMPTY_ARRAY, body)), 0);
+      } else {
+        getter = new Expr(new EArrow(EMPTY_ARRAY, body, false, false, true), 0);
+      }
 
       // Special case for __proto__ property: use a computed property
       // name to avoid it being treated as the object's prototype
       let flags = 0;
-      if (alias === "__proto__") {
+      if (alias === "__proto__" && !jsFeatureHas(c.options.unsupportedJSFeatures, ObjectExtensions)) {
         flags |= PropertyIsComputed;
       }
 
@@ -1769,15 +3169,30 @@ Object.assign(linkerContext.prototype, {
           writableSymbol(c.graph.symbols, importRef).namespaceAlias = new NamespaceAlias(result.alias, result.namespaceRef);
           break;
 
-        case matchImportCycle:
-          c.log.addError();
+        case matchImportCycle: {
+          const namedImport = repr.ast.namedImports.get(importRef);
+          c.log.addError(file.lineColumnTracker(), rangeOfIdentifier(file.inputFile.source, namedImport.aliasLoc), "Detected cycle while resolving import " + goQuote(namedImport.alias));
           break;
+        }
 
         case matchImportProbablyTypeScriptType:
           repr.meta.isProbablyTypeScriptType.set(importRef, true);
           break;
 
         case matchImportAmbiguous: {
+          const namedImport = repr.ast.namedImports.get(importRef);
+          const r = rangeOfIdentifier(file.inputFile.source, namedImport.aliasLoc);
+          let notes                   = null;
+
+          // Provide the locations of both ambiguous exports if possible
+          if (result.nameLoc !== 0 && result.otherNameLoc !== 0) {
+            const a = c.graph.files[result.sourceIndex];
+            const b = c.graph.files[result.otherSourceIndex];
+            const ra = rangeOfIdentifier(a.inputFile.source, result.nameLoc);
+            const rb = rangeOfIdentifier(b.inputFile.source, result.otherNameLoc);
+            notes = [a.lineColumnTracker().msgData(ra, "One matching export is here:"), b.lineColumnTracker().msgData(rb, "Another matching export is here:")];
+          }
+
           const symbol = c.graph.symbols.get(importRef);
           if (symbol.importItemStatus === ImportItemGenerated) {
             const symbol = writableSymbol(c.graph.symbols, importRef);
@@ -1789,9 +3204,11 @@ Object.assign(linkerContext.prototype, {
             // time, so we emit a warning and rewrite the value to the literal
             // "undefined" instead of emitting an error.
             symbol.importItemStatus = ImportItemMissing;
-            c.log.addIDWithNotes(MsgID_Bundler_ImportIsUndefined, MsgWarning);
+            const msg = "Import " + goQuote(namedImport.alias) + " will always be undefined because there are multiple matching exports";
+            c.log.addIDWithNotes(MsgID_Bundler_ImportIsUndefined, MsgWarning, file.lineColumnTracker(), r, msg, notes);
           } else {
-            c.log.addErrorWithNotes();
+            const msg = "Ambiguous import " + goQuote(namedImport.alias) + " has multiple matching exports";
+            c.log.addErrorWithNotes(file.lineColumnTracker(), r, msg, notes);
           }
           break;
         }
@@ -1868,7 +3285,17 @@ Object.assign(linkerContext.prototype, {
             if (isInsideNodeModules(trackerFile.inputFile.source.keyPath.text)) {
               kind = MsgDebug;
             }
-            c.log.addID(MsgID_Bundler_ImportIsUndefined, kind);
+            c.log.addID(
+              MsgID_Bundler_ImportIsUndefined,
+              kind,
+              trackerFile.lineColumnTracker(),
+              rangeOfIdentifier(trackerFile.inputFile.source, namedImport.aliasLoc),
+              "Import " +
+                goQuote(namedImport.alias) +
+                " will always be undefined because the file " +
+                goQuote(c.graph.files[nextTracker.sourceIndex].inputFile.source.prettyPaths.select(c.options.logPathStyle)) +
+                " has no exports",
+            );
           }
           break;
         }
@@ -1889,6 +3316,8 @@ Object.assign(linkerContext.prototype, {
 
         case importNoMatch: {
           const trackerFile = c.graph.files[tracker.sourceIndex];
+          const namedImport = trackerFile.inputFile.repr.ast.namedImports.get(tracker.importRef);
+          const r = rangeOfIdentifier(trackerFile.inputFile.source, namedImport.aliasLoc);
 
           // Report mismatched imports and exports
           if (c.graph.symbols.get(tracker.importRef).importItemStatus === ImportItemGenerated) {
@@ -1922,14 +3351,39 @@ Object.assign(linkerContext.prototype, {
             //   import unused = ns.notAnExport
             //
             if (symbol.useCountEstimate > 0) {
-              let kind = MsgWarning;
+              const nextFile = c.graph.files[nextTracker.sourceIndex].inputFile;
+              const msg = new Msg(
+                null,
+                "",
+                trackerFile
+                  .lineColumnTracker()
+                  .msgData(
+                    r,
+                    "Import " +
+                      goQuote(namedImport.alias) +
+                      " will always be undefined because there is no matching export in " +
+                      goQuote(nextFile.source.prettyPaths.select(c.options.logPathStyle)),
+                  ),
+                MsgWarning,
+              );
               if (isInsideNodeModules(trackerFile.inputFile.source.keyPath.text)) {
-                kind = MsgDebug;
+                msg.kind = MsgDebug;
               }
-              c.log.addMsgID(MsgID_Bundler_ImportIsUndefined, { kind });
+              c.maybeCorrectObviousTypo(nextFile.repr, namedImport.alias, msg);
+              c.log.addMsgID(MsgID_Bundler_ImportIsUndefined, msg);
             }
           } else {
-            c.log.addMsg({ kind: MsgError });
+            const nextFile = c.graph.files[nextTracker.sourceIndex].inputFile;
+            const msg = new Msg(
+              null,
+              "",
+              trackerFile
+                .lineColumnTracker()
+                .msgData(r, "No matching export in " + goQuote(nextFile.source.prettyPaths.select(c.options.logPathStyle)) + " for import " + goQuote(namedImport.alias)),
+              MsgError,
+            );
+            c.maybeCorrectObviousTypo(nextFile.repr, namedImport.alias, msg);
+            c.log.addMsg(msg);
           }
           break;
         }
@@ -2013,6 +3467,53 @@ Object.assign(linkerContext.prototype, {
     }
 
     return [result, reExports];
+  },
+
+  maybeForbidArbitraryModuleNamespaceIdentifier(kind, sourceIndex, loc, alias) {
+    const c = this;
+    if (!isIdentifier(alias)) {
+      const file = c.graph.files[sourceIndex];
+      const where = prettyPrintTargetEnvironment(c.options.originalTargetEnv, c.options.unsupportedJSFeatureOverridesMask);
+      c.log.addError(
+        file.lineColumnTracker(),
+        file.inputFile.source.rangeOfString(loc),
+        "Using the string " + goQuote(alias) + " as an " + kind + " name is not supported in " + where,
+      );
+    }
+  },
+
+  // Attempt to correct an import name with a typo
+  maybeCorrectObviousTypo(repr, name, msg) {
+    const c = this;
+    if (repr.meta.resolvedExportTypos === null) {
+      const valid = [...repr.meta.resolvedExports.keys()];
+      valid.sort((a, b) => (goStringLess(a, b) ? -1 : goStringLess(b, a) ? 1 : 0));
+      repr.meta.resolvedExportTypos = new TypoDetector(valid);
+    }
+
+    const $t = repr.meta.resolvedExportTypos.maybeCorrectTypo(name);
+    if ($t[1]) {
+      const corrected = $t[0];
+      msg.data.location.suggestion = corrected;
+      const export_ = repr.meta.resolvedExports.get(corrected);
+      const importedFile = c.graph.files[export_.sourceIndex];
+      const text = "Did you mean to import " + goQuote(corrected) + " instead?";
+      let note;
+      if (export_.nameLoc === 0) {
+        // Don't report a source location for definitions without one. This can
+        // happen with automatically-generated exports from non-JavaScript files.
+        note = new MsgData(null, null, text);
+      } else {
+        let r;
+        if (loaderIsCSS(importedFile.inputFile.loader)) {
+          r = cssRangeOfIdentifier(importedFile.inputFile.source, export_.nameLoc);
+        } else {
+          r = rangeOfIdentifier(importedFile.inputFile.source, export_.nameLoc);
+        }
+        note = importedFile.lineColumnTracker().msgData(r, text);
+      }
+      msg.notes = msg.notes === null ? [note] : [...msg.notes, note];
+    }
   },
 
   recursivelyWrapDependencies(sourceIndex) {
@@ -2289,18 +3790,22 @@ Object.assign(linkerContext.prototype, {
     const c = this;
 
     // Tree shaking: Each entry point marks all files reachable from itself
+    c.timer?.begin("Tree shaking");
     for (const entryPoint of c.graph.entryPoints()) {
       c.markFileLiveForTreeShaking(entryPoint.sourceIndex);
     }
+    c.timer?.end("Tree shaking");
 
     // Code splitting: Determine which entry points can reach which files. This
     // has to happen after tree shaking because there is an implicit dependency
     // between live parts within the same file. All liveness has to be computed
     // first before determining which entry points can reach which files.
+    c.timer?.begin("Code splitting");
     const entryPoints = c.graph.entryPoints();
     for (let i = 0; i < entryPoints.length; i++) {
       c.markFileReachableForCodeSplitting(entryPoints[i].sourceIndex, i, 0);
     }
+    c.timer?.end("Code splitting");
   },
 
   markFileReachableForCodeSplitting(sourceIndex, entryPointBit, distanceFromEntryPoint) {
@@ -2346,7 +3851,12 @@ Object.assign(linkerContext.prototype, {
         }
       }
     } else if (repr instanceof CSSRepr) {
-      bail(); // (CSS only)
+      // Traverse into all dependencies
+      for (const record of repr.ast.importRecords) {
+        if (record.sourceIndex >= 0) {
+          c.markFileReachableForCodeSplitting(record.sourceIndex, entryPointBit, distanceFromEntryPoint);
+        }
+      }
     }
   },
 
@@ -2406,7 +3916,12 @@ Object.assign(linkerContext.prototype, {
         }
       }
     } else if (repr instanceof CSSRepr) {
-      bail(); // (CSS only)
+      // Include all "@import" rules
+      for (const record of repr.ast.importRecords) {
+        if (record.sourceIndex >= 0) {
+          c.markFileLiveForTreeShaking(record.sourceIndex);
+        }
+      }
     }
   },
 
@@ -2486,7 +4001,21 @@ Object.assign(linkerContext.prototype, {
 
   computeChunks() {
     const c = this;
+    if (c.timer === null) {
+      return c.computeChunksImpl();
+    }
+    c.timer?.begin("Compute chunks");
+    try {
+      return c.computeChunksImpl();
+    } finally {
+      c.timer?.end("Compute chunks");
+    }
+  },
+
+  computeChunksImpl() {
+    const c = this;
     const jsChunks = new Map();
+    const cssChunks = new Map();
 
     // Create chunks for entry points
     const entryPoints = c.graph.entryPoints();
@@ -2513,11 +4042,39 @@ Object.assign(linkerContext.prototype, {
         jsChunks.set(key, chunk);
 
         // If this JS entry point has an associated CSS entry point, generate it
-        // now (CSS only)
+        // now. This is essentially done by generating a virtual CSS file that
+        // only contains "@import" statements in the order that the files were
+        // discovered in JS source order, where JS source order is arbitrary but
+        // consistent for dynamic imports. Then we run the CSS import order
+        // algorithm to determine the final CSS file order for the chunk.
         const cssSourceIndices = c.findImportedCSSFilesInJSOrder(entryPoint.sourceIndex);
-        if (cssSourceIndices.length > 0) bail(); // (CSS only)
-      } else {
-        bail(); // (CSS only)
+        if (cssSourceIndices.length > 0) {
+          const order = findImportedFilesInCSSOrder(c, cssSourceIndices);
+          const cssFilesWithPartsInChunk = new Set();
+          for (const entry of order) {
+            if (entry.kind === cssImportSourceIndex) {
+              cssFilesWithPartsInChunk.add(entry.sourceIndex);
+            }
+          }
+          const cssChunk = new chunkInfo();
+          cssChunk.entryBits = entryBits;
+          cssChunk.isEntryPoint = true;
+          cssChunk.sourceIndex = entryPoint.sourceIndex;
+          cssChunk.entryPointBit = i;
+          cssChunk.filesWithPartsInChunk = cssFilesWithPartsInChunk;
+          cssChunk.chunkRepr = new chunkReprCSS(order);
+          cssChunks.set(key, cssChunk);
+          chunkRepr.hasCSSChunk = true;
+        }
+      } else if (repr instanceof CSSRepr) {
+        const order = findImportedFilesInCSSOrder(c, [entryPoint.sourceIndex]);
+        for (const entry of order) {
+          if (entry.kind === cssImportSourceIndex) {
+            chunk.filesWithPartsInChunk.add(entry.sourceIndex);
+          }
+        }
+        chunk.chunkRepr = new chunkReprCSS(order);
+        cssChunks.set(key, chunk);
       }
     }
 
@@ -2543,15 +4100,26 @@ Object.assign(linkerContext.prototype, {
     // Sort the chunks for determinism. This matters because we use chunk indices
     // as sorting keys in a few places.
     const sortedChunks = [];
-    const sortedKeys = [...jsChunks.keys()];
+    let sortedKeys = [...jsChunks.keys()];
     sortedKeys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)); // keys are byte strings (char codes 0-255)
+    const jsChunkIndicesForCSS = new Map();
     for (const key of sortedKeys) {
-      sortedChunks.push(jsChunks.get(key));
+      const chunk = jsChunks.get(key);
+      if (chunk.chunkRepr.hasCSSChunk) {
+        jsChunkIndicesForCSS.set(key, sortedChunks.length);
+      }
+      sortedChunks.push(chunk);
     }
-
-    // A transform always has exactly one entry point and no code splitting,
-    // so every live file ends up in the entry point's chunk.
-    if (sortedChunks.length !== 1) bail();
+    sortedKeys = [...cssChunks.keys()];
+    sortedKeys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const key of sortedKeys) {
+      const chunk = cssChunks.get(key);
+      const jsChunkIndex = jsChunkIndicesForCSS.get(key);
+      if (jsChunkIndex !== undefined) {
+        sortedChunks[jsChunkIndex].chunkRepr.cssChunkIndex = sortedChunks.length;
+      }
+      sortedChunks.push(chunk);
+    }
 
     // Map from the entry point file to its chunk. We will need this later if
     // a file contains a dynamic import to this entry point, since we'll need
@@ -2559,17 +4127,28 @@ Object.assign(linkerContext.prototype, {
     for (let chunkIndex = 0; chunkIndex < sortedChunks.length; chunkIndex++) {
       const chunk = sortedChunks[chunkIndex];
       if (chunk.isEntryPoint) {
-        c.graph.files[chunk.sourceIndex].entryPointChunkIndex = chunkIndex;
+        const file = c.graph.files[chunk.sourceIndex];
+
+        // JS entry points that import CSS files generate two chunks, a JS chunk
+        // and a CSS chunk. Don't link the CSS chunk to the JS file since the CSS
+        // chunk is secondary (the JS chunk is primary).
+        if (chunk.chunkRepr instanceof chunkReprCSS && file.inputFile.repr instanceof JSRepr) {
+          continue;
+        }
+
+        file.entryPointChunkIndex = chunkIndex;
       }
     }
 
     // Determine the order of JS files (and parts) within the chunk ahead of time
     for (const chunk of sortedChunks) {
       const chunkRepr = chunk.chunkRepr;
-      const $d218 = c.findImportedPartsInJSOrder(chunk);
-      const js = $d218[0], jsParts = $d218[1];
-      chunkRepr.filesInChunkInOrder = js;
-      chunkRepr.partsInChunkInOrder = jsParts;
+      if (chunkRepr instanceof chunkReprJS) {
+        const $d218 = c.findImportedPartsInJSOrder(chunk);
+        const js = $d218[0], jsParts = $d218[1];
+        chunkRepr.filesInChunkInOrder = js;
+        chunkRepr.partsInChunkInOrder = jsParts;
+      }
     }
 
     // Assign general information to each chunk
@@ -2581,7 +4160,62 @@ Object.assign(linkerContext.prototype, {
       // last 8 numbers of the key are the chunk index.
       chunk.uniqueKey = c.uniqueKeyPrefix + "C" + String(chunkIndex).padStart(8, "0");
 
-      // (The output path template is not evaluated, see generateChunksInParallel)
+      // JS-only: the transform API has no file system and never exposes the
+      // output paths (see generateChunksInParallel)
+      if (c.fs === null) continue;
+
+      // Determine the standard file extension
+      const stdExt = chunk.chunkRepr instanceof chunkReprCSS ? c.options.outputExtensionCSS : c.options.outputExtensionJS;
+
+      // Compute the template substitutions
+      let dir, base, ext;
+      let template;
+      if (chunk.isEntryPoint) {
+        // Only use the entry path template for user-specified entry points
+        const file = c.graph.files[chunk.sourceIndex];
+        if (file.isUserSpecifiedEntryPoint()) {
+          template = c.options.entryPathTemplate;
+        } else {
+          template = c.options.chunkPathTemplate;
+        }
+
+        if (c.options.absOutputFile !== "") {
+          // If the output path was configured explicitly, use it verbatim
+          dir = "/";
+          base = c.fs.base(c.options.absOutputFile);
+          const originalExt = c.fs.ext(base);
+          base = base.slice(0, base.length - originalExt.length);
+
+          // Use the extension from the explicit output file path. However, don't do
+          // that if this is a CSS chunk but the entry point file is not CSS. In that
+          // case use the standard extension. This happens when importing CSS into JS.
+          if (file.inputFile.repr instanceof CSSRepr || stdExt !== c.options.outputExtensionCSS) {
+            ext = originalExt;
+          } else {
+            ext = stdExt;
+          }
+        } else {
+          // Otherwise, derive the output path from the input path
+          [dir, base] = pathRelativeToOutbase(
+            c.graph.files[chunk.sourceIndex].inputFile,
+            c.options,
+            c.fs,
+            !file.isUserSpecifiedEntryPoint(),
+            c.graph.entryPoints()[chunk.entryPointBit].outputPath,
+          );
+          ext = stdExt;
+        }
+      } else {
+        dir = "/";
+        base = "chunk";
+        ext = stdExt;
+        template = c.options.chunkPathTemplate;
+      }
+
+      // Determine the output path template
+      const templateExt = ext.startsWith(".") ? ext.slice(1) : ext;
+      template = template.concat([new PathTemplate(ext)]);
+      chunk.finalTemplate = substituteTemplate(template, new PathPlaceholders(dir, base, null, templateExt));
     }
 
     c.chunks = sortedChunks;
@@ -2795,7 +4429,12 @@ Object.assign(linkerContext.prototype, {
             continue;
           }
 
-          // (the ArbitraryModuleNamespaceNames check needs a lowered target)
+          if (jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames) && s.items !== null) {
+            for (let i = 0; i < s.items.length; i++) {
+              const item = s.items[i];
+              c.maybeForbidArbitraryModuleNamespaceIdentifier("import", sourceIndex, item.aliasLoc, item.alias);
+            }
+          }
 
           // Make sure these don't end up in the wrapper closure
           if (shouldExtractESMStmtsForWrap) {
@@ -2809,6 +4448,10 @@ Object.assign(linkerContext.prototype, {
           if (s.alias !== null) {
             if (c.shouldRemoveImportExportStmt(sourceIndex, stmtList, stmt.loc, s.namespaceRef, s.importRecordIndex)) {
               continue;
+            }
+
+            if (jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames)) {
+              c.maybeForbidArbitraryModuleNamespaceIdentifier("export", sourceIndex, s.alias.loc, s.alias.originalName);
             }
 
             if (shouldStripExports) {
@@ -2897,12 +4540,26 @@ Object.assign(linkerContext.prototype, {
             continue;
           }
 
+          if (jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames)) {
+            for (let i = 0; i < s.items.length; i++) {
+              const item = s.items[i];
+              c.maybeForbidArbitraryModuleNamespaceIdentifier("import", sourceIndex, item.name.loc, item.originalName);
+            }
+          }
+
           if (shouldStripExports) {
             // Turn this statement into "import {foo} from 'path'"
             for (let i = 0; i < s.items.length; i++) {
               s.items[i].alias = s.items[i].originalName;
             }
             stmt = new Stmt(new SImport(null, s.items, null, s.namespaceRef, s.importRecordIndex, s.isSingleLine), stmt.loc);
+          } else if (jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames)) {
+            for (let i = 0; i < s.items.length; i++) {
+              const item = s.items[i];
+              if (item.aliasLoc !== item.name.loc) {
+                c.maybeForbidArbitraryModuleNamespaceIdentifier("export", sourceIndex, item.aliasLoc, item.alias);
+              }
+            }
           }
 
           // Make sure these don't end up in the wrapper closure
@@ -2916,6 +4573,13 @@ Object.assign(linkerContext.prototype, {
           if (shouldStripExports) {
             // Remove export statements entirely
             continue;
+          }
+
+          if (jsFeatureHas(c.options.unsupportedJSFeatures, ArbitraryModuleNamespaceNames)) {
+            for (let i = 0; i < s.items.length; i++) {
+              const item = s.items[i];
+              c.maybeForbidArbitraryModuleNamespaceIdentifier("export", sourceIndex, item.aliasLoc, item.alias);
+            }
           }
 
           // Make sure these don't end up in the wrapper closure
@@ -2997,55 +4661,6 @@ Object.assign(linkerContext.prototype, {
 // ---------------------------------------------------------------------------
 // Code generation
 
-// js_printer.QuoteIdentifier(nil, name, 0)
-function quoteIdentifier(name) {
-  const hexChars = "0123456789ABCDEF";
-  let js = "";
-  let isASCII = false;
-  let asciiStart = 0;
-  const n = name.length;
-  for (let i = 0; i < n; ) {
-    let c = name.charCodeAt(i);
-    let width = 1;
-    if (c >= 0xd800 && c <= 0xdbff && i + 1 < n) {
-      const c2 = name.charCodeAt(i + 1);
-      if (c2 >= 0xdc00 && c2 <= 0xdfff) {
-        c = ((c - 0xd800) << 10) + (c2 - 0xdc00) + 0x10000;
-        width = 2;
-      }
-    }
-    if (c >= 0x20 && c <= 0x7e) {
-      // Fast path: a run of ASCII characters
-      if (!isASCII) {
-        isASCII = true;
-        asciiStart = i;
-      }
-    } else {
-      // Slow path: escape non-ACSII characters
-      if (isASCII) {
-        js += name.slice(asciiStart, i);
-        isASCII = false;
-      }
-      if (c <= 0xffff) {
-        js += "\\u" + hexChars[c >> 12] + hexChars[(c >> 8) & 15] + hexChars[(c >> 4) & 15] + hexChars[c & 15];
-      } else {
-        js += "\\u{" + c.toString(16).toUpperCase() + "}";
-      }
-    }
-    i += width;
-  }
-  if (isASCII) {
-    // Print one final run of ASCII characters
-    js += name.slice(asciiStart);
-  }
-  return js;
-}
-
-// js_printer.CanEscapeIdentifier(name, 0, asciiOnly): with no unsupported
-// features, Unicode escapes are always available
-function canEscapeIdentifier(name) {
-  return isIdentifierES5AndESNext(name);
-}
 
 // js_printer.Options with the fields that both linker call sites set. Fields
 // that Go leaves at their zero value are set explicitly (nil maps become empty
@@ -3103,10 +4718,11 @@ function snapshotSharedStep5(c, sourceIndex, repr) {
   };
 }
 
-function restoreSharedStep5(c, sourceIndex, repr, memo) {
+// (false if the memo does not apply: then the step runs)
+function restoreSharedStep5(c, sourceIndex, repr, memo)          {
   const parts = repr.ast.parts;
   if (memo.needsExportsVariable !== repr.meta.needsExportsVariable || memo.partsLength !== parts.length) {
-    bail(); // (never happens for the runtime; see sharedStep5IsMemoizable)
+    return false;
   }
   repr.meta.sortedAndFilteredExportAliases = memo.aliases;
   if (memo.nsArgs !== null) {
@@ -3128,6 +4744,7 @@ function restoreSharedStep5(c, sourceIndex, repr, memo) {
   }
   if (memo.usesExportsRef) repr.ast.usesExportsRef = true;
   if (memo.needsExportSymbolFromRuntime) repr.meta.needsExportSymbolFromRuntime = true;
+  return true;
 }
 
 function symbolUsesEqual(a, b) {
@@ -3173,7 +4790,10 @@ function sharedStep5SnapshotsEqual(a, b) {
 // entry is keyed by those and remembers every (ref, name) pair the renamer
 // returned while printing. It is only reused if the renamer returns the same
 // names now: user code can make runtime names collide (e.g. "__defProp2", or
-// a nested "key2" next to a top-level "key").
+// a nested "key2" next to a top-level "key"). The key includes every option
+// that the runtime AST depends on (the unsupported features, MinifySyntax and
+// MinifyIdentifiers: see bundler.runtimeCache), so the symbol flags the
+// printer reads under MinifySyntax (IsEmptyFunction, ...) are fixed per key.
 const runtimePrintCache = new WeakMap(); // runtime Source -> Map<string, entry>
 
 class recordingRenamer {
@@ -3208,11 +4828,6 @@ function printRuntimeCached(c, file, partRange, tree, r, o) {
   const repr = file.inputFile.repr;
   // (Anything unusual is printed without the cache)
   if (
-    o.lineLimit !== 0 ||
-    o.minifyWhitespace ||
-    o.minifyIdentifiers ||
-    o.minifySyntax ||
-    (o.unsupportedFeatures !== 0 && o.unsupportedFeatures !== INLINE_SCRIPT_FEATURE) ||
     o.indent > 7 ||
     o.outputFormat > 7 ||
     o.legalComments > 7 ||
@@ -3231,7 +4846,12 @@ function printRuntimeCached(c, file, partRange, tree, r, o) {
     (c.options.mode << 12) |
     (o.asciiOnly ? 1 << 15 : 0) |
     (o.addSourceMappings ? 1 << 16 : 0) |
-    (o.unsupportedFeatures !== 0 ? 1 << 17 : 0);
+    (o.minifyWhitespace ? 1 << 17 : 0) |
+    (o.minifySyntax ? 1 << 18 : 0) |
+    (o.minifyIdentifiers ? 1 << 19 : 0);
+  // (Also part of the key: the line limit and the unsupported features)
+  const lineLimit = o.lineLimit;
+  const features = o.unsupportedFeatures;
   const parts = repr.ast.parts;
   const begin = partRange.partIndexBegin;
   const end = partRange.partIndexEnd;
@@ -3243,7 +4863,15 @@ function printRuntimeCached(c, file, partRange, tree, r, o) {
   }
   entries: for (let e = 0; e < perSource.length; e++) {
     const entry = perSource[e];
-    if (entry.optionsKey !== optionsKey || entry.begin !== begin || entry.end !== end) continue;
+    if (
+      entry.optionsKey !== optionsKey ||
+      entry.lineLimit !== lineLimit ||
+      !jsFeatureEqual(entry.features, features) ||
+      entry.begin !== begin ||
+      entry.end !== end
+    ) {
+      continue;
+    }
     const live = entry.live;
     for (let i = begin; i < end; i++) {
       if (parts[i].isLive !== live[i - begin]) continue entries;
@@ -3271,6 +4899,8 @@ function printRuntimeCached(c, file, partRange, tree, r, o) {
   if (perSource.length >= 32) perSource.length = 0;
   perSource.push({
     optionsKey,
+    lineLimit,
+    features,
     begin,
     end,
     live,
@@ -3358,8 +4988,12 @@ Object.assign(linkerContext.prototype, {
       stmtList_.insideWrapperSuffix = [];
     }
 
+    let partIndexForLazyDefaultExport = -1; // ast.Index32
     if (repr.ast.hasLazyExport) {
-      bail(); // (only for non-JS loaders)
+      const defaultExport = repr.meta.resolvedExports.get("default");
+      if (defaultExport !== undefined) {
+        partIndexForLazyDefaultExport = repr.topLevelSymbolToParts(defaultExport.ref)[0];
+      }
     }
 
     // Add all other parts in this chunk
@@ -3381,7 +5015,74 @@ Object.assign(linkerContext.prototype, {
         continue;
       }
 
-      c.convertStmtsForChunk(partRange.sourceIndex, stmtList_, part.stmts);
+      let stmts = part.stmts;
+
+      // If this could be a JSON file that exports a top-level object literal, go
+      // over the non-default top-level properties that ended up being imported
+      // and substitute references to them into the main top-level object literal.
+      // So this JSON file:
+      //
+      //   {
+      //     "foo": [1, 2, 3],
+      //     "bar": [4, 5, 6],
+      //   }
+      //
+      // is initially compiled into this:
+      //
+      //   export var foo = [1, 2, 3];
+      //   export var bar = [4, 5, 6];
+      //   export default {
+      //     foo: [1, 2, 3],
+      //     bar: [4, 5, 6],
+      //   };
+      //
+      // But we turn it into this if both "foo" and "default" are imported:
+      //
+      //   export var foo = [1, 2, 3];
+      //   export default {
+      //     foo,
+      //     bar: [4, 5, 6],
+      //   };
+      //
+      if (partIndexForLazyDefaultExport >= 0 && partIndex === partIndexForLazyDefaultExport) {
+        const stmt = stmts[0];
+        const defaultExport = stmt.data;
+        const defaultExpr = defaultExport.value.data;
+
+        // Be careful: the top-level value in a JSON file is not necessarily an object
+        if (defaultExpr.value.data.k === E_OBJECT) {
+          const object = defaultExpr.value.data;
+          const objectClone = new EObject(object.properties.slice(), object.commaAfterSpread, object.closeBraceLoc, object.isSingleLine, object.isParenthesized);
+
+          // If any top-level properties ended up being imported directly, change
+          // the property to just reference the corresponding variable instead
+          for (let i = 0; i < object.properties.length; i++) {
+            const property = object.properties[i];
+            if (property.key.data.k === E_STRING) {
+              const name = property.key.data.value;
+              if (name !== "default") {
+                const export_ = repr.meta.resolvedExports.get(name);
+                if (export_ !== undefined) {
+                  const part2 = repr.ast.parts[repr.topLevelSymbolToParts(export_.ref)[0]];
+                  if (part2.isLive) {
+                    const ref = part2.stmts[0].data.decls[0].binding.data.ref;
+                    const propertyClone = objectClone.properties[i].clone();
+                    propertyClone.valueOrNil = new Expr(new EIdentifier(ref), property.key.loc);
+                    objectClone.properties[i] = propertyClone;
+                  }
+                }
+              }
+            }
+          }
+
+          // Avoid mutating the original AST
+          const defaultExprClone = new SExpr(new Expr(objectClone, defaultExpr.value.loc), defaultExpr.isFromClassOrFnThatCanBeRemovedIfUnused);
+          const defaultExportClone = new SExportDefault(new Stmt(defaultExprClone, defaultExport.value.loc), defaultExport.defaultName);
+          stmts = [new Stmt(defaultExportClone, stmt.loc)];
+        }
+      }
+
+      c.convertStmtsForChunk(partRange.sourceIndex, stmtList_, stmts);
     }
 
     // Hoist all import statements before any normal statements. ES6 imports
@@ -3414,11 +5115,16 @@ Object.assign(linkerContext.prototype, {
           let cjsArgs;
           if (c.options.profilerNames) {
             // "__commonJS({ 'file.js'(exports, module) { ... } })"
-            // (compat.ObjectExtensions is always supported by the fast path)
-            const kind = PropertyMethod;
+            let kind = PropertyField;
+            if (!jsFeatureHas(c.options.unsupportedJSFeatures, ObjectExtensions)) {
+              kind = PropertyMethod;
+            }
             const key = new Expr(new EString(file.inputFile.source.prettyPaths.select(c.options.codePathStyle || 0)), 0);
             const value = new Expr(new EFunction(new Fn(null, args, new FnBody(new SBlock(stmts)))), 0);
             cjsArgs = [new Expr(new EObject([new Property(null, key, value, null, [], 0, 0, kind)]), 0)];
+          } else if (jsFeatureHas(c.options.unsupportedJSFeatures, Arrow)) {
+            // "__commonJS(function (exports, module) { ... })"
+            cjsArgs = [new Expr(new EFunction(new Fn(null, args, new FnBody(new SBlock(stmts)))), 0)];
           } else {
             // "__commonJS((exports, module) => { ... })"
             cjsArgs = [new Expr(new EArrow(args, new FnBody(new SBlock(stmts))), 0)];
@@ -3475,11 +5181,16 @@ Object.assign(linkerContext.prototype, {
           let esmArgs;
           if (c.options.profilerNames) {
             // "__esm({ 'file.js'() { ... } })"
-            // (compat.ObjectExtensions is always supported by the fast path)
-            const kind = PropertyMethod;
+            let kind = PropertyField;
+            if (!jsFeatureHas(c.options.unsupportedJSFeatures, ObjectExtensions)) {
+              kind = PropertyMethod;
+            }
             const key = new Expr(new EString(file.inputFile.source.prettyPaths.select(c.options.codePathStyle || 0)), 0);
             const value = new Expr(new EFunction(new Fn(null, [], new FnBody(new SBlock(stmts)), InvalidRef, 0, isAsync)), 0);
             esmArgs = [new Expr(new EObject([new Property(null, key, value, null, [], 0, 0, kind)]), 0)];
+          } else if (jsFeatureHas(c.options.unsupportedJSFeatures, Arrow)) {
+            // "__esm(function () { ... })"
+            esmArgs = [new Expr(new EFunction(new Fn(null, [], new FnBody(new SBlock(stmts)), InvalidRef, 0, isAsync)), 0)];
           } else {
             // "__esm(() => { ... })"
             esmArgs = [new Expr(new EArrow([], new FnBody(new SBlock(stmts)), isAsync), 0)];
@@ -3528,6 +5239,8 @@ Object.assign(linkerContext.prototype, {
     printOptions.inputSourceMap = inputSourceMap;
     printOptions.lineOffsetTables = lineOffsetTables;
     printOptions.requireOrImportMetaForSource = c.requireOrImportMetaForSourceFn;
+    printOptions.needsMetafile = c.options.needsMetafile;
+    printOptions.metafileFormat = c.options.metafileFormat;
     const tree = cloneAST(repr.ast);
     tree.directives = []; // This is handled elsewhere
     const treePart = new Part();
@@ -3539,6 +5252,16 @@ Object.assign(linkerContext.prototype, {
       result.setPrintResult(printJS(tree, c.graph.symbols, r, printOptions));
     }
     result.sourceIndex = partRange.sourceIndex;
+
+    if (file.inputFile.loader === LoaderFile) {
+      if (result.jsonMetadataImports === null) result.jsonMetadataImports = [];
+      else result.jsonMetadataImports = result.jsonMetadataImports.slice();
+      result.jsonMetadataImports.push(
+        metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, '\n        {\n          "path": ') +
+          quoteForJSON(file.inputFile.uniqueKeyForAdditionalFile, c.options.asciiOnly) +
+          metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, ',\n          "kind": "file-loader"\n        }'),
+      );
+    }
   },
 
   generateEntryPointTailJS(r, toCommonJSRef, toESMRef, sourceIndex) {
@@ -3776,10 +5499,22 @@ Object.assign(linkerContext.prototype, {
     return result;
   },
 
-  renameSymbolsInChunk(chunk, filesInOrder) {
+  renameSymbolsInChunk(chunk, filesInOrder, timer              ) {
+    if (timer === null) return this.renameSymbolsInChunkImpl(chunk, filesInOrder, timer);
+    const label = this.options.minifyIdentifiers ? "Minify symbols" : "Rename symbols";
+    timer?.begin(label);
+    try {
+      return this.renameSymbolsInChunkImpl(chunk, filesInOrder, timer);
+    } finally {
+      timer?.end(label);
+    }
+  },
+
+  renameSymbolsInChunkImpl(chunk, filesInOrder, timer              ) {
     const c = this;
 
     // Determine the reserved names (e.g. can't generate the name "if")
+    timer?.begin("Compute reserved names");
     const moduleScopes = new Array(filesInOrder.length);
     for (let i = 0; i < filesInOrder.length; i++) {
       moduleScopes[i] = c.graph.files[filesInOrder[i]].inputFile.repr.ast.moduleScope;
@@ -3804,17 +5539,111 @@ Object.assign(linkerContext.prototype, {
       reservedNames.set("require", 1);
       reservedNames.set("Promise", 1);
     }
+    timer?.end("Compute reserved names");
 
-    // Make sure imports get a chance to be renamed too (code splitting only)
-    if (chunk.chunkRepr.importsFromOtherChunks !== null && chunk.chunkRepr.importsFromOtherChunks.size > 0) bail();
+    // Make sure imports get a chance to be renamed too
+    const sortedImportsFromOtherChunks = [];
+    if (chunk.chunkRepr.importsFromOtherChunks !== null) {
+      for (const imports of chunk.chunkRepr.importsFromOtherChunks.values()) {
+        for (const item of imports) {
+          sortedImportsFromOtherChunks.push({ stableSourceIndex: c.graph.stableSourceIndices[refSource(item.ref)], ref: item.ref });
+        }
+      }
+      // (the refs are unique: an unstable sort is fine)
+      sortedImportsFromOtherChunks.sort((a, b) => (a.stableSourceIndex !== b.stableSourceIndex ? a.stableSourceIndex - b.stableSourceIndex : refInner(a.ref) - refInner(b.ref)));
+    }
 
     // Minification uses frequency analysis to give shorter names to more frequent symbols
-    if (c.options.minifyIdentifiers) bail(); // (minify only)
+    if (c.options.minifyIdentifiers) {
+      // Determine the first top-level slot (i.e. not in a nested scope)
+      const firstTopLevelSlots = newSlotCounts();
+      for (let i = 0; i < filesInOrder.length; i++) {
+        slotCountsUnionMax(firstTopLevelSlots, c.graph.files[filesInOrder[i]].inputFile.repr.ast.nestedScopeSlotCounts);
+      }
+      const r = newMinifyRenamer(c.graph.symbols, firstTopLevelSlots, reservedNames);
+
+      // Accumulate nested symbol usage counts
+      // (Go does this for each file in parallel; the nested slot counts are
+      // sums, so the order does not matter)
+      timer?.begin("Accumulate symbol counts");
+      timer?.begin("Parallel phase");
+      const allTopLevelSymbols = new Array(filesInOrder.length);
+      const stableSourceIndices = c.graph.stableSourceIndices;
+      const freq = newCharFreq();
+      for (let i = 0; i < filesInOrder.length; i++) {
+        const repr = c.graph.files[filesInOrder[i]].inputFile.repr;
+
+        // Do this outside of the goroutine because it's not atomic
+        if (repr.ast.charFreq !== null) {
+          charFreqInclude(freq, repr.ast.charFreq);
+        }
+
+        const topLevelSymbols = [];
+        if (repr.ast.usesExportsRef) {
+          r.accumulateSymbolCount(topLevelSymbols, repr.ast.exportsRef, 1, stableSourceIndices);
+        }
+        if (repr.ast.usesModuleRef) {
+          r.accumulateSymbolCount(topLevelSymbols, repr.ast.moduleRef, 1, stableSourceIndices);
+        }
+
+        const parts = repr.ast.parts;
+        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+          const part = parts[partIndex];
+          if (!part.isLive) {
+            // Skip the part if it's not in this chunk
+            continue;
+          }
+
+          // Accumulate symbol use counts
+          r.accumulateSymbolUseCounts(topLevelSymbols, part.symbolUses, stableSourceIndices);
+
+          // Make sure to also count the declaration in addition to the uses
+          const declaredSymbols = part.declaredSymbols;
+          for (let j = 0; j < declaredSymbols.length; j++) {
+            r.accumulateSymbolCount(topLevelSymbols, declaredSymbols[j].ref, 1, stableSourceIndices);
+          }
+        }
+
+        sortStableSymbolCountArray(topLevelSymbols);
+        allTopLevelSymbols[i] = topLevelSymbols;
+      }
+      timer?.end("Parallel phase");
+
+      // Accumulate top-level symbol usage counts
+      timer?.begin("Serial phase");
+      const topLevelSymbols = [];
+      for (const stable of sortedImportsFromOtherChunks) {
+        r.accumulateSymbolCount(topLevelSymbols, stable.ref, 1, stableSourceIndices);
+      }
+      for (let i = 0; i < allTopLevelSymbols.length; i++) {
+        const array = allTopLevelSymbols[i];
+        for (let j = 0; j < array.length; j++) topLevelSymbols.push(array[j]);
+      }
+      r.allocateTopLevelSymbolSlots(topLevelSymbols);
+      timer?.end("Serial phase");
+      timer?.end("Accumulate symbol counts");
+
+      // Add all of the character frequency histograms for all files in this
+      // chunk together, then use it to compute the character sequence used to
+      // generate minified names. This results in slightly better gzip compression
+      // over assigning minified names in order (i.e. "a b c ..."). Even though
+      // it's a very small win, we still do it because it's simple to do and very
+      // cheap to compute.
+      const minifier = DefaultNameMinifierJS.shuffleByCharFreq(freq);
+      timer?.begin("Assign names by frequency");
+      r.assignNamesByFrequency(minifier);
+      timer?.end("Assign names by frequency");
+      return r;
+    }
 
     // When we're not minifying, just append numbers to symbol names to avoid collisions
     const r = newNumberRenamer(c.graph.symbols, reservedNames);
     const nestedScopes = new Map();
 
+    timer?.begin("Add top-level symbols");
+    for (const stable of sortedImportsFromOtherChunks) {
+      r.addTopLevelSymbol(stable.ref);
+    }
     for (const sourceIndex of filesInOrder) {
       const repr = c.graph.files[sourceIndex].inputFile.repr;
       const scopes = [];
@@ -3920,15 +5749,18 @@ Object.assign(linkerContext.prototype, {
 
       nestedScopes.set(sourceIndex, scopes);
     }
+    timer?.end("Add top-level symbols");
 
     // Recursively rename symbols in child scopes now that all top-level
     // symbols have been renamed. This is done in parallel because the symbols
     // inside nested scopes are independent and can't conflict.
+    timer?.begin("Assign names by scope");
     r.assignNamesByScope(nestedScopes);
+    timer?.end("Assign names by scope");
     return r;
   },
 
-  generateChunkJS(chunkIndex) {
+  generateChunkJS(chunkIndex, timer              ) {
     const c = this;
     const chunk = c.chunks[chunkIndex];
     const chunkRepr = chunk.chunkRepr;
@@ -3937,16 +5769,22 @@ Object.assign(linkerContext.prototype, {
     const toCommonJSRef = followSymbols(c.graph.symbols, runtimeMembers.get("__toCommonJS").ref);
     const toESMRef = followSymbols(c.graph.symbols, runtimeMembers.get("__toESM").ref);
     const runtimeRequireRef = followSymbols(c.graph.symbols, runtimeMembers.get("__require").ref);
-    const r = c.renameSymbolsInChunk(chunk, chunkRepr.filesInChunkInOrder);
+    const r = c.renameSymbolsInChunk(chunk, chunkRepr.filesInChunkInOrder, timer);
     c.requireOrImportMetaForSourceFn = (sourceIndex) => c.requireOrImportMetaForSource(sourceIndex);
     // (Go's function returns nil when source maps are disabled)
     const dataForSourceMaps = c.options.sourceMap !== SourceMapNone && c.dataForSourceMaps !== null ? c.dataForSourceMaps() : null;
 
-    // (Go computes "chunkAbsDir" here. It is only used to make "file://"
-    // source URLs relative, which generateSourceMapForChunk bails on.)
-    const chunkAbsDir = "";
+    // Note: This contains placeholders instead of what the placeholders are
+    // substituted with. That should be fine though because this should only
+    // ever be used for figuring out how many "../" to add to a relative path
+    // from a chunk whose final path hasn't been calculated yet to a chunk
+    // whose final path has already been calculated. That and placeholders are
+    // never substituted with something containing a "/" so substitution should
+    // never change the "../" count.
+    const chunkAbsDir = c.fs === null ? "" : c.fs.dir(c.fs.join(c.options.absOutputDir, templateToString(chunk.finalTemplate)));
 
     // Generate JavaScript for each file
+    timer?.begin("Print JavaScript files");
     for (const partRange of chunkRepr.partsInChunkInOrder) {
       // Skip the runtime in test output
       if (partRange.sourceIndex === RUNTIME_SOURCE_INDEX && c.options.omitRuntimeForTests) {
@@ -3955,20 +5793,74 @@ Object.assign(linkerContext.prototype, {
 
       const compileResult = new compileResultJS();
       compileResults.push(compileResult);
-      c.generateCodeForFileInChunkJS(r, partRange, toCommonJSRef, toESMRef, runtimeRequireRef, compileResult, dataForSourceMaps);
+      // (Go: "defer c.recoverInternalError(...)")
+      try {
+        c.generateCodeForFileInChunkJS(r, partRange, toCommonJSRef, toESMRef, runtimeRequireRef, compileResult, dataForSourceMaps);
+      } catch (e0) {
+        let e = e0;
+        // (JS-only: nested too deeply for the call stack: printed again in
+        // deep mode, see deep.mts)
+        if (canRetryDeep() && isStackOverflow(e)) {
+          const again = new compileResultJS();
+          compileResults[compileResults.length - 1] = again;
+          try {
+            runDeep(() => c.generateCodeForFileInChunkJS(r, partRange, toCommonJSRef, toESMRef, runtimeRequireRef, again, dataForSourceMaps));
+            continue;
+          } catch (e1) {
+            e = e1;
+          }
+        }
+        recoverLinkerPanic(e, c.log, partRange.sourceIndex === RUNTIME_SOURCE_INDEX ? null : c.graph.files[partRange.sourceIndex].inputFile.source.prettyPaths.select(c.options.logPathStyle));
+      }
     }
 
-    // Also generate the cross-chunk binding code. Without code splitting
-    // there are no cross-chunk statements and printing nothing yields "".
-    if (chunkRepr.crossChunkPrefixStmts.length > 0 || chunkRepr.crossChunkSuffixStmts.length > 0) bail(); // (code splitting only)
-    const crossChunkPrefix = "";
-    const crossChunkSuffix = "";
+    // Also generate the cross-chunk binding code
+    let crossChunkPrefix = "";
+    let crossChunkSuffix = "";
+    let jsonMetadataImports = [];
+    if (chunkRepr.crossChunkPrefixStmts.length > 0 || chunkRepr.crossChunkSuffixStmts.length > 0 || c.options.needsMetafile) {
+      // Indent the file if everything is wrapped in an IIFE
+      let indent = 0;
+      if (c.options.outputFormat === FormatIIFE) {
+        indent++;
+      }
+      const printOptions = makePrinterOptions(c, indent);
+      // (Go leaves ASCIIOnly, LegalComments and the supported features at their
+      // zero values here)
+      printOptions.asciiOnly = false;
+      printOptions.legalComments = 0;
+      printOptions.unsupportedFeatures = JSFeatureNone;
+      printOptions.mangledProps = null;
+      printOptions.needsMetafile = c.options.needsMetafile;
+      printOptions.metafileFormat = c.options.metafileFormat;
+      const crossChunkImportRecords = new Array(chunk.crossChunkImports.length);
+      for (let i = 0; i < chunk.crossChunkImports.length; i++) {
+        const chunkImport_ = chunk.crossChunkImports[i];
+        crossChunkImportRecords[i] = new ImportRecord(null, null, new Path(c.chunks[chunkImport_.chunkIndex].uniqueKey), RANGE_ZERO, 0, -1, -1, ShouldNotBeExternalInMetafile | ContainsUniqueKey, 0, chunkImport_.importKind);
+      }
+      const prefixTree = new AST();
+      prefixTree.importRecords = crossChunkImportRecords;
+      const prefixPart = new Part();
+      prefixPart.stmts = chunkRepr.crossChunkPrefixStmts;
+      prefixTree.parts = [prefixPart];
+      const crossChunkResult = printJS(prefixTree, c.graph.symbols, r, printOptions);
+      crossChunkPrefix = crossChunkResult.js;
+      jsonMetadataImports = crossChunkResult.jsonMetadataImports;
+      const suffixTree = new AST();
+      const suffixPart = new Part();
+      suffixPart.stmts = chunkRepr.crossChunkSuffixStmts;
+      suffixTree.parts = [suffixPart];
+      crossChunkSuffix = printJS(suffixTree, c.graph.symbols, r, printOptions).js;
+    }
 
     // Generate the exports for the entry point, if there are any
     let entryPointTail = null;
     if (chunk.isEntryPoint) {
       entryPointTail = c.generateEntryPointTailJS(r, toCommonJSRef, toESMRef, chunk.sourceIndex);
     }
+
+    timer?.end("Print JavaScript files");
+    timer?.begin("Join JavaScript files");
 
     const j = new Joiner();
     // (prevOffset is only read for source maps, so it is only updated then)
@@ -4034,8 +5926,11 @@ Object.assign(linkerContext.prototype, {
       if (c.options.globalName.length > 0) {
         text = c.generateGlobalNamePrefix();
       }
-      // (compat.Arrow is always supported by the fast path)
-      text += "(()" + space + "=>" + space + "{" + newline;
+      if (jsFeatureHas(c.options.unsupportedJSFeatures, Arrow)) {
+        text += "(function()" + space + "{" + newline;
+      } else {
+        text += "(()" + space + "=>" + space + "{" + newline;
+      }
       if (trackOffset) prevOffset.advanceString(text);
       j.addString(text);
       newlineBeforeComment = false;
@@ -4048,10 +5943,85 @@ Object.assign(linkerContext.prototype, {
       j.addString(crossChunkPrefix);
     }
 
+    // Start the metadata
+    const ws = (fmt) => metafileFormatMaybeRemoveWhitespace(c.options.metafileFormat, fmt);
+    const jMeta = new Joiner();
+    if (c.options.needsMetafile) {
+      // Print imports
+      let isFirstMeta = true;
+      jMeta.addString(ws('{\n      "imports": ['));
+      for (const json of jsonMetadataImports) {
+        if (isFirstMeta) {
+          isFirstMeta = false;
+        } else {
+          jMeta.addString(",");
+        }
+        jMeta.addString(json);
+      }
+      for (const compileResult of compileResults) {
+        if (compileResult.jsonMetadataImports === null) continue;
+        for (const json of compileResult.jsonMetadataImports) {
+          if (isFirstMeta) {
+            isFirstMeta = false;
+          } else {
+            jMeta.addString(",");
+          }
+          jMeta.addString(json);
+        }
+      }
+      if (!isFirstMeta) {
+        jMeta.addString(ws("\n      "));
+      }
+
+      // Print exports
+      jMeta.addString(ws('],\n      "exports": ['));
+      let aliases = [];
+      if (formatKeepESMImportExportSyntax(c.options.outputFormat)) {
+        if (chunk.isEntryPoint) {
+          const fileRepr = c.graph.files[chunk.sourceIndex].inputFile.repr;
+          if (fileRepr.meta.wrap === WrapCJS) {
+            aliases = ["default"];
+          } else {
+            aliases = [...fileRepr.meta.resolvedExports.keys()];
+          }
+        } else {
+          aliases = [...chunkRepr.exportsToOtherChunks.values()];
+        }
+      }
+      isFirstMeta = true;
+      sortStringsUTF8(aliases); // Sort for determinism
+      for (const alias of aliases) {
+        if (isFirstMeta) {
+          isFirstMeta = false;
+        } else {
+          jMeta.addString(",");
+        }
+        jMeta.addString(ws("\n        ") + quoteForJSON(alias, c.options.asciiOnly));
+      }
+      if (!isFirstMeta) {
+        jMeta.addString(ws("\n      "));
+      }
+      jMeta.addString(ws("],\n"));
+      if (chunk.isEntryPoint) {
+        const entryPoint = c.graph.files[chunk.sourceIndex].inputFile.source.prettyPaths.select(c.options.metafilePathStyle);
+        jMeta.addString(ws('      "entryPoint": ') + quoteForJSON(entryPoint, c.options.asciiOnly) + ws(",\n"));
+      }
+      if (chunkRepr.hasCSSChunk) {
+        jMeta.addString(ws('      "cssBundle": ') + quoteForJSON(c.chunks[chunkRepr.cssChunkIndex].uniqueKey, c.options.asciiOnly) + ws(",\n"));
+      }
+      jMeta.addString(ws('      "inputs": {'));
+    }
+
     // Concatenate the generated JavaScript chunks together
     const compileResultsForSourceMap = [];
     const legalCommentList = [];
+    let metaOrder = null;
+    let metaBytes = null;
     let prevFileNameComment = 0;
+    if (c.options.needsMetafile) {
+      metaOrder = [];
+      metaBytes = new Map();
+    }
     for (const compileResult of compileResults) {
       if (compileResult.extractedLegalComments !== null && compileResult.extractedLegalComments.length > 0) {
         legalCommentList.push(new legalCommentEntry(compileResult.sourceIndex, compileResult.extractedLegalComments));
@@ -4064,7 +6034,25 @@ Object.assign(linkerContext.prototype, {
         prevFileNameComment !== compileResult.sourceIndex &&
         compileResult.js.length > 0
       ) {
-        bail(); // (bundle only)
+        if (newlineBeforeComment) {
+          if (trackOffset) prevOffset.advanceString("\n");
+          j.addString("\n");
+        }
+
+        let path = c.graph.files[compileResult.sourceIndex].inputFile.source.prettyPaths.select(c.options.codePathStyle);
+
+        // Make sure newlines in the path can't cause a syntax error. This does
+        // not minimize allocations because it's expected that this case never
+        // comes up in practice.
+        path = path.replaceAll("\r", "\\r");
+        path = path.replaceAll("\n", "\\n");
+        path = path.replaceAll(String.fromCharCode(0x2028), "\\u2028");
+        path = path.replaceAll(String.fromCharCode(0x2029), "\\u2029");
+
+        const text = indent + "// " + path + "\n";
+        if (trackOffset) prevOffset.advanceString(text);
+        j.addString(text);
+        prevFileNameComment = compileResult.sourceIndex;
       }
 
       // Don't include the runtime in source maps
@@ -4098,7 +6086,16 @@ Object.assign(linkerContext.prototype, {
           }
         }
 
-        // (no metafile)
+        // Include this file in the metadata
+        if (c.options.needsMetafile) {
+          // Accumulate file sizes since a given file may be split into multiple parts
+          let bytes = metaBytes.get(compileResult.sourceIndex);
+          if (bytes === undefined) {
+            metaOrder.push(compileResult.sourceIndex);
+            metaBytes.set(compileResult.sourceIndex, (bytes = []));
+          }
+          bytes.push(compileResult.js);
+        }
       }
 
       // Put a newline before the next file path comment
@@ -4130,12 +6127,8 @@ Object.assign(linkerContext.prototype, {
     // Make sure the file ends with a newline
     j.ensureNewlineAtEnd();
 
-    // Note: platforms other than "browser" mark compat.InlineScript as
-    // unsupported (bundler.applyOptionDefaults), which makes Go use an empty
-    // slash tag here. The port always escapes like the browser platform; the
-    // bundler bails when that could make a difference (see transformBundle).
     let slashTag = "/script";
-    if (Math.floor(c.options.unsupportedJSFeatures / 68719476736) % 2 === 1) slashTag = "";
+    if (jsFeatureHas(c.options.unsupportedJSFeatures, InlineScript)) slashTag = "";
     c.maybeAppendLegalComments(c.options.legalComments, legalCommentList, chunk, j, slashTag);
 
     if (c.options.jsFooter.length > 0) {
@@ -4145,13 +6138,55 @@ Object.assign(linkerContext.prototype, {
 
     // The JavaScript contents are done now that the source map comment is in
     chunk.intermediateOutput = c.breakJoinerIntoPieces(j);
+    timer?.end("Join JavaScript files");
 
     if (c.options.sourceMap !== SourceMapNone) {
+      timer?.begin("Generate source map");
       const canHaveShifts = chunk.intermediateOutput.pieces !== null;
       chunk.outputSourceMap = c.generateSourceMapForChunk(compileResultsForSourceMap, chunkAbsDir, dataForSourceMaps, canHaveShifts);
+      timer?.end("Generate source map");
     }
 
-    // (hashing is only needed for "[hash]" placeholders, which transforms don't have)
+    // End the metadata lazily. The final output size is not known until the
+    // final import paths are substituted into the output pieces generated below.
+    if (c.options.needsMetafile) {
+      const pieces = new Array(metaOrder.length);
+      for (let i = 0; i < metaOrder.length; i++) {
+        const slices = metaBytes.get(metaOrder[i]);
+        const outputs = new Array(slices.length);
+        for (let k = 0; k < slices.length; k++) {
+          outputs[k] = c.breakOutputIntoPieces(slices[k]);
+        }
+        pieces[i] = outputs;
+      }
+      chunk.jsonMetadataChunkCallback = (finalOutputSize) => {
+        const finalRelDir = c.fs.dir(chunk.finalRelPath);
+        for (let i = 0; i < metaOrder.length; i++) {
+          const sourceIndex = metaOrder[i];
+          if (i > 0) {
+            jMeta.addString(",");
+          }
+          let count = 0;
+          for (const output of pieces[i]) {
+            count += c.accurateFinalByteCount(output, finalRelDir);
+          }
+          jMeta.addString(
+            ws("\n        ") +
+              quoteForJSON(c.graph.files[sourceIndex].inputFile.source.prettyPaths.select(c.options.metafilePathStyle), c.options.asciiOnly) +
+              ws(': {\n          "bytesInOutput": ') +
+              count +
+              ws("\n        }"),
+          );
+        }
+        if (metaOrder.length > 0) {
+          jMeta.addString(ws("\n      "));
+        }
+        jMeta.addString(ws('},\n      "bytes": ') + finalOutputSize + ws("\n    }"));
+        return jMeta;
+      };
+    }
+
+    // (the isolated hash is computed when it is needed, see generateIsolatedHash)
     chunk.isExecutable = isExecutable;
   },
 
@@ -4178,13 +6213,13 @@ Object.assign(linkerContext.prototype, {
     }
 
     // Use "||=" to make the code more compact when it's supported
-    // (compat.LogicalAssignment is always supported by the fast path)
-    if (globalName.length > 0) {
+    const features = c.options.unsupportedJSFeatures;
+    if (globalName.length > 0 && !jsFeatureHas(features, LogicalAssignment)) {
       if (isExistingObject) {
         // Keep the prefix as it is
-      } else if (canEscapeIdentifier(prefix)) {
+      } else if (canEscapeIdentifier(prefix, features, c.options.asciiOnly)) {
         if (c.options.asciiOnly) {
-          prefix = quoteIdentifier(prefix);
+          prefix = quoteIdentifier("", prefix, features);
         }
         text = "var " + prefix + join;
       } else {
@@ -4192,9 +6227,9 @@ Object.assign(linkerContext.prototype, {
       }
       for (let name of globalName) {
         let dotOrIndex;
-        if (canEscapeIdentifier(name)) {
+        if (canEscapeIdentifier(name, features, c.options.asciiOnly)) {
           if (c.options.asciiOnly) {
-            name = quoteIdentifier(name);
+            name = quoteIdentifier("", name, features);
           }
           dotOrIndex = "." + name;
         } else {
@@ -4212,9 +6247,9 @@ Object.assign(linkerContext.prototype, {
 
     if (isExistingObject) {
       text = prefix + space + "=" + space;
-    } else if (canEscapeIdentifier(prefix)) {
+    } else if (canEscapeIdentifier(prefix, features, c.options.asciiOnly)) {
       if (c.options.asciiOnly) {
-        prefix = quoteIdentifier(prefix);
+        prefix = quoteIdentifier("", prefix, features);
       }
       text = "var " + prefix + space + "=" + space;
     } else {
@@ -4222,12 +6257,11 @@ Object.assign(linkerContext.prototype, {
       text = prefix + space + "=" + space;
     }
 
-    // (unreachable: "globalName" is empty here because of the "||=" case above)
     for (let name of globalName) {
       const oldPrefix = prefix;
-      if (canEscapeIdentifier(name)) {
+      if (canEscapeIdentifier(name, features, c.options.asciiOnly)) {
         if (c.options.asciiOnly) {
-          name = quoteIdentifier(name);
+          name = quoteIdentifier("", name, features);
         }
         prefix = prefix + "." + name;
       } else {
@@ -4391,11 +6425,194 @@ Object.assign(linkerContext.prototype, {
       return new intermediateOutput(null, j);
     }
 
-    // The unique key prefix is random per build and is never generated in a
-    // transform, so it can only be here if the input happened to contain it.
-    // Go would then substitute paths for things that look like unique keys;
-    // the real esbuild picks a different random prefix, so just fall back.
-    bail();
+    return c.breakOutputIntoPieces(j.done());
+  },
+
+  breakOutputIntoPieces(output) {
+    const c = this;
+    const pieces = [];
+    const prefix = c.uniqueKeyPrefix;
+    for (;;) {
+      // Scan for the next piece boundary
+      let boundary = output.indexOf(prefix);
+
+      // Try to parse the piece boundary
+      let kind = outputPieceNone;
+      let index = 0;
+      if (boundary !== -1) {
+        const start = boundary + prefix.length;
+        if (start + 9 > output.length) {
+          boundary = -1;
+        } else {
+          switch (output.charCodeAt(start)) {
+            case 65: // A
+              kind = outputPieceAssetIndex;
+              break;
+            case 67: // C
+              kind = outputPieceChunkIndex;
+              break;
+          }
+          for (let k = 1; k < 9; k++) {
+            const ch = output.charCodeAt(start + k);
+            if (ch < 48 || ch > 57) {
+              boundary = -1;
+              break;
+            }
+            index = index * 10 + ch - 48;
+          }
+        }
+      }
+
+      // Validate the boundary
+      switch (kind) {
+        case outputPieceAssetIndex:
+          if (index >= c.graph.files.length) {
+            boundary = -1;
+          }
+          break;
+
+        case outputPieceChunkIndex:
+          if (index >= c.chunks.length) {
+            boundary = -1;
+          }
+          break;
+
+        default:
+          boundary = -1;
+      }
+
+      // If we're at the end, generate one final piece
+      if (boundary === -1) {
+        pieces.push(new outputPiece(output));
+        break;
+      }
+
+      // Otherwise, generate an interior piece and continue
+      pieces.push(new outputPiece(output.slice(0, boundary), index, kind));
+      output = output.slice(boundary + prefix.length + 9);
+    }
+    return new intermediateOutput(pieces, null);
+  },
+
+  appendIsolatedHashesForImportedChunks(hash, chunkIndex, visited, visitedKey) {
+    const c = this;
+
+    // Only visit each chunk at most once. This is important because there may be
+    // cycles in the chunk import graph. If there's a cycle, we want to include
+    // the hash of every chunk involved in the cycle (along with all of their
+    // dependencies). This depth-first traversal will naturally do that.
+    if (visited[chunkIndex] === visitedKey) {
+      return;
+    }
+    visited[chunkIndex] = visitedKey;
+    const chunk = c.chunks[chunkIndex];
+
+    // Visit the other chunks that this chunk imports before visiting this chunk
+    for (const chunkImport_ of chunk.crossChunkImports) {
+      c.appendIsolatedHashesForImportedChunks(hash, chunkImport_.chunkIndex, visited, visitedKey);
+    }
+
+    // Mix in hashes for referenced asset paths (i.e. the "file" loader)
+    if (chunk.intermediateOutput.pieces !== null) {
+      for (const piece of chunk.intermediateOutput.pieces) {
+        if (piece.kind === outputPieceAssetIndex) {
+          const file = c.graph.files[piece.index];
+          if (file.inputFile.additionalFiles.length !== 1) throw new GoPanic("Internal error");
+          let relPath = c.fs.rel(c.options.absOutputDir, file.inputFile.additionalFiles[0].absPath)[0];
+
+          // Make sure to always use forward slashes, even on Windows
+          relPath = relPath.replaceAll("\\", "/");
+
+          // Mix in the hash for the relative path, which ends up as a JS string
+          hashWriteLengthPrefixed(hash, relPath);
+        }
+      }
+    }
+
+    // Mix in the hash for this chunk
+    hash.write(c.isolatedHashForChunk(chunk));
+  },
+
+  // generateIsolatedHash (computed on first use, see chunkInfo.isolatedHash)
+  isolatedHashForChunk(chunk) {
+    const c = this;
+    if (chunk.isolatedHash !== null) return chunk.isolatedHash;
+    const hash = new Digest();
+
+    // Mix the file names and part ranges of all of the files in this chunk into
+    // the hash. Objects that appear identical but that live in separate files or
+    // that live in separate parts in the same file must not be merged. This only
+    // needs to be done for JavaScript files, not CSS files.
+    const chunkRepr = chunk.chunkRepr;
+    if (chunkRepr instanceof chunkReprJS) {
+      for (const partRange of chunkRepr.partsInChunkInOrder) {
+        let filePath;
+        const file = c.graph.files[partRange.sourceIndex];
+        if (file.inputFile.source.keyPath.namespace === "file") {
+          // Use the pretty path as the file name since it should be platform-
+          // independent (relative paths and the "/" path separator)
+          filePath = file.inputFile.source.prettyPaths.rel;
+        } else {
+          // If this isn't in the "file" namespace, just use the full path text
+          // verbatim. This could be a source of cross-platform differences if
+          // plugins are storing platform-specific information in here, but then
+          // that problem isn't caused by esbuild itself.
+          filePath = file.inputFile.source.keyPath.text;
+        }
+
+        // Include the path namespace in the hash
+        hashWriteLengthPrefixed(hash, file.inputFile.source.keyPath.namespace);
+
+        // Then include the file path
+        hashWriteLengthPrefixed(hash, filePath);
+
+        // Also write the part range. These numbers are deterministic and allocated
+        // per-file so this should be a well-behaved base for a hash.
+        hashWriteUint32(hash, partRange.partIndexBegin);
+        hashWriteUint32(hash, partRange.partIndexEnd);
+      }
+    }
+
+    // Hash the output path template as part of the content hash because we want
+    // any import to be considered different if the import's output path has changed.
+    for (const part of chunk.finalTemplate) {
+      hashWriteLengthPrefixed(hash, part.data);
+    }
+
+    // Also hash the public path. If provided, this is used whenever files
+    // reference each other such as cross-chunk imports, asset file references,
+    // and source map comments. We always include the hash in all chunks instead
+    // of trying to figure out which chunks will include the public path for
+    // simplicity and for robustness to code changes in the future.
+    if (c.options.publicPath !== "") {
+      hashWriteLengthPrefixed(hash, c.options.publicPath);
+    }
+
+    // Include the generated output content in the hash. This excludes the
+    // randomly-generated import paths (the unique keys) and only includes the
+    // data in the spans between them.
+    if (chunk.intermediateOutput.pieces !== null) {
+      for (const piece of chunk.intermediateOutput.pieces) {
+        hashWriteLengthPrefixed(hash, piece.data);
+      }
+    } else {
+      hashWriteLengthPrefixed(hash, chunk.intermediateOutput.joiner.done());
+    }
+
+    // Also include the source map data in the hash. The source map is named the
+    // same name as the chunk name for ease of discovery. So we want the hash to
+    // change if the source map data changes even if the chunk data doesn't change.
+    // Otherwise the output path for the source map wouldn't change and the source
+    // map wouldn't end up being updated.
+    hashWriteLengthPrefixed(hash, chunk.outputSourceMap.prefix);
+    hashWriteLengthPrefixed(hash, chunk.outputSourceMap.mappings);
+    hashWriteLengthPrefixed(hash, chunk.outputSourceMap.suffix);
+
+    // Store the hash so far. All other chunks that import this chunk will mix
+    // this hash into their final hash to ensure that the import path changes
+    // if this chunk (or any dependencies of this chunk) is changed.
+    chunk.isolatedHash = hash.sum();
+    return chunk.isolatedHash;
   },
 
   // Returns a sourcemap.SourceMapPieces
@@ -4430,8 +6647,15 @@ Object.assign(linkerContext.prototype, {
         let source = keyPath.text;
         if (keyPath.namespace === "file") {
           // Serialize the file path as a "file://" URL, since source maps encode
-          // sources as URLs.
-          bail(); // (transforms never create "file" namespace paths)
+          // sources as URLs. While we could output absolute "file://" URLs, it
+          // will be turned into a relative path when it's written out below for
+          // better readability and to be independent of build directory.
+          // (JS-only: the file path is kept next to the URL, which Go parses
+          // back into the same path below)
+          const urlPath = fileURLPathFromFilePath(source);
+          items.push({ source: "file://" + goURLEscapePath(urlPath), quotedContents, fileURLPath: urlPath });
+          nextSourcesIndex++;
+          continue;
         } else {
           // If the path for this file isn't in the "file" namespace, then write
           // out something arbitrary instead. Source maps encode sources as URLs
@@ -4456,7 +6680,15 @@ Object.assign(linkerContext.prototype, {
       }
 
       // Complex case: nested source map
-      bail(); // (input source maps are never loaded: see bundler.parseFile)
+      const sm = file.inputFile.inputSourceMap;
+      for (let i = 0; i < sm.sources.length; i++) {
+        let quotedContents = null;
+        if (!c.options.excludeSourcesContent) {
+          quotedContents = dataForSourceMaps[result.sourceIndex].quotedContents[i];
+        }
+        items.push({ source: sm.sources[i], quotedContents });
+      }
+      nextSourcesIndex += sm.sources.length;
     }
 
     // Write the sources
@@ -4468,11 +6700,37 @@ Object.assign(linkerContext.prototype, {
       }
 
       // Modify the absolute path to the original file to be relative to the
-      // directory that will contain the output file for this chunk. (Go's
-      // url.Parse only yields a "file" scheme for text starting with "file:"
-      // in any case; that path through the file system is not ported.)
-      if (item.source.length >= 5 && item.source.slice(0, 5).toLowerCase() === "file:") {
-        bail();
+      // directory that will contain the output file for this chunk
+      if (item.fileURLPath !== undefined) {
+        const sourcePath = filePathFromFileURLPath(c.fs, item.fileURLPath);
+        const $rel = c.fs.rel(chunkAbsDir, sourcePath);
+        if ($rel[1]) {
+          // Make sure to always use forward slashes, even on Windows
+          item.source = goURLStringForRelativePath($rel[0].replaceAll("\\", "/"));
+
+          // Replace certain percent encodings for better readability
+          item.source = item.source.replaceAll("%20", " ");
+        }
+      } else if (c.fs === null) {
+        // (The transform API: the file system is Go's mock file system for
+        // Unix with "/" as the working directory, and the chunk's directory
+        // is "." (the output path template of a transform is only the
+        // extension of "sourcefile" + "-out"). A "file://" URL's path is
+        // absolute, and the mock file system's Rel fails for a relative base
+        // and an absolute target: the source stays as it is.)
+      } else {
+        const sourceURL = parseGoURL(item.source);
+        if (sourceURL !== null && isFileURL(sourceURL)) {
+          const sourcePath = filePathFromFileURL(c.fs, sourceURL);
+          const $rel = c.fs.rel(chunkAbsDir, sourcePath);
+          if ($rel[1]) {
+            // Make sure to always use forward slashes, even on Windows
+            item.source = goURLStringForRelativePath($rel[0].replaceAll("\\", "/"));
+
+            // Replace certain percent encodings for better readability
+            item.source = item.source.replaceAll("%20", " ");
+          }
+        }
       }
 
       j.addBytes(quoteForJSON(item.source, c.options.asciiOnly));

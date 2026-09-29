@@ -3,16 +3,56 @@
 // Bundle.Compile) plus the result selection of pkg/api's transformImpl.
 //
 // In a transform there is no resolver and there are no plugins: the scan
-// phase parses exactly two files, the runtime (source index 0, cached per
-// runtime-affecting options like Go's globalRuntimeCache) and the stdin file
-// (source index 1). Import records are never resolved (that only happens in
-// ModeBundle), so every import path stays external except the parser-generated
-// "<runtime>" import, whose source index the parser pre-fills.
-import { BAIL, bail } from "./bail.mjs";
-import { Log, Path, PrettyPaths, Source, RANGE_ZERO, platformIndependentPathDirBaseExt } from "./logger.mjs";
+// phase has the runtime (source index 0, cached per runtime-affecting options
+// like Go's globalRuntimeCache), one "<define:NAME>" file per object or array
+// "--define" value (source indices 1...) and the stdin file (the next index).
+// Import records are never resolved (that only happens in ModeBundle), so
+// every import path stays external except the parser-generated "<runtime>"
+// and "<define:NAME>" imports, whose source indices the parser pre-fills.
+import { goQuote } from "./gostd.mjs";
+import { GoPanic } from "./gopanic.mjs";
+import { newTimerIfEnabled, type Timer } from "./timer.mjs";
+import { recoverParsePanic } from "./recover.mjs";
+import {
+  jsFeatureHas,
+  jsFeatureOr,
+  jsFeatureIsEmpty,
+  JSFeatureNone,
+  AsyncAwait,
+  AsyncGenerator,
+  ForAwait,
+  TopLevelAwait,
+  Generator,
+  ObjectAccessors,
+  ClassPrivateAccessor,
+  ClassPrivateStaticAccessor,
+  ClassField,
+  ClassPrivateField,
+  ClassStaticField,
+  ClassPrivateStaticField,
+  Class,
+  ClassPrivateBrandCheck,
+  ClassPrivateMethod,
+  ClassPrivateStaticMethod,
+  ClassStaticBlocks,
+  InlineScript,
+} from "./compat.mjs";
+import type { JSFeature } from "./compat.mjs";
+import {
+  Log,
+  Path,
+  PrettyPaths,
+  Source,
+  RANGE_ZERO,
+  platformIndependentPathDirBaseExt,
+  parseWithTempLog,
+  MsgData,
+  LineColumnTracker,
+} from "./logger.mjs";
 import { ImportRequire, ImportStmt } from "./ast.mjs";
 import {
   Options as ConfigOptions,
+  InjectedFile,
   TSOptions,
   TransformCall,
   ModeBundle,
@@ -27,7 +67,9 @@ import {
   LoaderTSX,
   LoaderEmpty,
   LoaderCSS,
+  LoaderGlobalCSS,
   LoaderLocalCSS,
+  loaderIsCSS,
   LoaderJSON,
   LoaderText,
 } from "./config.mjs";
@@ -39,13 +81,42 @@ import {
   ModuleCommonJS_CJS,
   ModuleCommonJS_CTS,
   generateNonUniqueNameFromPath,
+  ensureValidIdentifier,
+  Expr,
+  EArray,
+  EObject,
+  EString,
+  ENumber,
+  EBoolean,
+  EBigInt,
+  E_ARRAY,
+  E_OBJECT,
+  E_STRING,
+  E_NUMBER,
+  E_BOOLEAN,
+  E_BIG_INT,
+  E_NULL,
 } from "./js_ast.mjs";
-import { parse, optionsFromConfig } from "./js_parser.mjs";
+import { parse, optionsFromConfig, lazyExportAST } from "./js_parser.mjs";
 import { source as runtimeSource } from "./runtime.mjs";
-import { InputFile, JSRepr, EntryPoint, SideEffects, NoSideEffects_EmptyAST, markASTShared } from "./graph.mjs";
+import { InputFile, JSRepr, CSSRepr, EntryPoint, SideEffects, NoSideEffects_EmptyAST, NoSideEffects_PureData, markASTShared } from "./graph.mjs";
 import { link, loaderCanHaveSourceMap } from "./linker.mjs";
 import { generateLineOffsetTables, quoteForJSONLong } from "./sourcemap.mjs";
+import { quoteForJSON } from "./helpers.mjs";
+import { loadInputSourceMap } from "./bundler_scan.mjs";
+import { base64StdEncodeByteString, utf8ByteString, guessMimeType, encodeStringAsShortestDataURL } from "./bundler_scan.mjs";
+import { parseJSON, JSONOptions } from "./json_parser.mjs";
+import { HelperCall } from "./js_parser.mjs";
+import { ExportsESM } from "./js_ast.mjs";
+import { FromBase64 } from "./compat.mjs";
+import { LoaderWithTypeJSON, LoaderBase64, LoaderBinary, LoaderDataURL, LoaderFile, LoaderCopy, LoaderToString, PlatformNode } from "./config.mjs";
+import { newCacheSet } from "./build_deps.mjs";
+import { ENOENT, GoError } from "./fs.mjs";
 import { applyTSConfigOverride } from "./tsconfig.mjs";
+import { encodeSnapshot, decodeSnapshot } from "./snapshot.mjs";
+import { parse as parseCSS, optionsFromConfig as cssOptionsFromConfig } from "./css_parser.mjs";
+import { cssFeatureHas, InlineStyle as CSSInlineStyle } from "./compat_css.mjs";
+import { transformBundleCSS } from "./linker_css.mjs";
 
 const RUNTIME_SOURCE_INDEX = 0; // runtime.SourceIndex
 
@@ -109,7 +180,7 @@ function splitOnSlash(path) {
 }
 
 // fs.MockFS(..., fs.MockUnix, "/").Rel(base, target) -> [relPath, ok]
-function mockRel(base, target) {
+export function mockRel(base, target) {
   base = goPathClean(base);
   target = goPathClean(target);
 
@@ -150,12 +221,12 @@ function mockRel(base, target) {
 }
 
 // resolver.MakePrettyPaths
-function makePrettyPaths(path) {
+export function makePrettyPaths(path) {
   let absPath = path.text;
   let relPath = path.text;
 
   if (path.namespace === "file") {
-    bail(); // (transforms never create "file" namespace paths)
+    throw new GoPanic("Internal error"); // (transforms never create "file" namespace paths)
   } else if (path.namespace !== "") {
     absPath = path.namespace + ":" + absPath;
     relPath = path.namespace + ":" + relPath;
@@ -258,7 +329,7 @@ function loaderFromFileExtension(extensionToLoader, base) {
 // Shallow copy of a config.Options (Go passes it by value). Constructing a
 // real config.Options keeps the object shape stable (Object.create + assign
 // produces slow objects).
-function cloneConfigOptions(options) {
+export function cloneConfigOptions(options) {
   const o = new ConfigOptions();
   for (const key in options) o[key] = options[key];
   return o;
@@ -270,7 +341,7 @@ function cloneConfigOptions(options) {
 // the per-file changes (module type from maybeParseFile, and JSX/TS parsing
 // for the loader) are applied to the js_parser.Options that
 // OptionsFromConfig returns instead, which is equivalent.
-function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeData) {
+export function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeData) {
   const parserOptions = () => {
     const o = optionsFromConfig(options);
     o.moduleTypeData = moduleTypeData;
@@ -310,7 +381,7 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
       loader = LoaderJS;
     }
   } else {
-    bail(); // (plugins and the file system are only used when bundling)
+    throw new GoPanic("Internal error"); // (a transform always has stdin)
   }
 
   const $d222 = platformIndependentPathDirBaseExt(source.keyPath.text);
@@ -332,10 +403,12 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
   const inputFile = new InputFile(null, null, [], "", new SideEffects(), source, loader);
   const result = new parseResult(new scannerFile(inputFile), false);
 
+  // (Go: a deferred recover() turns a panic into an error; see recoverParsePanic)
+  try {
   switch (loader) {
     case LoaderJS:
     case LoaderEmpty: {
-      const $d223 = parse(log, source, parserOptions());
+      const $d223 = parseWithTempLog(log, (tempLog) => parse(tempLog, source, parserOptions()));
       const ast = $d223[0], ok = $d223[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
@@ -351,7 +424,7 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
       const o = parserOptions();
       o.jsx = options.jsx.clone();
       o.jsx.parse = true;
-      const $d224 = parse(log, source, o);
+      const $d224 = parseWithTempLog(log, (tempLog) => parse(tempLog, source, o));
       const ast = $d224[0], ok = $d224[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
@@ -367,7 +440,7 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
     case LoaderTSNoAmbiguousLessThan: {
       const o = parserOptions();
       o.ts = new TSOptions(options.ts.config, true, loader === LoaderTSNoAmbiguousLessThan);
-      const $d225 = parse(log, source, o);
+      const $d225 = parseWithTempLog(log, (tempLog) => parse(tempLog, source, o));
       const ast = $d225[0], ok = $d225[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
@@ -384,7 +457,7 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
       o.ts = new TSOptions(options.ts.config, true, options.ts.noAmbiguousLessThan);
       o.jsx = options.jsx.clone();
       o.jsx.parse = true;
-      const $d226 = parse(log, source, o);
+      const $d226 = parseWithTempLog(log, (tempLog) => parse(tempLog, source, o));
       const ast = $d226[0], ok = $d226[1];
       if (ast !== null && ast.parts.length <= 1) {
         // Ignore the implicitly-generated namespace export part
@@ -396,13 +469,114 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
       break;
     }
 
-    default:
-      bail(); // CSS, JSON, text, binary, file, copy, ... (and LoaderNone: "Do not know how to load path")
+    case LoaderCSS:
+    case LoaderGlobalCSS:
+    case LoaderLocalCSS: {
+      inputFile.repr = new CSSRepr(parseWithTempLog(log, (tempLog) => parseCSS(tempLog, source, cssOptionsFromConfig(loader, options))));
+      result.ok = true;
+      break;
+    }
+
+    case LoaderJSON:
+    case LoaderWithTypeJSON: {
+      const $j = parseWithTempLog(log, (tempLog) => parseJSON(tempLog, source, new JSONOptions(options.unsupportedJSFeatures)));
+      const expr = $j[0] !== null ? $j[0] : new Expr(null, 0); // (Go's zero Expr when the parse failed)
+      const ast = lazyExportAST(log, source, parserOptions(), expr, null);
+      if (loader === LoaderWithTypeJSON) {
+        // (import attributes only exist when bundling)
+        ast.exportsKind = ExportsESM;
+      }
+      inputFile.sideEffects = new SideEffects(inputFile.sideEffects.data, NoSideEffects_PureData);
+      inputFile.repr = new JSRepr();
+      inputFile.repr.ast = ast;
+      result.ok = $j[1];
+      break;
+    }
+
+    case LoaderText: {
+      // Strip any UTF-8 BOM from the text
+      if (source.contents.charCodeAt(0) === 0xfeff) {
+        source.contents = source.contents.slice(1);
+      }
+      const encoded = base64StdEncodeByteString(utf8ByteString(source.contents));
+      // (helpers.StringToUTF16: raw bytes of invalid UTF-8 become U+FFFD)
+      const expr = new Expr(new EString(source.contents.isWellFormed() ? source.contents : source.contents.toWellFormed()), 0);
+      const ast = lazyExportAST(log, source, parserOptions(), expr, null);
+      ast.urlForCSS = "data:text/plain;base64," + encoded;
+      inputFile.sideEffects = new SideEffects(inputFile.sideEffects.data, NoSideEffects_PureData);
+      inputFile.repr = new JSRepr();
+      inputFile.repr.ast = ast;
+      result.ok = true;
+      break;
+    }
+
+    // (the contents of these loaders are the input's bytes: a byte string,
+    // see fastTransform)
+    case LoaderBase64: {
+      const mimeType = guessMimeType(ext, source.contents);
+      const encoded = base64StdEncodeByteString(source.contents);
+      const expr = new Expr(new EString(encoded), 0);
+      const ast = lazyExportAST(log, source, parserOptions(), expr, null);
+      ast.urlForCSS = "data:" + mimeType + ";base64," + encoded;
+      inputFile.sideEffects = new SideEffects(inputFile.sideEffects.data, NoSideEffects_PureData);
+      inputFile.repr = new JSRepr();
+      inputFile.repr.ast = ast;
+      result.ok = true;
+      break;
+    }
+
+    case LoaderBinary: {
+      const encoded = base64StdEncodeByteString(source.contents);
+      const expr = new Expr(new EString(encoded), 0);
+      let helper: HelperCall;
+      if (jsFeatureHas(options.unsupportedJSFeatures, FromBase64)) {
+        if (options.platform === PlatformNode) {
+          helper = new HelperCall(null, "__toBinaryNode");
+        } else {
+          helper = new HelperCall(null, "__toBinary");
+        }
+      } else {
+        helper = new HelperCall(["Uint8Array", "fromBase64"], "");
+      }
+      const ast = lazyExportAST(log, source, parserOptions(), expr, helper);
+      ast.urlForCSS = "data:application/octet-stream;base64," + encoded;
+      inputFile.sideEffects = new SideEffects(inputFile.sideEffects.data, NoSideEffects_PureData);
+      inputFile.repr = new JSRepr();
+      inputFile.repr.ast = ast;
+      result.ok = true;
+      break;
+    }
+
+    case LoaderDataURL: {
+      const mimeType = guessMimeType(ext, source.contents);
+      let url = encodeStringAsShortestDataURL(mimeType, source.contents);
+      if (source.keyPath.ignoredSuffix.startsWith("#")) {
+        // Preserve URL fragments as they are meaningful in CSS
+        url += source.keyPath.ignoredSuffix;
+      }
+      const expr = new Expr(new EString(url), 0);
+      const ast = lazyExportAST(log, source, parserOptions(), expr, null);
+      ast.urlForCSS = url;
+      inputFile.sideEffects = new SideEffects(inputFile.sideEffects.data, NoSideEffects_PureData);
+      inputFile.repr = new JSRepr();
+      inputFile.repr.ast = ast;
+      result.ok = true;
+      break;
+    }
+
+    case LoaderFile:
+    case LoaderCopy:
+      // (the flag parser rejects these loaders for a transform, and the
+      // default extension map has neither)
+      throw new Error("Internal error: " + LoaderToString[loader] + " loader in a transform");
+
+    default: {
+      // (a transform's path is never in the "file" namespace)
+      const message = "Do not know how to load path: " + source.prettyPaths.select(options.logPathStyle);
+      log.addError(null, RANGE_ZERO, message);
+    }
   }
 
-  // A failed parse always comes with a logged error in Go (the transform then
-  // returns errors); here it can only mean the lexer gave up
-  if (!result.ok) bail();
 
   // Only continue now if parsing was successful
   if (result.ok) {
@@ -410,31 +584,56 @@ function parseFile(log, keyPath, prettyPaths, sourceIndex, options, moduleTypeDa
 
     // Attempt to parse the source map if present
     if (loaderCanHaveSourceMap(loader) && options.sourceMap !== SourceMapNone) {
-      const sourceMapComment = inputFile.repr.ast.sourceMapComment; // (only JS files here)
+      const sourceMapComment = inputFile.repr.ast.sourceMapComment; // (JSRepr or CSSRepr)
       if (sourceMapComment !== null && sourceMapComment.text !== "") {
-        // Loading and parsing input source maps is not ported. Only comments
-        // for which extractSourceMapFromComment returns no contents without
-        // an error or a warning are supported.
-        if (!sourceMapCommentIsIgnoredInTransform(sourceMapComment.text)) bail();
+        // (a transform has no resolve directory, and its file system is
+        // Go's empty mock file system: only data URLs can load a map)
+        const sourceMap = loadInputSourceMap(log, transformMockFS, newCacheSet(), source, sourceMapComment, "", options, source.prettyPaths);
+        if (sourceMap !== undefined) inputFile.inputSourceMap = sourceMap;
       }
     }
+  }
+  } catch (e) {
+    recoverParsePanic(e, log, source.prettyPaths.select(options.logPathStyle));
   }
 
   return result;
 }
 
-// Returns true if extractSourceMapFromComment is known to return no source
-// map for this comment in a transform (a Debug message at most), false if it
-// might load a source map or report a warning. (A transform has no resolve
-// directory, so relative URLs are ignored, and URLs with a scheme other than
-// "file" are ignored too.) Conservative: only simple URLs for which Go's
-// url.Parse can't fail are accepted.
-const ignoredRelativeSourceMapURL = /^(?!\/\/)[A-Za-z0-9._~!$&'()*+,;=@/-]+$/;
-const ignoredHTTPSourceMapURL = /^https?:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._~!$&'()*+,;=@/-]*)?$/;
-function sourceMapCommentIsIgnoredInTransform(text) {
-  // Data URLs contain the source map itself
-  if (text.startsWith("data:")) return false;
-  return ignoredRelativeSourceMapURL.test(text) || ignoredHTTPSourceMapURL.test(text);
+// A deep copy of a value from js_parser.ParseJSON (null, booleans, numbers,
+// big integers, strings, arrays and objects of those)
+function cloneJSONValue(data) {
+  switch (data.k) {
+    case E_ARRAY: {
+      const items = new Array(data.items.length);
+      for (let i = 0; i < items.length; i++) {
+        const item = data.items[i];
+        items[i] = new Expr(cloneJSONValue(item.data), item.loc);
+      }
+      return new EArray(items, data.commaAfterSpread, data.closeBracketLoc, data.isSingleLine, data.isParenthesized);
+    }
+    case E_OBJECT: {
+      const properties = new Array(data.properties.length);
+      for (let i = 0; i < properties.length; i++) {
+        const property = data.properties[i].clone();
+        property.key = new Expr(cloneJSONValue(property.key.data), property.key.loc);
+        property.valueOrNil = new Expr(cloneJSONValue(property.valueOrNil.data), property.valueOrNil.loc);
+        properties[i] = property;
+      }
+      return new EObject(properties, data.commaAfterSpread, data.closeBraceLoc, data.isSingleLine, data.isParenthesized);
+    }
+    case E_STRING:
+      return new EString(data.value, data.legacyOctalLoc, data.preferTemplate, data.hasPropertyKeyComment, data.containsUniqueKey);
+    case E_NUMBER:
+      return new ENumber(data.value);
+    case E_BOOLEAN:
+      return new EBoolean(data.value);
+    case E_BIG_INT:
+      return new EBigInt(data.value);
+    case E_NULL:
+      return data; // (js_ast.ENullShared)
+  }
+  throw new GoPanic("Internal error"); // (a JSON value is one of the above)
 }
 
 // Go: globalRuntimeCache. The cached AST is shared by every transform and
@@ -453,10 +652,7 @@ class runtimeCache {
     const unsupportedJSFeatures = options.unsupportedJSFeatures;
     const minifySyntax = options.minifySyntax;
     const minifyIdentifiers = options.minifyIdentifiers;
-    const key =
-      unsupportedJSFeatures === 0 && !minifySyntax && !minifyIdentifiers
-        ? "0|0|0" // (the only key the fast path uses; avoids building a string)
-        : unsupportedJSFeatures + "|" + (minifySyntax ? 1 : 0) + "|" + (minifyIdentifiers ? 1 : 0);
+    const key = runtimeCacheKey(unsupportedJSFeatures, minifySyntax, minifyIdentifiers);
 
     // Cache hit? (The source only depends on the key too, so it is cached along
     // with the AST instead of being recreated like Go does.)
@@ -467,6 +663,23 @@ class runtimeCache {
 
     // Determine which source to use
     const source = runtimeSource(unsupportedJSFeatures);
+
+    // JS-only: decode the AST that build.mjs made with this parser at build
+    // time (see snapshot.mjs), for exactly the keys it was made for (build.mjs
+    // checks that the runtime parses the same for each of them)
+    if (runtimeSnapshot !== null && runtimeSnapshot.keys.includes(key)) {
+      const runtimeAST = decodeSnapshot(runtimeSnapshot.snapshot);
+      _testHooks.snapshotDecodes++;
+      // (Test hook: the snapshot must match a fresh parse)
+      if (globalThis.__FAST_ESBUILD_VERIFY_RUNTIME_CACHE__) {
+        const fresh = parseRuntimeForSnapshot(unsupportedJSFeatures, minifySyntax, minifyIdentifiers);
+        if (encodeSnapshot(fresh) !== encodeSnapshot(runtimeAST)) throw new globalThis.Error("@r1ck404/fast-esbuild-wasm: runtime snapshot mismatch");
+      }
+      markASTShared(runtimeAST, RUNTIME_SOURCE_INDEX);
+      if (this.astMap === null) this.astMap = new Map();
+      this.astMap.set(key, { source, ast: runtimeAST });
+      return [source, runtimeAST, true];
+    }
 
     // Cache miss
     const log = new Log();
@@ -480,7 +693,6 @@ class runtimeCache {
     runtimeOptions.treeShaking = true;
     const $d227 = parse(log, source, optionsFromConfig(runtimeOptions));
     const runtimeAST = $d227[0], ok = $d227[1];
-    // (errors in the runtime would throw BAIL from the log)
 
     // Cache for next time
     if (ok) {
@@ -494,22 +706,65 @@ class runtimeCache {
 
 const globalRuntimeCache = new runtimeCache();
 
+// (for the build API's scan phase, bundler_scan.mts)
+export function parseRuntimeCached(options) {
+  return globalRuntimeCache.parseRuntime(options);
+}
+export function cloneJSONValueForInject(data) {
+  return cloneJSONValue(data);
+}
+
+// The key of the runtime cache: everything the runtime's parse depends on
+export function runtimeCacheKey(unsupportedJSFeatures: JSFeature, minifySyntax: boolean, minifyIdentifiers: boolean): string {
+  return jsFeatureIsEmpty(unsupportedJSFeatures) && !minifySyntax && !minifyIdentifiers
+    ? "0|0|0" // (the most common key; avoids building a string)
+    : unsupportedJSFeatures.toString() + "|" + (minifySyntax ? 1 : 0) + "|" + (minifyIdentifiers ? 1 : 0);
+}
+
+// The runtime AST snapshot (snapshot.mjs) and the runtime cache keys it is
+// for, baked into the engine by build.mjs (esbuild "define", an object:
+// {keys, snapshot}); null when running from the source modules unless a test
+// installs one (the snapshot may then be its text).
+declare const __FAST_RUNTIME_SNAPSHOT__: { keys: string[]; snapshot: object | string };
+let runtimeSnapshot: { keys: string[]; snapshot: object | string } | null = typeof __FAST_RUNTIME_SNAPSHOT__ !== "undefined" ? __FAST_RUNTIME_SNAPSHOT__ : null;
+
 // For tests: lets a test deep-freeze the cached runtime AST to verify that
-// transforms never mutate it.
-export const _testHooks = { globalRuntimeCache };
+// transforms never mutate it, install or remove the runtime snapshot (which
+// also empties the cache), and count how often the snapshot was decoded.
+export const _testHooks = {
+  globalRuntimeCache,
+  setRuntimeSnapshot(snapshot: { keys: string[]; snapshot: object | string } | null) {
+    runtimeSnapshot = snapshot;
+    globalRuntimeCache.astMap = null;
+  },
+  snapshotDecodes: 0,
+};
+
+// Parses the runtime like runtimeCache.parseRuntime does on a cache miss,
+// without the cache or the snapshot (build.mjs makes the snapshot from it)
+export function parseRuntimeForSnapshot(unsupportedJSFeatures: JSFeature = JSFeatureNone, minifySyntax = false, minifyIdentifiers = false) {
+  const runtimeOptions = new ConfigOptions();
+  runtimeOptions.unsupportedJSFeatures = unsupportedJSFeatures;
+  runtimeOptions.minifySyntax = minifySyntax;
+  runtimeOptions.minifyIdentifiers = minifyIdentifiers;
+  runtimeOptions.treeShaking = true;
+  const $d = parse(new Log(), runtimeSource(unsupportedJSFeatures), optionsFromConfig(runtimeOptions));
+  if (!$d[1]) throw new globalThis.Error("runtime parse failed");
+  return $d[0];
+}
 
 const base64URLChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 // 12 random bytes in URL-safe base64 (16 characters). The prefix is never
 // written to transform output (see linker.breakJoinerIntoPieces), so a
 // non-cryptographic source of randomness is enough.
-function generateUniqueKeyPrefix() {
+export function generateUniqueKeyPrefix() {
   let s = "";
   for (let i = 0; i < 16; i++) s += base64URLChars[(Math.random() * 64) | 0];
   return s;
 }
 
-function applyOptionDefaults(options) {
+export function applyOptionDefaults(options) {
   // (A missing "extensionToLoader" is replaced by the default map where it is
   // read, so that "options" keeps the config.Options object shape)
 
@@ -518,17 +773,44 @@ function applyOptionDefaults(options) {
 
   options.profilerNames = !options.minifyIdentifiers;
 
-  // Automatically fix invalid configurations of unsupported features. Any
-  // override that marks a feature as unsupported is outside the fast path
-  // (the port assumes "unsupportedJSFeatures" is empty).
-  if (options.unsupportedJSFeatureOverrides !== 0) bail();
+  // Automatically fix invalid configurations of unsupported features
+  fixInvalidUnsupportedJSFeatureOverrides(options, AsyncAwait, jsFeatureOr(jsFeatureOr(AsyncGenerator, ForAwait), TopLevelAwait));
+  fixInvalidUnsupportedJSFeatureOverrides(options, Generator, AsyncGenerator);
+  fixInvalidUnsupportedJSFeatureOverrides(options, ObjectAccessors, jsFeatureOr(ClassPrivateAccessor, ClassPrivateStaticAccessor));
+  fixInvalidUnsupportedJSFeatureOverrides(options, ClassField, ClassPrivateField);
+  fixInvalidUnsupportedJSFeatureOverrides(options, ClassStaticField, ClassPrivateStaticField);
+  fixInvalidUnsupportedJSFeatureOverrides(options, Class, CLASS_IMPLIED_FEATURES);
 
   // If we're not building for the browser, automatically disable support for
-  // inline </script> and </style> tags if there aren't currently any overrides.
-  // (compat.InlineScript = 1 << 36; the JSFeature mask is a uint64, so use
-  // arithmetic instead of JS bitwise operators)
+  // inline </script> and </style> tags if there aren't currently any overrides
   if (options.platform !== PlatformBrowser) {
-    if (Math.floor(options.unsupportedJSFeatures / 68719476736) % 2 === 0) options.unsupportedJSFeatures += 68719476736;
+    if (!jsFeatureHas(options.unsupportedJSFeatureOverridesMask, InlineScript)) {
+      options.unsupportedJSFeatures = jsFeatureOr(options.unsupportedJSFeatures, InlineScript);
+    }
+    if (!cssFeatureHas(options.unsupportedCSSFeatureOverridesMask, CSSInlineStyle)) {
+      options.unsupportedCSSFeatures |= CSSInlineStyle;
+    }
+  }
+}
+
+const CLASS_IMPLIED_FEATURES = [
+  ClassPrivateAccessor,
+  ClassPrivateBrandCheck,
+  ClassPrivateField,
+  ClassPrivateMethod,
+  ClassPrivateStaticAccessor,
+  ClassPrivateStaticField,
+  ClassPrivateStaticMethod,
+  ClassStaticBlocks,
+  ClassStaticField,
+].reduce(jsFeatureOr, ClassField);
+
+function fixInvalidUnsupportedJSFeatureOverrides(options, implies, implied) {
+  // If this feature is unsupported, that implies that the other features must also be unsupported
+  if (jsFeatureHas(options.unsupportedJSFeatureOverrides, implies)) {
+    options.unsupportedJSFeatures = jsFeatureOr(options.unsupportedJSFeatures, implied);
+    options.unsupportedJSFeatureOverrides = jsFeatureOr(options.unsupportedJSFeatureOverrides, implied);
+    options.unsupportedJSFeatureOverridesMask = jsFeatureOr(options.unsupportedJSFeatureOverridesMask, implied);
   }
 }
 
@@ -548,11 +830,25 @@ class Bundle {
     this.options = options;
   }
 
-  // Returns [outputFiles, metafileJSON]
+  // Returns [outputFiles, metafileJSON]. "mangleCache" is a Map<string,
+  // string | false> or null (Go: nil).
   compile(log, timer, mangleCache, linkFn) {
+    if (timer === null) {
+      return this.compileImpl(log, timer, mangleCache, linkFn);
+    }
+    timer?.begin("Compile phase");
+    try {
+      return this.compileImpl(log, timer, mangleCache, linkFn);
+    } finally {
+      timer?.end("Compile phase");
+    }
+  }
+
+  compileImpl(log, timer, mangleCache, linkFn) {
     const b = this;
-    // (Go copies the options to install ExclusiveMangleCacheUpdate, which the
-    // fast path doesn't need; the linker never mutates the options)
+    // (Go copies the options to install ExclusiveMangleCacheUpdate, which
+    // hands "mangleCache" to the linker; here it is passed to linkFn directly.
+    // The linker never mutates the options.)
     const options = b.options;
 
     const files = new Array(b.files.length);
@@ -564,14 +860,18 @@ class Bundle {
     const allReachableFiles = findReachableFiles(files, b.entryPoints);
 
     // Compute source map data in parallel with linking
+    timer?.begin("Spawn source map tasks");
     const dataForSourceMaps = b.computeDataForSourceMapsInParallel(options, allReachableFiles);
+    timer?.end("Spawn source map tasks");
 
     let resultGroups;
     if (options.codeSplitting || b.entryPoints.length === 1) {
       // If code splitting is enabled or if there's only one entry point, link all entry points together
-      resultGroups = [linkFn(options, null, log, null, null, files, b.entryPoints, b.uniqueKeyPrefix, allReachableFiles, dataForSourceMaps)];
+      resultGroups = [
+        linkFn(options, timer, log, null, null, files, b.entryPoints, b.uniqueKeyPrefix, allReachableFiles, dataForSourceMaps, mangleCache),
+      ];
     } else {
-      bail(); // (multiple entry points only happen when bundling)
+      throw new GoPanic("Internal error"); // (a transform has one entry point)
     }
 
     // Join the results in entry point order for determinism
@@ -617,7 +917,7 @@ class Bundle {
             result.quotedContents = [quoteForJSONLong(f.inputFile.source.contents, options.asciiOnly)];
           } else {
             // Complex case: nested source map
-            bail(); // (input source maps are never loaded: see parseFile)
+            result.quotedContents = nestedQuotedContents(sm, options.asciiOnly);
           }
         }
       }
@@ -627,10 +927,60 @@ class Bundle {
   }
 }
 
+// bundler.go computeDataForSourceMapsInParallel's "Complex case: nested
+// source map": the quoted "sourcesContent" of an input source map
+export function nestedQuotedContents(sm: any, asciiOnly: boolean): string[] {
+  const quotedContents = new Array(sm.sources.length);
+  const nullContents = "null";
+  for (let i = 0; i < sm.sources.length; i++) {
+    // Missing contents become a "null" literal
+    let quoted = nullContents;
+    if (i < sm.sourcesContent.length) {
+      const value = sm.sourcesContent[i];
+      if (value.quoted !== "" && (!asciiOnly || !isASCIIOnlyText(value.quoted))) {
+        // Just use the value directly from the input file
+        quoted = value.quoted;
+      } else if (value.value !== null) {
+        // Re-quote non-ASCII values if output is ASCII-only. Also quote values
+        // that haven't been quoted yet (happens when the entire
+        // "sourcesContent" array is absent and the source has been found on
+        // the file system using the "sources" array).
+        quoted = quoteForJSON(value.value, asciiOnly);
+      }
+    }
+    quotedContents[i] = quoted;
+  }
+  return quotedContents;
+}
+
+function isASCIIOnlyText(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 0x7f) return false;
+  }
+  return true;
+}
+
+// fs.MockFS(make(map[string]string), fs.MockUnix, "/"): the file system of a
+// transform (only what loading an input source map can use)
+export const transformMockFS = {
+  cwd(): string {
+    return "/";
+  },
+  readFile(path: string): [Uint8Array | null, any, any] {
+    return [null, ENOENT, ENOENT];
+  },
+  modKey(path: string): [any, any] {
+    return [null, new GoError("This is not available during tests")];
+  },
+  isAbs(p: string): boolean {
+    return p.startsWith("/");
+  },
+};
+
 // This is data related to source maps. It's computed in parallel with linking
 // and must be ready by the time printing happens. This is beneficial because
 // it is somewhat expensive to produce.
-class DataForSourceMap {
+export class DataForSourceMap {
   declare lineOffsetTables: any;
   declare quotedContents: any;
   constructor() {
@@ -695,11 +1045,13 @@ class scanner {
   declare uniqueKeyPrefix: any;
   declare results: any[];
   declare options: any;
+  declare sourceIndexCache: Map<string, number>;
   constructor(log, options, uniqueKeyPrefix) {
     this.log = log;
     this.uniqueKeyPrefix = uniqueKeyPrefix;
     this.results = []; // []parseResult
     this.options = options;
+    this.sourceIndexCache = new Map(); // path text -> source index (all paths are in the "" namespace)
   }
 
   // Transforms only ever have the stdin entry point
@@ -715,13 +1067,13 @@ class scanner {
         if (stdin.absResolveDir === "") {
           stdinPath = new Path(stdin.sourceFile);
         } else {
-          bail(); // (the build API's stdin with a resolve directory)
+          throw new GoPanic("Internal error"); // (a transform's stdin has no resolve directory)
         }
       }
       const sourceIndex = s.maybeParseStdin(stdinPath, makePrettyPaths(stdinPath));
       entryMetas.push(new EntryPoint("stdin", sourceIndex));
     } else {
-      bail(); // (a transform always has stdin)
+      throw new GoPanic("Internal error"); // (a transform always has stdin)
     }
 
     // (There are no other entry points. "AbsOutputBase" would now be set to
@@ -729,14 +1081,65 @@ class scanner {
     return entryMetas;
   }
 
+  // Go: allocateSourceIndex with the fresh cache.SourceIndexCache of a
+  // transform (source indices are handed out in order after the runtime's,
+  // the same path gets the same index)
+  allocateSourceIndex(path) {
+    const s = this;
+    let sourceIndex = s.sourceIndexCache.get(path.text);
+    if (sourceIndex === undefined) {
+      sourceIndex = RUNTIME_SOURCE_INDEX + 1 + s.sourceIndexCache.size;
+      s.sourceIndexCache.set(path.text, sourceIndex);
+    }
+
+    // Grow the results array to fit this source index
+    while (s.results.length < sourceIndex + 1) s.results.push(new parseResult());
+    return sourceIndex;
+  }
+
+  // The "--define" half of preprocessInjectedFiles (a transform has no
+  // "inject" paths)
+  preprocessInjectedFiles() {
+    const s = this;
+    const injectedFiles = [];
+
+    // These are virtual paths that are generated for compound "--define" values.
+    // They are special-cased and are not available for plugins to intercept.
+    for (let $i = 0; $i < s.options.injectedDefines.length; $i++) {
+      const define = s.options.injectedDefines[$i];
+      // These should be unique by construction so no need to check for collisions
+      const visitedKey = new Path("<define:" + define.name + ">");
+      const sourceIndex = s.allocateSourceIndex(visitedKey);
+      const source = new Source(makePrettyPaths(visitedKey), ensureValidIdentifier(visitedKey.text), define.source.contents, visitedKey, sourceIndex);
+
+      // The first "len(InjectedDefine)" injected files intentionally line up
+      // with the injected defines by index. The index will be used to import
+      // references to them in the parser.
+      injectedFiles.push(new InjectedFile([], define.name, source));
+
+      // Generate the file inline here since it has already been parsed.
+      // (The value is copied: the cached options share it between transforms,
+      // while Go parses it anew for each one.)
+      const expr = new Expr(cloneJSONValue(define.data), 0);
+      const ast = lazyExportAST(s.log, source, optionsFromConfig(s.options), expr, null);
+      const inputFile = new InputFile(null, null, [], "", new SideEffects(null, NoSideEffects_PureData), source, LoaderJSON);
+      inputFile.repr = new JSRepr();
+      inputFile.repr.ast = ast;
+      s.results[sourceIndex] = new parseResult(new scannerFile(inputFile), true);
+    }
+
+    s.options.injectedFiles = injectedFiles;
+  }
+
   // maybeParseFile for the stdin file (inputKindStdin)
   maybeParseStdin(path, prettyPaths) {
     const s = this;
 
-    // Allocate a source index (the source index cache of a fresh CacheSet
-    // hands out runtime.SourceIndex + 1 first)
-    const sourceIndex = RUNTIME_SOURCE_INDEX + 1;
-    while (s.results.length < sourceIndex + 1) s.results.push(new parseResult());
+    // Only parse a given file path once. (A "sourcefile" equal to a
+    // "<define:...>" path is the injected file: it is the entry point then.)
+    const visited = s.sourceIndexCache.get(path.text);
+    if (visited !== undefined) return visited;
+    const sourceIndex = s.allocateSourceIndex(path);
 
     let moduleTypeData;
 
@@ -857,7 +1260,53 @@ class scanner {
             const record = $a0[$i0];
             // Require of a top-level await chain is forbidden
             if (record.kind === ImportRequire && record.sourceIndex >= 0 && s.results[record.sourceIndex].tlaCheck.parent >= 0) {
-              s.log.addErrorWithNotes();
+              const notes: MsgData[] = [];
+              let tlaPrettyPaths = new PrettyPaths();
+              let otherSourceIndex = record.sourceIndex;
+
+              // Build up a chain of relevant notes for all of the imports
+              for (;;) {
+                const parentResult = s.results[otherSourceIndex];
+                const parentRepr = parentResult.file.inputFile.repr as JSRepr;
+
+                if (parentRepr.ast.liveTopLevelAwaitKeyword.len > 0) {
+                  tlaPrettyPaths = parentResult.file.inputFile.source.prettyPaths;
+                  const tracker = new LineColumnTracker(parentResult.file.inputFile.source);
+                  notes.push(tracker.msgData(parentRepr.ast.liveTopLevelAwaitKeyword, "The top-level await in " + goQuote(tlaPrettyPaths.select(s.options.logPathStyle)) + " is here:"));
+                  break;
+                }
+
+                if (!(parentResult.tlaCheck.parent >= 0)) {
+                  notes.push(new MsgData(null, null, "unexpected invalid index"));
+                  break;
+                }
+
+                otherSourceIndex = parentResult.tlaCheck.parent;
+
+                const tracker = new LineColumnTracker(parentResult.file.inputFile.source);
+                notes.push(
+                  tracker.msgData(
+                    parentRepr.ast.importRecords[parentResult.tlaCheck.importRecordIndex].range,
+                    "The file " +
+                      goQuote(parentResult.file.inputFile.source.prettyPaths.select(s.options.logPathStyle)) +
+                      " imports the file " +
+                      goQuote(s.results[otherSourceIndex].file.inputFile.source.prettyPaths.select(s.options.logPathStyle)) +
+                      " here:",
+                  ),
+                );
+              }
+
+              let text;
+              const importedPrettyPaths = s.results[record.sourceIndex].file.inputFile.source.prettyPaths;
+
+              if (importedPrettyPaths.abs === tlaPrettyPaths.abs && importedPrettyPaths.rel === tlaPrettyPaths.rel) {
+                text = "This require call is not allowed because the imported file " + goQuote(importedPrettyPaths.select(s.options.logPathStyle)) + " contains a top-level await";
+              } else {
+                text = "This require call is not allowed because the transitive dependency " + goQuote(tlaPrettyPaths.select(s.options.logPathStyle)) + " contains a top-level await";
+              }
+
+              const tracker = new LineColumnTracker(result.file.inputFile.source);
+              s.log.addErrorWithNotes(tracker, record.range, text, notes);
             }
           }
 
@@ -871,13 +1320,27 @@ class scanner {
   }
 }
 
-// ScanBundle for config.TransformCall (no file system, caches, entry points
-// or timer: a transform only has the stdin file)
-function scanBundle(call, log, options) {
-  if (call !== TransformCall) bail();
+// ScanBundle for config.TransformCall (no file system, caches or entry
+// points: a transform only has the stdin file)
+function scanBundle(call, log, options, timer: Timer | null) {
+  if (timer === null) {
+    return scanBundleImpl(call, log, options, timer);
+  }
+  timer?.begin("Scan phase");
+  try {
+    return scanBundleImpl(call, log, options, timer);
+  } finally {
+    timer?.end("Scan phase");
+  }
+}
+
+function scanBundleImpl(call, log, options, timer: Timer | null) {
   options = cloneConfigOptions(options);
 
   applyOptionDefaults(options);
+
+  timer?.begin("On-start callbacks");
+  timer?.end("On-start callbacks");
 
   // Each bundling operation gets a separate unique key
   const uniqueKeyPrefix = generateUniqueKeyPrefix();
@@ -902,44 +1365,73 @@ function scanBundle(call, log, options) {
     s.results.push(result);
   }
 
-  // Injected files: "--define" values that aren't primitives (and "inject")
-  // generate additional files. Not supported by the fast path.
-  if (options.injectedDefines.length > 0 || options.injectedFiles.length > 0) bail();
-  s.options.injectedFiles = [];
+  // Injected files: "--define" values that aren't primitives generate
+  // additional files (and "inject" paths, which only the build API has)
+  timer?.begin("Preprocess injected files");
+  s.preprocessInjectedFiles();
+  timer?.end("Preprocess injected files");
 
+  timer?.begin("Add entry points");
   const entryPointMeta = s.addEntryPoints();
+  timer?.end("Add entry points");
 
   // (Import records are only resolved when bundling: nothing to scan)
-  if (s.options.mode === ModeBundle) bail();
+  timer?.begin("Scan all dependencies");
+  timer?.end("Scan all dependencies");
 
+  timer?.begin("Process scanned files");
   const files = s.processScannedFiles(entryPointMeta);
+  timer?.end("Process scanned files");
 
   return new Bundle(uniqueKeyPrefix, files, entryPointMeta, s.options);
 }
-
-// Platforms other than "browser" make Go mark compat.InlineScript as
-// unsupported, which only changes how "</script" sequences are printed (and
-// whether tagged template literals containing "</script" are lowered). The
-// port always behaves like the browser platform, so bail whenever that
-// difference could be visible.
-const closingScriptTagInSource = /<\/script/i;
-const escapedClosingScriptTagInOutput = /<\\\/script|< \/script/i;
 
 // Runs bundler.ScanBundle + Bundle.Compile(linker.Link) for a validated
 // config.Options of a transform (stdin set, mode pass-through or convert
 // format) and selects the results like api.transformImpl. Returns
 // { code, map, legalComments } as JS strings; map is "" when there is no
 // external source map, legalComments is null when esbuild
-// would not return a legal comments file. Throws BAIL when the input or the
-// options are not supported by the fast path (including any error or warning).
-export function transformBundle(configOptions, log) {
+// would not return a legal comments file.
+// Whether the stdin file of a transform has the path of an injected define
+// file ("<define:NAME>"): see scanner.maybeParseStdin
+function stdinIsInjectedDefine(options) {
+  const stdin = options.stdin;
+  if (stdin.sourceFile === "") return false;
+  for (let i = 0; i < options.injectedDefines.length; i++) {
+    if ("<define:" + options.injectedDefines[i].name + ">" === stdin.sourceFile) return true;
+  }
+  return false;
+}
+
+// "mangleCache" is the Map<string, string | false> that api.transformImpl gets
+// from cloneMangleCache (null for Go's nil); the linker updates it in place.
+export function transformBundle(configOptions, log, mangleCache = null) {
   if (log === undefined || log === null) log = new Log();
+  const timer = newTimerIfEnabled();
+  if (timer === null) return transformBundleImpl(configOptions, log, mangleCache, null);
   try {
+    return transformBundleImpl(configOptions, log, mangleCache, timer);
+  } finally {
+    timer?.log(log);
+  }
+}
+
+function transformBundleImpl(configOptions, log, mangleCache, timer: Timer | null) {
+  {
+    // A CSS stdin file: see linker_css.mjs (JS-only: the JS runtime and the
+    // JavaScript half of the linker never contribute to a CSS transform)
+    // (unless the entry point is an injected "<define:...>" file because the
+    // "sourcefile" has its name: then it is a JavaScript transform)
+    if (loaderIsCSS(configOptions.stdin.loader) && !stdinIsInjectedDefine(configOptions)) return transformBundleCSS(configOptions, log, mangleCache, timer);
+
     // Scan over the bundle
-    const bundle = scanBundle(TransformCall, log, configOptions);
+    const bundle = scanBundle(TransformCall, log, configOptions, timer);
+
+    // Stop now if there were errors
+    if (log.hasErrors()) return { code: "", map: "", legalComments: null };
 
     // Compile the bundle
-    const $d229 = bundle.compile(log, null, null, link);
+    const $d229 = bundle.compile(log, timer, mangleCache, link);
     const results = $d229[0];
 
     // Return the results
@@ -970,10 +1462,5 @@ export function transformBundle(configOptions, log) {
     }
 
     return { code, map: sourceMap, legalComments };
-  } catch (e) {
-    // Deep recursion (e.g. in the tree shaking pass) can overflow the JS stack
-    // where Go would just grow its stack: fall back instead
-    if (e instanceof RangeError) throw BAIL;
-    throw e;
   }
 }

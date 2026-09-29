@@ -8,29 +8,18 @@
 // example, the "**" operator is replaced with a call to "__pow" when targeting
 // ES2015. Tree shaking automatically removes unused code from the runtime.
 import { Path, PrettyPaths, Source } from "./logger.mjs";
+import { jsFeatureHas as has, ConstAndLet, ForOf, ObjectAccessors, ObjectExtensions } from "./compat.mjs";
+import type { JSFeature } from "./compat.mjs";
 
 // The runtime source is always at a special index. The index is always zero
 // but this constant is always used instead to improve readability and ensure
 // all code that references this index can be discovered easily.
 export const SourceIndex = 0;
 
-// Bit positions of the compat.JSFeature values used below ("1 << iota" order
-// in internal/compat/js_table.go). The fast path always passes 0.
-const ConstAndLet = 17;
-const ForOf = 25;
-const ObjectAccessors = 43;
-const ObjectExtensions = 44;
-
-// compat.JSFeature.Has. "features" is a number or a bigint bit set.
-function has(features, bit) {
-  if (!features) return false;
-  if (typeof features === "bigint") return ((features >> BigInt(bit)) & 1n) !== 0n;
-  return Math.floor(features / 2 ** bit) % 2 === 1;
-}
-
+// (keyed by the JSFeature's toString())
 const textCache = new Map();
 
-function sourceText(unsupportedJSFeatures) {
+function sourceText(unsupportedJSFeatures: JSFeature) {
   // Note: These helper functions used to be named similar things to the helper
   // functions from the TypeScript compiler. However, people sometimes use these
   // two projects in combination and TypeScript's implementation of these helpers
@@ -547,8 +536,8 @@ function sourceText(unsupportedJSFeatures) {
 
 // Go: runtime.Source(unsupportedJSFeatures). Returns a fresh logger.Source
 // each time (the text itself is cached per feature set).
-export function source(unsupportedJSFeatures) {
-  const key = typeof unsupportedJSFeatures === "bigint" ? unsupportedJSFeatures : BigInt(unsupportedJSFeatures || 0);
+export function source(unsupportedJSFeatures: JSFeature) {
+  const key = unsupportedJSFeatures.toString();
   let text = textCache.get(key);
   if (text === undefined) {
     text = sourceText(unsupportedJSFeatures);
