@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<meta name="color-scheme" content="light">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<link rel="icon" href="{{root}}favicon.svg" type="image/svg+xml">
+<link rel="preload" as="font" type="font/woff2" href="{{root}}assets/fonts/schibsted-grotesk-latin-wght-normal.woff2" crossorigin>
+<link rel="stylesheet" href="{{root}}assets/site.css">
+{{pagecss}}
+</head>
+<body class="{{bodyclass}}" data-root="{{root}}">
+<header class="site-head">
+  <div class="site-head-in">
+    <a class="wordmark" href="{{root}}">fast<i>-</i>packages</a>
+    <nav aria-label="Packages">{{nav}}</nav>
+  </div>
+</header>
+<main>
+{{content}}
+</main>
+<footer class="site-foot">
+  <div class="wrap">
+    <p>Faster drop-in replacements for pako, acorn, esbuild-wasm, es-module-lexer, brotli-wasm and @noble/hashes, made for <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a> and usable anywhere the originals are. Published on npm as <code>@r1ck404/fast-&lt;name&gt;</code>. Every demo on this site runs the real packages in your browser; nothing you load or paste leaves your machine.</p>
+    <ul>
+      <li><a href="https://github.com/R1ck404/fast-packages">Source on GitHub</a></li>
+      <li><a href="https://www.npmjs.com/org/r1ck404">npm</a></li>
+      <li><a href="https://github.com/R1ck404/fast-packages/blob/main/LICENSE">MIT license</a></li>
+    </ul>
+  </div>
+</footer>
+{{script}}
+</body>
+</html>

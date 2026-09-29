@@ -1,0 +1,55 @@
+/* fast-brotli-wasm page */
+
+[hidden] { display: none !important; }
+
+.field output { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 800; }
+.field small { font-weight: 500; color: var(--ink-3); font-size: 12.5px; }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }
+.text-field { margin: -8px 0 20px; }
+
+.sub { font-size: 13px; font-weight: 700; letter-spacing: 0; color: var(--ink-2); margin: 0 0 10px; }
+.lab-body > .sub:not(:first-of-type) { margin-top: 22px; }
+.lab-body .verdict { margin-top: 12px; padding-top: 12px; min-height: 0; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 8px 40px; margin: 22px 0 0; padding: 16px 0 0; border-top: 1px dashed var(--rule); }
+.stats > div { min-width: 0; }
+.stats dt { font-size: 12.5px; font-weight: 600; color: var(--ink-3); }
+.stats dd { margin: 2px 0 0; font-size: 15px; font-weight: 700; }
+
+/* quality sweep: time bars for both libraries, then the shared size */
+.qsweep { display: grid; gap: 10px; }
+.qsweep .sweep-key { margin-bottom: 2px; flex-wrap: wrap; }
+.qsweep .sweep-key i.s { background: var(--ink-2); }
+.qrow { display: grid; grid-template-columns: 78px minmax(0, 1.3fr) 118px 52px minmax(0, 0.8fr) 132px; gap: 4px 14px; align-items: center; font-size: 14px; }
+.qrow .nm { font-weight: 600; }
+.qrow .times { display: grid; font-size: 12.5px; line-height: 1.35; color: var(--ink-3); }
+.qrow .times .t.f { color: var(--fast); font-weight: 600; }
+.qrow .sweep-x { text-align: right; }
+.qrow .sz-bar i.s { background: var(--ink-2); height: 9px; }
+.qrow .sz { font-size: 12.5px; color: var(--ink-2); }
+.qrow .sweep-bars i { transition: width 0.4s cubic-bezier(0.2, 0.7, 0.2, 1); }
+
+@media (max-width: 900px) {
+  .qrow { grid-template-columns: minmax(0, 1fr) 52px; padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
+  .qrow .nm { grid-column: 1; grid-row: 1; }
+  .qrow .sweep-x { grid-column: 2; grid-row: 1; }
+  .qrow .sweep-bars:not(.sz-bar) { grid-column: 1 / -1; grid-row: 2; }
+  .qrow .times { grid-column: 1 / -1; grid-row: 3; display: flex; gap: 14px; }
+  .qrow .sz-bar { grid-column: 1 / -1; grid-row: 4; }
+  .qrow .sz { grid-column: 1 / -1; grid-row: 5; }
+}
+
+/* the download-size meter has three groups of two bars */
+#size-out { margin: 0; }
+#size-out .meter-group { font-size: 13px; font-weight: 700; color: var(--ink-2); margin-top: 8px; }
+#size-out .meter-group:first-child { margin-top: 0; }
+#size-out .meter-row { grid-template-columns: 150px 1fr 150px; }
+#size-out .meter-row .val { font-weight: 700; }
+@media (max-width: 640px) { #size-out .meter-row { grid-template-columns: 1fr 110px; } }
+
+#odd-table td, #odd-table th { padding-right: 16px; }
+#odd-table td:nth-child(2), #odd-table td:nth-child(3) { font-size: 13px; overflow-wrap: anywhere; min-width: 150px; }
+
+.sweep-notes p { margin: 0 0 4px; font-size: 14px; color: var(--ink-2); }
+#odd-table td:first-child { min-width: 250px; }
+#odd-table td:first-child code { white-space: nowrap; }

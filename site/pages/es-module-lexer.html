@@ -1,0 +1,185 @@
+<!--{"title":"fast-es-module-lexer: import and export scanning in SIMD WebAssembly","description":"A drop-in replacement for es-module-lexer 1.7.0 that returns the same results several times faster. Race it against the original in your browser."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>fast-es-module-lexer</h1>
+    <p class="lede">es-module-lexer's C lexer, ported to Rust and compiled to WebAssembly with SIMD. It returns the same imports, exports and errors, in the same shapes, several times faster.</p>
+    <p class="swap"><code>"es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@{{fastversion:es-module-lexer}}"</code> in your package.json is the whole migration.</p>
+    <ul class="facts">
+      <li><strong>6-18x</strong>0.5-1.2 MB bundles, in Node</li>
+      <li><strong>2.4-4.4x</strong>small modules, in Chromium</li>
+      <li><strong>3.5-4.9x</strong>batches of real files, in Chromium</li>
+      <li><strong>21.6 KB</strong>minified bundle, against 14.1 KB</li>
+    </ul>
+  </header>
+
+  <section class="lab" id="try" aria-labelledby="try-h">
+    <div class="lab-bar"><h2 id="try-h">Race es-module-lexer against fast-es-module-lexer</h2></div>
+    <div class="lab-body">
+      <div class="controls">
+        <label class="field"><span>Input</span>
+          <select id="input"></select>
+        </label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="file" aria-label="Use your own JavaScript file"></label>
+        <button class="btn" id="run" type="button">Run</button>
+      </div>
+      <div id="lanes"></div>
+      <p class="note-line" id="info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Both libraries lex in this tab, one after the other in short batches, and each keeps its best batch. The time covers <code>parse</code> only; the WebAssembly is compiled before the race starts. The batch is put together in this page: 300 modules, each a few generated imports and exports around a piece of three.module.js. Files you choose stay in your browser.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">What the lexer is for, and why it was slow</h2>
+    <p>es-module-lexer finds the import and export statements in a JavaScript module without parsing the whole file. For each import it reports where the specifier is, where the statement starts and ends, and whether it is a static import, a dynamic <code>import()</code> or <code>import.meta</code>. For each export it reports the name and where it is. It also says whether the file uses module syntax at all. Its readme names es-module-shims as the tool it was written for. Anything that needs a module's dependencies before it can run or bundle the module calls it on every file it touches, so the cost grows with the size of the dependency graph.</p>
+    <p>The original is already WebAssembly, so the time goes elsewhere. Its C main loop looks at every character of the source in turn, and for most of them it does nothing except remember the last one that was not whitespace. Around that loop, the JavaScript glue copies the string into wasm memory one <code>charCodeAt</code> at a time, and afterwards reads each result field with a separate call into wasm. The note under the lanes above measures the copy step alone, using a copy of the original's loop, for whatever you are lexing.</p>
+  </div>
+
+  <h2 style="margin-top: 56px">What runs where</h2>
+  <div class="layers">
+    <div class="layer you"><b>Your code</b><span><code>const [imports, exports, facade, hasModuleSyntax] = parse(source)</code>, exactly as before.</span></div>
+    <div class="layer new"><b>Copy into memory</b><span>The string goes into wasm memory by the fastest route the engine has: Node's <code>Buffer.latin1Write</code>, a wasm loop over the JS-string builtins in Chromium, <code>TextEncoder.encodeInto</code> elsewhere. One byte per UTF-16 unit.</span></div>
+    <div class="layer new"><b>Lexer in Rust</b><span>lexer.c ported function by function, compiled to wasm with SIMD. The main loop stops only at the few characters that matter, and strings, comments and templates are skipped with SIMD scans.</span></div>
+    <div class="layer kept"><b>Results</b><span>The lexer writes its records as 32-bit integers. The JavaScript glue reads them and builds the same objects, with the same keys in the same order, and throws the same parse errors.</span></div>
+    <div class="layer new"><b>Embedded module</b><span>The wasm ships inside the JavaScript. Node decodes it from base64. In browsers, <code>browser.mjs</code> uses a denser text that a 356-byte wasm module unpacks.</span></div>
+  </div>
+  <p class="key"><span><i class="k-kept"></i>behaves as the original's own code does</span><span><i class="k-new"></i>new machinery</span></p>
+
+  <div class="prose">
+    <h2>How it skips almost every character</h2>
+    <p>The Rust lexer keeps lexer.c's control flow, quirks included, so the answers match. What changed is how the main loop finds the next character worth looking at. The loop only needs to stop at <code>"</code>, <code>'</code>, <code>`</code>, <code>(</code>, <code>)</code>, <code>{</code>, <code>}</code> and <code>/</code>, and at an <code>e</code> followed by <code>x</code>, an <code>i</code> followed by <code>m</code> and a <code>c</code> followed by <code>l</code>, the first two letters of <code>export</code>, <code>import</code> and <code>class</code>. Every other character can only change the position of the last token, which the original tracks to decide, for instance, whether a <code>/</code> starts a regular expression or is a division.</p>
+    <p>The stop points are found 64 characters at a time. Each byte is split into its high and low four bits. Each half indexes a 16-entry table, the two values are ANDed, and the result is a set of class bits. WebAssembly has an instruction that does 16 such table lookups at once (<code>i8x16.swizzle</code>), so one pass classifies 16 characters and four passes fill a 64-bit mask with one bit per character. A second pair of tables classifies the following character, which is how <code>ex</code>, <code>im</code> and <code>cl</code> are told apart from a lone <code>e</code>, <code>i</code> or <code>c</code>. The loop then hops from set bit to set bit with a count-trailing-zeros instruction. A block with no stop point is left behind after one pass of the classifier.</p>
+    <p>Whitespace (tab through carriage return, and space) is classified in the same pass. When the loop stops, the last non-whitespace character before the stop is what the original would have in <code>lastTokenPos</code>, and it is recovered from the mask with a count-leading-zeros. Strings, template literals and comments are skipped by SIMD scans too: after an opening quote, the scanner looks 16 characters at a time for the closing quote, a backslash or a line break.</p>
+    <p>The panel below draws the classifier's flags over source code. The tables are copied from <code>rust/src/lib.rs</code>, and the same bytes are in the shipped wasm.</p>
+  </div>
+
+  <section class="lab" id="stops" aria-labelledby="stops-h" style="margin-top: 40px">
+    <div class="lab-bar"><h3 id="stops-h">Where the scanner stops</h3></div>
+    <div class="lab-body">
+      <div class="controls">
+        <label class="field"><span>Code</span>
+          <select id="s-input"></select>
+        </label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="s-file" aria-label="Use your own JavaScript file"></label>
+      </div>
+      <label class="field"><span>Source (edit it or paste your own)</span>
+        <textarea id="s-text" rows="8" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+      </label>
+      <h4 class="sub">The classifier's flags</h4>
+      <pre class="stops" id="s-view" tabindex="0" aria-label="The source with the classifier's stop points highlighted"></pre>
+      <p class="key"><span><i class="k-mark"></i>quote, backtick, bracket or slash</span><span><i class="k-cand"></i>start of <code>ex</code>, <code>im</code> or <code>cl</code></span></p>
+      <p class="note-line" id="s-note"></p>
+      <div class="meter" id="s-meter" role="group" aria-label="Share of characters flagged"></div>
+      <p class="note-line" id="s-counts"></p>
+
+      <h4 class="sub">What the lexer found in this text</h4>
+      <div class="verdict" id="s-verdict" style="margin-top: 0; padding-top: 12px"></div>
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="s-found">
+          <thead><tr><th scope="col">Kind</th><th scope="col">Specifier or name</th><th scope="col">Position</th><th scope="col">Statement</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="note-line" id="s-found-note"></p>
+
+      <h4 class="sub">The same count over the whole sample files</h4>
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="s-files">
+          <thead><tr><th scope="col">File</th><th scope="col">Characters</th><th scope="col">Flagged</th><th scope="col">Share</th><th scope="col">Blocks with no flag</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="lab-foot"><strong>Read the numbers as an upper bound.</strong> The flags come from the classifier alone. A quote or a comment start sends the loop to the end of the string or comment, and the flags inside it are never visited. The original's loop visits every character. Nothing you type or load leaves your browser.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Getting the text in and the results out</h2>
+    <p>The lexer reads one byte per UTF-16 unit. It only has to tell ASCII characters apart, plus U+00A0, which it treats as whitespace. Every other unit behaves like every other, so a unit above 0xff is squashed into a single byte. Positions in the results are still UTF-16 indices, as in the original, even after non-ASCII text.</p>
+    <p>How the string gets into memory depends on the engine. In Node, <code>Buffer.latin1Write</code> copies a string whose units are all at most 0xff, and <code>ucs2Write</code> copies the rest, both at memcpy speed. After a <code>ucs2Write</code>, a SIMD loop in the wasm narrows the UTF-16 units to bytes in place. In Chromium, a small second wasm module loops over the string with the JS-string builtins. V8 needs a while to optimize that loop, so for the first million characters it reads the string with <code>intoCharCodeArray</code> and only then switches to <code>charCodeAt</code>. Firefox and Safari have a fast <code>TextEncoder.encodeInto</code> and slow builtins, so they use <code>encodeInto</code>, and the wasm squashes the UTF-8 back to one byte per unit. On that path, strings of 128 units or fewer are copied by a JavaScript loop instead, because <code>encodeInto</code> has a fixed cost.</p>
+    <p>The results come back the other way as one array of integers. Each import is nine 32-bit words and each export is five, written one after another right after the source. The JavaScript reads them through a single <code>Int32Array</code> and builds the objects. The original makes a call into wasm for every field. An import specifier without a backslash is sliced out of the source, because evaluating a quoted literal with no escapes gives back its own text. One with a backslash still goes through <code>eval</code>, as in the original.</p>
+    <p>The wasm has no allocator. The source sits at the start of the heap, the records follow it, and memory is grown with <code>memory.grow</code>, by at least an eighth at a time because every grow detaches the JavaScript views of the memory.</p>
+    <h2>Why Chromium gets less than Node</h2>
+    <p>The recorded speedup is lower in Chromium than in Node: 3.5-4.9x against 5-7.7x on batches of real package files. The lexing is the same wasm in both. What differs is how the text gets in. Node copies it with memcpy, and Chromium runs a wasm loop that handles it one character at a time. That is the likely reason, but the recorded results do not separate the copy from the lexing, so treat it as an explanation and not a measurement. The same reasoning is behind the copy paths above: once the lexer is this fast, moving the text in is a large part of what is left.</p>
+  </div>
+
+  <div class="beside">
+    <div class="prose">
+      <h2>Faithful down to the errors</h2>
+      <p>A replacement for a lexer has to agree on more than clean modules. es-module-lexer throws an <code>Error</code> with a message such as <code>Parse error @:2:11</code> and an <code>idx</code> property, and the fast package builds the same message from the same fields. Quoted names such as <code>export { a as "b c" }</code> go through <code>eval</code> in both. The panel below runs a set of odd inputs through both libraries and compares the whole result, every position included.</p>
+    </div>
+    <aside><strong>How it is tested.</strong> The suites compare it with the original on 158,904 inputs in each of four ways of copying the source, 125,504 edge cases, and 4,424 checks in each of Chromium, Firefox and WebKit.</aside>
+  </div>
+
+  <section class="lab" id="odd" aria-labelledby="odd-h">
+    <div class="lab-bar">
+      <h3 id="odd-h">Odd inputs, same answers</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="odd-run" type="button">Run the inputs</button>
+    </div>
+    <div class="lab-body">
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="odd-table">
+          <thead><tr><th scope="col">Input</th><th scope="col">es-module-lexer</th><th scope="col">fast-es-module-lexer</th><th scope="col">Match</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="verdict" id="odd-verdict"></div>
+    </div>
+    <div class="lab-foot">The Match column compares the complete results, so a position that is off by one shows up as a difference. The last row is a documented difference, explained further down.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 56px">
+    <h2 style="margin-top: 0">When the original reads memory it should not</h2>
+    <p>On malformed code, es-module-lexer can read memory outside its source: below it, where its bracket stack lives, past its end, where its records of the imports and exports found so far sit and then whatever earlier parses left behind, or through a null position. Its answer then depends on what it lexed before, and two calls with the same source can differ.</p>
+    <p>fast-es-module-lexer answers such inputs exactly as a fresh es-module-lexer instance does on its first parse. The Rust code works out what that instance's memory would hold at each address it reads, records included, and traps where that instance traps. Its answer does not depend on history. The panel gives each of two broken inputs to a new instance of each library, asks twice, then lexes an ordinary module and asks again.</p>
+  </div>
+
+  <section class="lab" id="history" aria-labelledby="history-h">
+    <div class="lab-bar">
+      <h3 id="history-h">The same broken input, asked again</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="history-run" type="button">Run the calls</button>
+    </div>
+    <div class="lab-body">
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="history-table">
+          <thead><tr><th scope="col">Input</th><th scope="col">Call</th><th scope="col">es-module-lexer</th><th scope="col">fast-es-module-lexer</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="verdict" id="history-verdict"></div>
+    </div>
+    <div class="lab-foot">Each input gets a new instance of each library, so the first call starts from empty memory. The "ordinary module" is the 6 KB lodash debounce file.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 56px">
+    <h2 style="margin-top: 0">What is different</h2>
+    <p>Beyond the malformed-code case above, the package's readme lists these differences from es-module-lexer 1.7.0:</p>
+    <ul>
+      <li><strong>Deep nesting.</strong> The original's stacks hold 1,024 open brackets and 512 open <code>import(</code> calls. Past that they overflow into its own copy of the source, and its answer goes wrong: 1,500 nested parentheses followed by <code>import 'a'</code> is a parse error at column 2900. The fast package answers correctly up to 16,384 open brackets and 4,096 open <code>import(</code> calls, and throws a parse error at the first one past that. The last row of the odd-inputs table shows this.</li>
+      <li><strong>Records that do not fit.</strong> A source that is mostly short exports, such as <code>export{a,a,a,...}</code> with around 20,000 names, makes a fresh original trap with <code>memory access out of bounds</code>, and the fast package traps too. An original whose memory grew in earlier parses answers instead. A trapped original traps on every later parse, and the fast package keeps working.</li>
+      <li><strong>Non-string arguments</strong> go through the original's own conversion, so <code>null</code>, <code>undefined</code> and similar throw the same errors. An object that has <code>charCodeAt</code> but no <code>slice</code> is answered as the string of its characters, where the original throws.</li>
+      <li><strong>Setup.</strong> <code>init</code> resolving after <code>initSync()</code> keeps the instance <code>initSync</code> made. The original replaces it with a second one, which shows up only as memory. The <code>es-module-lexer/js</code> subpath, the asm.js build, is not provided.</li>
+      <li><strong>Engine support.</strong> The wasm uses SIMD instructions and there is no fallback, so an engine without WebAssembly SIMD cannot load it. The package's browser tests run in Chromium, Firefox and WebKit.</li>
+    </ul>
+    <p>On size, the fast package is larger. This is the browser bundle of <code>{ initSync, parse }</code>, minified with esbuild:</p>
+  </div>
+  <table class="compare" style="max-width: 640px">
+    <thead><tr><th scope="col"></th><th scope="col">es-module-lexer</th><th scope="col">fast-es-module-lexer</th></tr></thead>
+    <tbody>
+      <tr><td>Minified</td><td>14.1 KB</td><td>21.6 KB</td></tr>
+      <tr><td>Gzip</td><td>6.5 KB</td><td>9.3 KB</td></tr>
+      <tr><td>Brotli</td><td>5.8 KB</td><td>8.5 KB</td></tr>
+      <tr><td>The wasm alone</td><td>9.3 KB</td><td>16.6 KB (6.9 KB gzip)</td></tr>
+      <tr><td>npm tarball</td><td>31.2 KB</td><td>29.7 KB</td></tr>
+    </tbody>
+  </table>
+  <div class="prose">
+    <p>Most of the bundle is the wasm: the SIMD scanners and the inlined fast paths that make it fast. The whole crate built for size, at <code>opt-level = "z"</code>, is only 0.2 KB smaller after gzip and up to 13% slower. Dropping the Chromium copy module saves 0.5 KB and makes Chromium 37-135% slower. A wasm small enough to match the original's 6.5 KB bundle would mean giving up SIMD. <a href="../method/#dead-ends">The attempts are written down</a>, along with the copy approaches that lost.</p>
+    <p>Startup is level with the original in Node. Importing takes 1.48 ms against 1.56 ms, and import, <code>await init</code> and a first parse takes 2.42 ms against 2.63 ms. With <code>initSync()</code> it is 2.33 ms against 2.24 ms. These are the package readme's numbers from fresh processes.</p>
+  </div>
+
+  <h2 id="results" style="margin-top: 56px">Recorded results</h2>
+  <p class="section-lede" style="margin-bottom: 20px">Measured on a Ryzen 7 7800X3D with Node 24.16 and Chromium 149, one call per row. The times are Node's. The last column is the speedup for the same call in headless Chromium. Best of three rounds in fresh processes.</p>
+  {{results:lexer}}
+</div>

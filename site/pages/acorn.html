@@ -1,0 +1,200 @@
+<!--{"title":"fast-acorn: a faster acorn","description":"A drop-in replacement for acorn {{version}} that parses 2.5-3.2x faster and returns the same syntax tree and the same errors. Race it against acorn in your browser."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>fast-acorn</h1>
+    <p class="lede">acorn's parser, rebuilt on faster machinery. It returns the same syntax tree, key for key, and throws the same errors, and it parses 2.5 to 3.2 times faster.</p>
+    <p class="swap"><code>"acorn": "npm:@r1ck404/fast-acorn@{{fastversion:acorn}}"</code> <code>"acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@{{fastversion:acorn-jsx}}"</code> in your package.json is the whole migration. The second line is only for projects that use acorn-jsx.</p>
+    <ul class="facts">
+      <li><strong>2.5-3.2x</strong>parse, 1.6 KB to 9 MB</li>
+      <li><strong>2.3-2.8x</strong>parse with locations</li>
+      <li><strong>2.5x</strong>acorn-jsx</li>
+      <li><strong>93,841</strong>parses compared with acorn, all identical</li>
+    </ul>
+  </header>
+
+  <section class="lab" id="try" aria-labelledby="try-h">
+    <div class="lab-bar"><h2 id="try-h">Race acorn against fast-acorn</h2></div>
+    <div class="lab-body">
+      <div class="controls">
+        <label class="field"><span>Input</span>
+          <select id="input"></select>
+        </label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="file" aria-label="Use your own file"></label>
+        <button class="btn" id="run" type="button">Run</button>
+      </div>
+      <div class="controls opts">
+        <label class="field"><span>ecmaVersion</span>
+          <select id="opt-ecma">
+            <option value="latest">latest</option>
+            <option value="2020">2020</option>
+            <option value="2015">2015</option>
+            <option value="5">5</option>
+            <option value="3">3</option>
+          </select>
+        </label>
+        <label class="field"><span>sourceType</span>
+          <select id="opt-source">
+            <option value="module">module</option>
+            <option value="script">script</option>
+            <option value="commonjs">commonjs</option>
+          </select>
+        </label>
+        <label class="check-field field"><input type="checkbox" id="opt-locs"><span>locations</span></label>
+        <label class="check-field field"><input type="checkbox" id="opt-ranges"><span>ranges</span></label>
+        <label class="check-field field"><input type="checkbox" id="jsx"><span>JSX (acorn-jsx)</span></label>
+      </div>
+      <div id="lanes"></div>
+      <p class="note-line" id="info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Both parsers run in this tab, one after the other in short batches, and each keeps its best batch. Their output is compared key by key, including the order of keys, which class each object belongs to and the error fields. Some inputs and option combinations are invalid on purpose: try the TypeScript file, or <code>script</code> with a module. This tab runs your browser's engine, while the recorded results at the bottom were measured in Node, so the ratios here can differ from them. Files you choose stay in your browser.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Why there was room to improve a parser that is already good</h2>
+    <p>acorn reads source in two steps. A tokenizer cuts the text into tokens, and a recursive descent parser decides what the tokens mean and builds the tree. It is small and carefully written, and this page is not about a bad algorithm. The gain is in the machinery underneath, which acorn keeps general on purpose.</p>
+    <p>The reason is plugins. <code>Parser.extend()</code> lets a plugin subclass the parser and override any method, so acorn's parse functions are methods on one class, looked up on <code>this</code> at every call. Its token types are objects with fields that plugins read. Every node comes out of one <code>Node</code> constructor and receives its fields as the parse functions assign them. That is what makes acorn-jsx and the other plugins possible, and it is also what a parser that only wants to be fast cannot assume.</p>
+    <p>fast-acorn splits the job. It has its own parser, written as plain functions over a state object, for everything acorn does: every <code>ecmaVersion</code>, every <code>sourceType</code>, every option, <code>parseExpressionAt</code> and <code>tokenizer()</code>. When you pass <code>Parser.extend()</code> a class it recognises, it uses that parser. Otherwise it runs acorn's own code.</p>
+  </div>
+
+  <h2 style="margin-top: 56px">What runs where</h2>
+  <div class="layers">
+    <div class="layer you"><b>Your code</b><span><code>acorn.parse(code, options)</code>, <code>Parser.extend(...)</code>, <code>tokenizer()</code>, exactly as before.</span></div>
+    <div class="layer kept"><b>acorn's building blocks</b><span><code>Node</code>, <code>Position</code>, <code>SourceLocation</code>, <code>TokenType</code>, <code>tokTypes</code>, <code>tokContexts</code>, the option defaults and acorn's regular expression validator (generated from acorn). Both parsers share one set, so <code>instanceof</code> and <code>===</code> on them hold across them.</span></div>
+    <div class="layer new"><b>The fast parser</b><span>A tokenizer and parser that follow acorn's functions one for one, on integer token types, flag tables, one constructor per node type and set-backed scopes.</span></div>
+    <div class="layer new"><b>Class recognition</b><span>Decides for each <code>Parser.extend()</code> result: native JSX mode for acorn-jsx, a facade for <code>parseFunctionBody</code> overrides, or acorn's own code.</span></div>
+    <div class="layer kept"><b>acorn's own parser</b><span><code>generic.cjs</code>, generated from acorn. Only for plugins the fast parser does not recognise, <code>new Parser()</code> and patched prototypes. Not in the main module: it is installed on first use.</span></div>
+  </div>
+  <p class="key"><span><i class="k-kept"></i>behaves as acorn's own code does</span><span><i class="k-new"></i>new machinery</span></p>
+
+  <div class="prose">
+    <h2>What makes it faster</h2>
+    <p>None of these changes what the parser decides. They change how the work is done. Each is in <code>src/parser.mts</code> with a comment explaining it. This page does not break the speedup down by technique; the recorded results at the bottom measure them all together.</p>
+
+    <h3>Token types are integers</h3>
+    <p>acorn describes each token type with an object that has fields such as <code>beforeExpr</code>, <code>isLoop</code> and <code>binop</code>. fast-acorn gives each type a small integer and keeps those facts in typed arrays indexed by it: one array of flag bits and one of operator precedences, both filled from acorn's own token type objects when the module loads. Asking whether a token starts an expression becomes an integer test against a table. The token type objects still exist, because <code>onToken</code>, <code>tokenizer()</code> and <code>tokTypes</code> hand them out.</p>
+
+    <h3>Keywords without hashing</h3>
+    <p>Every keyword has a unique combination of length, first letter and second letter. A table indexed by those three numbers says whether a word can be a keyword at all, and the remaining letters are then compared directly. The check for the names that strict mode restricts, such as <code>eval</code>, <code>yield</code> and <code>interface</code>, works the same way. Neither has to hash the string.</p>
+
+    <h3>An ASCII fast path in the tokenizer</h3>
+    <p>Characters below 128 are looked up in a 128-entry table, and a word made only of them is scanned in one tight loop. Non-ASCII characters and escapes drop to a slower path that follows acorn's <code>readWord1</code> exactly. Places where acorn runs a regular expression, such as skipping whitespace and comments or finding a <code>"use strict"</code> directive, are written as scanners. Whether a line break came before a token is worked out once, while skipping whitespace, and stored as a flag.</p>
+
+    <h3>One constructor for each node type</h3>
+    <p>acorn makes every node with one constructor, <code>new Node(parser, pos, loc)</code>, which sets <code>type</code>, <code>start</code> and <code>end</code>. The parse functions then add the rest as they go (<code>node.left = ...</code>) and <code>finishNode</code> sets the type name. fast-acorn has a constructor for each node type that creates every key at once, in the order acorn would have added them.</p>
+    <p>That order matters twice. The tree must have acorn's key order to be identical, and a constructor that always creates the same keys in the same order gives the engine one object shape per node type. The source compiles the constructors when the first parse runs, so that each has store sites of its own that only ever see one shape. Node types whose keys depend on <code>ecmaVersion</code> get one constructor per key order. The extra keys for <code>loc</code>, <code>range</code> and <code>sourceFile</code> are added by a small helper of each type's own.</p>
+    <p>Writing the nodes as object literals instead was tried and made node creation 4x slower. It is one of <a href="../method/#dead-ends">the dead ends the repository keeps on record</a>.</p>
+
+    <h3>Scopes and names</h3>
+    <p>acorn keeps the names declared in a scope in arrays and searches them with <code>indexOf</code>. fast-acorn keeps short lists as arrays and switches to a <code>Set</code> once a list passes 16 names, so the big top-level scope of a bundle stays cheap to search. Whether a scope may <code>await</code> or use <code>new.target</code> depends only on its chain of parents, so it is worked out once when the scope is created instead of by walking the scope stack on every check.</p>
+
+    <h3>Less garbage</h3>
+    <p>With <code>locations</code> on, a node needs <code>Position</code> objects, and acorn shares them: one token's Position is used by every node that starts or ends there. fast-acorn keeps that sharing and creates a token's end position only when a node asks for it. (Doing the same for start positions is one of the recorded dead ends.) Lists in the tree are built as arrays of exactly the right size. The source explains why: an array grown with <code>push</code> keeps a 17-slot backing store, three times the memory of an exact one-element array, and trees are full of small lists that all live on. Other pieces are pooled or cached: the records used while parsing destructuring, and the results of validating regular expressions, keyed by version, pattern and flags.</p>
+
+    <h3>Why the tree is identical</h3>
+    <p>The parse functions are acorn's, one for one: the same checks in the same order, the same rules for deciding whether a <code>/</code> starts a regular expression, the same errors raised at the same points. What differs is how each step is carried out, not what it concludes. The repository checks this against acorn: 93,841 parses over 14,670 real files from installed npm packages, plus 8,849 errors, all identical; 309,982 checks over every <code>ecmaVersion</code> and option; and 274,791 generated errors, each one identical to acorn's and each one produced by the fast parser.</p>
+  </div>
+
+  <section class="lab" id="playground" aria-labelledby="pg-h" style="margin-top: 40px">
+    <div class="lab-bar">
+      <h3 id="pg-h">Type code, compare the trees and the errors</h3>
+      <span class="spacer"></span>
+      <ul class="tabs" id="pg-tabs" aria-label="What to compare"></ul>
+    </div>
+    <div class="lab-body">
+      <div class="controls opts">
+        <label class="field"><span>Example</span>
+          <select id="pg-preset"></select>
+        </label>
+        <label class="field"><span>ecmaVersion</span>
+          <select id="pg-ecma">
+            <option value="latest">latest</option>
+            <option value="2020">2020</option>
+            <option value="2015">2015</option>
+            <option value="5">5</option>
+            <option value="3">3</option>
+          </select>
+        </label>
+        <label class="field"><span>sourceType</span>
+          <select id="pg-source">
+            <option value="module">module</option>
+            <option value="script">script</option>
+            <option value="commonjs">commonjs</option>
+          </select>
+        </label>
+        <label class="check-field field"><input type="checkbox" id="pg-locs"><span>locations</span></label>
+        <label class="check-field field"><input type="checkbox" id="pg-jsx"><span>JSX (acorn-jsx)</span></label>
+      </div>
+      <label class="field"><span>Code</span>
+        <textarea id="pg-code" class="pg-code" rows="9" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+      </label>
+      <div class="verdict" id="pg-verdict" aria-live="polite"></div>
+      <pre class="pg-out" id="pg-out" aria-label="Output of fast-acorn"></pre>
+      <div id="pg-compare"></div>
+    </div>
+    <div class="lab-foot"><strong>What is compared.</strong> Both parsers run on every change. Trees are compared key by key, including key order and the class of every object. For invalid code, the error's class, message, <code>pos</code>, <code>loc</code> and <code>raisedAt</code> are compared. Tokens are compared by type, value, start and end (and location, when it is on). The output shown is fast-acorn's.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Plugins, subclasses and the fallback</h2>
+    <p><code>Parser.extend()</code> is where a drop-in can go wrong, because a plugin may change any part of parsing. fast-acorn looks at the class it is given and takes one of three paths.</p>
+    <ul>
+      <li><strong>acorn-jsx.</strong> The class runs on a native JSX mode. It is recognised if it is the genuine acorn-jsx 5.3.2 plugin, judged by its source text, its structure and some probe calls (which also reveal its options), or if it was made by <code>@r1ck404/fast-acorn-jsx</code>. That package is registered by identity, so it also works in minified bundles, where the genuine plugin's source text no longer matches. This is why the migration has two lines.</li>
+      <li><strong>Subclasses that only override <code>parseFunctionBody</code>.</strong> A parser that skips function bodies to list a file's top-level declarations quickly is the usual example. <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>'s <code>topLevelParser</code> is one, and the tests use it. The method's source must pass a whitelist check: plain control flow over locals, reads of a fixed set of parser properties, and calls only to a short list of parser methods such as <code>next</code>, <code>startNode</code>, <code>finishNode</code> and <code>eat</code>. So it cannot have effects outside the parse. The method then runs for real, against a facade that shows the fast parser's state through acorn's API. This works after minification too.</li>
+      <li><strong>Anything else.</strong> Other plugins, subclasses with methods of their own, <code>new Parser(...)</code> and a patched <code>Parser.prototype</code> run acorn's own parser code, sharing the same <code>tokTypes</code>, <code>Node</code> and <code>Position</code> objects as the rest of the package. In Node it loads on first use. In browsers and bundles, import it once with <code>import "@r1ck404/fast-acorn/full"</code>. Without that, such a parse throws an <code>Error</code> that says so.</li>
+    </ul>
+    <p>The panel below runs six calls through both libraries in this tab, at least one for each path. This page bundles only the main entry, not <code>/full</code>, so the last row shows what an unrecognised plugin does without it.</p>
+  </div>
+
+  <section class="lab which" id="which" aria-labelledby="which-h">
+    <div class="lab-bar">
+      <h3 id="which-h">Six calls, both libraries</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="which-run" type="button">Run the six calls</button>
+    </div>
+    <div class="lab-body">
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="which-table">
+          <thead><tr><th scope="col">Call</th><th scope="col">acorn</th><th scope="col">fast-acorn</th><th scope="col">Speedup</th><th scope="col">Result</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="verdict" id="which-verdict" style="min-height: 0"></div>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Each row is raced the same way as the first panel, with fewer rounds, and the returned trees or token lists are compared. The topLevelParser row skips function bodies, so its tree is smaller than a full parse.</div>
+  </section>
+
+  <div class="prose">
+    <h2>Where the speedup shrinks</h2>
+    <p>Anything that makes the parser allocate more shrinks the ratio. On the 1.2 MB three.module input in the results below, plain parsing is 2.8x faster and parsing with <code>locations</code> is 2.3x, because every node then carries a <code>SourceLocation</code> and two <code>Position</code> objects, which the tree has to contain. The repository's notes put the cost of <code>locations</code> down to collecting that garbage. The largest input in the results, typescript.js at 9 MB, shows the lowest speedup for plain parsing, 2.5x.</p>
+    <p>Plugins the fast parser does not recognise run acorn's own code on top of the faster tokenizer. The package README puts that at about 1.5x, after a one-time load of about 5 ms in Node. Import time is unchanged: importing <code>acorn</code> takes 5.4 ms in Node and importing fast-acorn takes 5.1 ms, and importing plus the first parse takes 9.4 ms and 9.5 ms.</p>
+
+    <h2>What is different, and what is bigger</h2>
+    <p>fast-acorn ships as one minified module. Minified it is a little smaller than acorn, but it compresses worse, because the fast machinery compresses less well than acorn's code. Sizes from the repository's size script, which bundles with esbuild:</p>
+  </div>
+  <div class="size-table-wrap">
+    <table class="results size-table">
+      <thead><tr><th scope="col">Bundle: minified / gzip / brotli</th><th scope="col">acorn</th><th scope="col">fast-acorn</th></tr></thead>
+      <tbody>
+        <tr><td>acorn (namespace import)</td><td>121.6 / 34.5 / 28.9 KB</td><td>118.7 / 41.3 / 36.3 KB</td></tr>
+        <tr><td>acorn and acorn-jsx</td><td>255.0 / 72.6 / 40.1 KB</td><td>132.1 / 46.6 / 40.0 KB</td></tr>
+        <tr><td>npm tarball / installed</td><td>133.5 / 565.3 KB</td><td>85.7 / 320.6 KB</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="prose">
+    <p>On its own, fast-acorn is about 20% larger than acorn when gzipped (41.3 against 34.5 KB) and about 26% larger with brotli (36.3 against 28.9 KB). With acorn-jsx it is smaller, but for a reason that has little to do with the parser: acorn-jsx loads acorn with <code>require</code>, and an app that imports acorn as a module then bundles both of acorn's builds, the ES module and the CommonJS one. fast-acorn has a single entry. The size gap is recorded with <a href="../method/#dead-ends">the other things tried for acorn</a>, such as shipping several files or an unminified bundle.</p>
+    <p>The behaviour differences are few, and each is pinned by a test.</p>
+    <ul>
+      <li>Unrecognised plugins, subclasses with methods of their own, <code>new Parser(...)</code> and a patched <code>Parser.prototype</code> need <code>import "@r1ck404/fast-acorn/full"</code> outside Node, as above.</li>
+      <li><code>Parser.prototype</code> has no methods of its own. It inherits acorn's from a prototype that receives them on first use.</li>
+      <li>The token types' behaviour is built in. Replacing <code>tokTypes.x.updateContext</code> or a token context's <code>override</code> only affects parses that run acorn's own code.</li>
+      <li><code>tokenizer()</code> returns an object with acorn's token API and state, and it is an <code>instanceof Parser</code>, but it is not a whole parser: no scope stack, labels or parse methods.</li>
+      <li>Nesting too deep for the stack throws acorn's "Not enough stack space to parse input" in both, at a different depth.</li>
+      <li>Error stack traces show this package's functions.</li>
+    </ul>
+  </div>
+
+  <h2 id="results" style="margin-top: 56px">Recorded results</h2>
+  <p class="section-lede" style="margin-bottom: 20px">Measured on a Ryzen 7 7800X3D with Node 24.16, one call per row: acorn's time, fast-acorn's time, and the ratio. Best of three rounds in fresh processes.</p>
+  {{results:acorn}}
+</div>

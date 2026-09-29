@@ -1,0 +1,110 @@
+<!--{"title":"How we check: verification, benchmarks, size and dead ends","description":"How the fast-* packages are shown to return identical results, how the benchmarks are run, what they cost in size, and the ideas that did not work."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>How we check</h1>
+    <p class="lede">A replacement is only worth installing if it gives the same answers and its speedup is real. This page shows how both are established, what it costs in size, and what was tried and dropped.</p>
+    <ul class="facts">
+      <li><strong>2 million+</strong>comparisons against the originals</li>
+      <li><strong>41 of 41</strong>planted bugs caught in noble-hashes</li>
+      <li><strong>0</strong>failures in the last full run</li>
+    </ul>
+  </header>
+
+  <div class="prose">
+    <h2 id="verification" style="margin-top: 0">Proving the results are identical</h2>
+    <p>Every package is tested the same way. The original is installed next to the replacement, both receive the same input, and everything observable is compared: return values, byte for byte; thrown errors, including their class, message and position; callbacks; and for stateful objects, the state after every call. The inputs are mostly real code, such as tens of thousands of files from <code>node_modules</code> and from a large project's pnpm store, plus fuzzed and deliberately malformed variants and, for some packages, the original project's own test inputs.</p>
+    <p>The tests for each package are listed in its README. The counts below are from the last full run, and all of them passed with no mismatches.</p>
+  </div>
+
+  <div class="table-wrap" style="margin-top: 20px">
+    <table class="compare">
+      <thead><tr><th scope="col">Package</th><th scope="col">What is compared</th><th scope="col">Volume</th></tr></thead>
+      <tbody>
+        <tr><td><a href="../pako/">fast-pako</a></td><td>Levels, strategies, memory levels, window sizes, chunk sizes, dictionaries, gzip headers, multi-member and truncated streams, string output, corruption fuzzing, streaming with flush modes, odd option and input types</td><td>7,864 equivalence checks, 28,731 fuzz checks over two seeds, 15,457 unusual-value checks, 2,356 on real files and tarballs</td></tr>
+        <tr><td><a href="../acorn/">fast-acorn</a></td><td>ASTs (keys, key order, values, shared objects), errors (class, message, position, location), callbacks, JSX, subclasses, every <code>ecmaVersion</code> and option</td><td>93,841 parses and 8,849 errors over 14,670 files, 309,982 checks across versions and options, 274,791 error cases, 124,645 JSX checks</td></tr>
+        <tr><td><a href="../esbuild/">fast-esbuild-wasm</a></td><td>Code, source maps, warnings and errors of transforms; CSS; builds with plugins and with a real file system; the resolver; messages at every log level; the Node API and command line</td><td>126,258 JS and TS outputs over 3,944 files and 57 option sets, 94,144 CSS outputs, 73,724 resolves, about 2,000 builds</td></tr>
+        <tr><td><a href="../es-module-lexer/">fast-es-module-lexer</a></td><td>Imports and exports found, and errors, in four ways of copying the source into memory, in Node, Chromium, Firefox and WebKit</td><td>158,904 inputs per copy mode, 125,504 edge cases (100,000 fuzzed), 4,424 per browser</td></tr>
+        <tr><td><a href="../brotli/">fast-brotli-wasm</a></td><td>Compressed bytes at every quality from 0 to 11, decompression of native, generated and fuzzed streams including their errors, options parsing and its panics</td><td>23,008 compressions, 290,446 decoder checks, 25,655 options checks</td></tr>
+        <tr><td><a href="../noble-hashes/">fast-noble-hashes</a></td><td>Digests and every field of every hash instance after every call, errors, HMAC, HKDF, PBKDF2 and scrypt with progress callbacks, subclasses, tampered instances</td><td>113,334 per module format and 113,120 on a second seed, 597 per browser on the main thread and in a worker</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="prose">
+    <h3>Checks written separately</h3>
+    <p>A second set of tests, in the repository's <code>verify/</code> folder, was written apart from the package suites. It calls each package the way a real application does, using <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>'s calls: its content packing for pako, its exact <code>topLevelParser</code> for acorn, lockfile integrity hashes of real npm tarballs for noble-hashes, and the public <code>transform()</code> API for esbuild. It found no differences either, across 37,913 pako, 54,816 acorn, 40,041 lexer, 7,906 Brotli, 17,308 hash and 8,075 esbuild checks. Every browser build was also run in headless Chromium, and the packed tarballs were installed under the original names and used from Node and from a bundler.</p>
+    <h3>Testing the tests</h3>
+    <p>A passing suite proves little if it could not fail. For fast-noble-hashes the suite is mutation tested: 41 deliberate bugs are planted in the glue, the patched files and the WebAssembly, and the suite has to catch every one. It does.</p>
+    <h3>What is not identical</h3>
+    <p>There are differences, and each package's README lists them. They are mostly places where the original loops forever, corrupts data or reads memory it does not own, and the replacement throws a clear error or gives a stable answer instead. Each one is pinned by a test, so it cannot change unnoticed.</p>
+  </div>
+
+  <div class="prose">
+    <h2 id="benchmarks">How the timings are taken</h2>
+    <p>The tables on each package's page come from the repository's benchmark suites. They run on a Ryzen 7 7800X3D with Node 24.16 and Chromium 149. The two implementations alternate in fresh processes, so neither inherits the other's warmed-up JIT state or heap, and each row keeps the best of three rounds. Alternating means a background task or a change in CPU frequency hits both sides alike.</p>
+    <p>The live comparisons on this site work a little differently, because they run in your tab: both libraries take turns in short batches in the same page, each is warmed up first, and each keeps its best batch. That is quicker and shows real numbers on your hardware, but it is less controlled, so treat the recorded tables as the reference and the live numbers as a check that they hold up on your machine.</p>
+    <p>One caveat sits in the esbuild results. In Node, esbuild-wasm waits for the operating system's timer, which is 15.6 ms on Windows, on every call. That inflates the speedup on small inputs, which is why the browser tables are the fairer comparison and why native esbuild is listed next to the Node numbers.</p>
+  </div>
+
+  <h2 id="startup" style="margin-top: 56px">Start-up</h2>
+  <div class="prose"><p>Most of the packages start about as fast as the originals. pako and Brotli start faster; each hash family builds and compiles its WebAssembly at first use, so noble-hashes' first call is slower, and that cost is paid back after a few kilobytes of input.</p></div>
+  {{results:startup}}
+  <p class="table-note">The first <code>sha256()</code> call builds and compiles its WebAssembly, about 1 ms.</p>
+
+  <h2 id="size" style="margin-top: 56px">Size</h2>
+  <div class="prose"><p>Speed is not free in bytes, and the results are mixed. The tarballs that npm downloads are almost all smaller, because none of them carries a copy of the original. In a browser bundle, the packages whose fast path is compiled WebAssembly are larger after compression, because wasm compresses worse than JavaScript.</p></div>
+  {{results:size}}
+  <div class="prose" style="margin-top: 24px">
+    <p>Where a fast package is still larger, it is the fast engine itself: compiled wasm compresses worse than the original's JavaScript (pako's zlib, the SIMD lexer), and the per-family glue outweighs noble's tiny SHA-256 function. Shrinking these further cost more speed than the rules allow, which are that every call stays faster than the original and none becomes more than 10% slower than the previous version.</p>
+  </div>
+
+  <div class="prose">
+    <h2 id="dead-ends">Dead ends</h2>
+    <p>Things tried that did not pay off are kept in the repository so nobody repeats them. Here they are, grouped by package.</p>
+
+    <h3>pako</h3>
+    <ul>
+      <li>Deflate at levels 6 to 9 is bounded by zlib's match finder, which must visit the same candidates for the output to be identical: about 2x at level 6, 1.7 to 2x at level 9, which is native zlib speed.</li>
+      <li>For inflate, these were all slower or no better: fused length entries (10 to 17% slower), decoding 4 or 5 literals per refill, 9 or 10-bit distance tables and 10 or 12-bit literal tables, and <code>wasm-opt -O4</code>.</li>
+      <li>For size, compiling the core for size cost 1.7 KB but made deflate 13 to 43% slower, and inflating the embedded module with pako's own JavaScript took 4.6 to 6 ms cold. The compressed wasm alone is 21 KB, larger than pako's gzipped JavaScript, so the bundle stays about twice pako's gzip size.</li>
+    </ul>
+
+    <h3>acorn</h3>
+    <ul>
+      <li>Lazily created token start positions, interning identifiers, and object literals for AST nodes (node creation was 4x slower) did nothing or made it worse.</li>
+      <li>Shipping several files (import time 7.5 to 8.9 ms) or an unminified bundle (about 6.0 ms) instead of one minified file was slower to import. esbuild's bundler converts to <code>var</code>, which costs 5 to 10% on large parses, so the package is bundled with Rollup. Reusing the parse state made parsing 4 to 16% slower.</li>
+      <li>The gzip and brotli sizes stay about 20% above acorn's, although the minified size is below it, because the fast machinery compresses less well. The cost of <code>locations</code> is dominated by garbage collecting the position objects that the AST has to contain.</li>
+    </ul>
+
+    <h3>esbuild</h3>
+    <ul>
+      <li>From when the package still shipped esbuild's Go binary: tuning Go's garbage collector (1.3x on big inputs, but it grows wasm memory that never shrinks), <code>wasm-opt -O2</code> on the Go binary (no speed gain, 3.4% smaller), and a TinyGo build, which builds but whose runtime cannot run esbuild's asynchronous stdin loop.</li>
+      <li>Object literals for AST nodes and interning identifier strings gave no gain. The eventual answer was to remove the Go binary altogether.</li>
+    </ul>
+
+    <h3>es-module-lexer</h3>
+    <ul>
+      <li>A JavaScript <code>charCodeAt</code> copy of the source (about 2.5 ns per character) and <code>btoa</code> plus <code>setFromBase64</code> (about 1 ns per character) both lost to the copy paths now used. Relaxed-SIMD swizzle would add 3 to 12%, but would need a second module for engines without it.</li>
+      <li>V8's baseline code for the builtins copy loop is slow, so the first million characters use <code>intoCharCodeArray</code> instead.</li>
+      <li>For size, compiling at <code>opt-level z</code> saved 0.2 KB gzipped and was up to 13% slower, and dropping the Chromium copy module saved 0.5 KB but was 37 to 135% slower in Chromium. A wasm small enough to match the original's 6.5 KB bundle would mean giving up SIMD.</li>
+    </ul>
+
+    <h3>brotli</h3>
+    <ul>
+      <li>A native x86 build of the same encoder is no faster than the wasm, so what is left is the algorithm. Reordering relaxations across queue entries would be faster but can change tie-breaks, and so the output.</li>
+      <li>Probing out of line, 16-byte queue entries, dictionary prefix tables and prefetching gave no gain.</li>
+    </ul>
+
+    <h3>noble-hashes</h3>
+    <ul>
+      <li>A precomputed message schedule for SHA-256 was about 30% slower than keeping it in locals. Reusing the previous round's <code>a ^ b</code> in <code>Maj</code> gave 5% on SHA-256 and nothing on SHA-512, and <code>wasm-opt -O3</code> changed nothing.</li>
+      <li>SHA-256 stays near 1.5x: scalar SHA-256 in wasm against a JIT that already does 32-bit rotates well. The <code>create()</code> path is floored by noble's constructor, about 270 ns in Node, mostly the ArrayBuffer behind its buffer. Pooling those buffers would be faster but would let instances share memory.</li>
+      <li>Rolled SHA-2 rounds ran at 0.79 to 0.97x of the speed, so the kernels ship as templates that are expanded to unrolled code at first use. A lone <code>sha256</code> import stays above noble's size: noble's JavaScript SHA-256 is about 0.6 KB brotli-compressed, and the glue alone is about 1.9 KB.</li>
+    </ul>
+
+    <h3>A bug worth remembering</h3>
+    <ul>
+      <li>Bundlers drop calls annotated <code>/* @__PURE__ */</code> whose result is unused. fast-noble-hashes' wasm start-up was exactly such a call, so every bundled build silently ran noble's JavaScript. It is fixed, and noble, es-module-lexer and acorn now have bundle tests that would catch it.</li>
+    </ul>
+  </div>
+</div>

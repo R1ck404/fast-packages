@@ -1,0 +1,24 @@
+/* fast-esbuild-wasm page */
+
+.loadbox { margin-bottom: 22px; }
+.loadbox .meter { margin: 0 0 12px; }
+.meter-row .track.empty .fill { background: repeating-linear-gradient(115deg, var(--paper-3) 0 10px, var(--paper-2) 10px 20px); }
+.meter-row small { display: block; font-size: 12.5px; color: var(--ink-3); font-weight: 500; }
+
+.gate { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.gate .note-line { margin: 0; }
+
+.layer.gone { background: none; border-style: dashed; border-color: var(--orig); }
+.layer.gone b, .layer.gone span { color: var(--ink-3); }
+.key .k-gone { background: none; border-style: dashed; border-color: var(--orig); }
+
+.lab-body .tabs { margin-bottom: 2px; }
+.sweep-x.slower { color: var(--warn); }
+.sweep-row .nm.wide { white-space: nowrap; }
+.sweep-note { font-size: 13px; color: var(--ink-3); margin: 6px 0 0; }
+#sweep-out .sweep-row { grid-template-columns: 96px 1fr 90px; }
+.panes pre.err { color: #ffb4ab; }
+
+@media (max-width: 480px) {
+  #sweep-out .sweep-row { grid-template-columns: 72px 1fr 68px; gap: 8px; }
+}

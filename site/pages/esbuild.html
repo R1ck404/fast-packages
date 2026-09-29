@@ -1,0 +1,198 @@
+<!--{"title":"fast-esbuild-wasm: esbuild ported to JavaScript","description":"A drop-in replacement for esbuild-wasm 0.28.2 with no Go binary and no WebAssembly. It transforms 3-6x faster in the browser and returns the same bytes. Try it against esbuild-wasm in your browser."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>fast-esbuild-wasm</h1>
+    <p class="lede">All of esbuild, ported from Go to JavaScript. There is no Go binary and no WebAssembly to download, and it returns the same code, source maps, messages and errors as esbuild-wasm.</p>
+    <p class="swap"><code>"esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@{{fastversion:esbuild}}"</code> in your package.json is the whole migration.</p>
+    <ul class="facts">
+      <li><strong>3-6x</strong>transform, in Chromium</li>
+      <li><strong>2.4-3.2x</strong>build() with a plugin file system</li>
+      <li><strong>14 MB to 2.2 MB</strong>browser bundle, minified</li>
+      <li><strong>126,258</strong>JS and TS outputs compared byte for byte</li>
+    </ul>
+  </header>
+
+  <section class="lab" id="try" aria-labelledby="try-h">
+    <div class="lab-bar"><h2 id="try-h">Transform the same code in both</h2></div>
+    <div class="lab-body">
+      <div class="loadbox">
+        <div class="meter" id="loads" aria-label="What each build downloads"></div>
+        <div class="gate" id="gate-try"></div>
+      </div>
+      <div class="controls">
+        <label class="field"><span>Input</span>
+          <select id="sample"></select>
+        </label>
+        <label class="field"><span>Loader</span>
+          <select id="loader">
+            <option value="ts">ts</option>
+            <option value="tsx">tsx</option>
+            <option value="jsx">jsx</option>
+            <option value="js">js</option>
+            <option value="css">css</option>
+            <option value="json">json</option>
+          </select>
+        </label>
+        <label class="field"><span>Target</span>
+          <select id="target">
+            <option value="esnext">esnext</option>
+            <option value="es2022">es2022</option>
+            <option value="es2019">es2019</option>
+            <option value="es2017">es2017</option>
+            <option value="es2015">es2015</option>
+          </select>
+        </label>
+        <label class="field"><span>Format</span>
+          <select id="format">
+            <option value="">keep as written</option>
+            <option value="esm">esm</option>
+            <option value="cjs">cjs</option>
+            <option value="iife">iife</option>
+          </select>
+        </label>
+        <label class="field check-field"><input type="checkbox" id="minify"><span>Minify</span></label>
+        <label class="field check-field"><input type="checkbox" id="sourcemap"><span>Source map</span></label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="file" aria-label="Use your own file"></label>
+        <button class="btn" id="run" type="button">Run</button>
+      </div>
+      <label class="field" for="src"><span>Source (edit it, and both sides run again)</span>
+        <textarea id="src" rows="12" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      </label>
+      <p class="note-line" id="src-note"></p>
+      <div id="lanes" style="margin-top: 20px"></div>
+      <div class="panes">
+        <div class="pane"><h4 id="out-o-h">esbuild-wasm output</h4><pre id="out-o" tabindex="0" aria-labelledby="out-o-h"></pre></div>
+        <div class="pane"><h4 id="out-f-h">fast-esbuild-wasm output</h4><pre id="out-f" tabindex="0" aria-labelledby="out-f-h"></pre></div>
+      </div>
+      <p class="note-line" id="info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Both builds run in this tab in their default worker mode, which is how esbuild-wasm runs in a page, so every timing includes the trip to a worker and back for anything the worker handles. The two alternate in short batches after a warm-up, and each keeps its best batch. The page timer resolves about 0.1 ms, which is why fast calls are timed in batches. The outputs are compared as whole result objects: code, source map, warnings and, for a failed call, the error and its messages. Live numbers depend on your machine and browser, and will differ from the recorded tables at the bottom. Files you choose stay in your browser. The page minifies fast-esbuild-wasm the way an app bundle would, which is the 2.17 MB shown. esbuild-wasm is loaded as published, in its own minified browser build.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Why a Go binary is heavy in a browser</h2>
+    <p>esbuild is a Go program. esbuild-wasm is that program compiled to WebAssembly, and a page that wants to use it has to bring all of it: <code>esbuild.wasm</code>, which is 14 MB with the JavaScript around it and 2.7 MB after brotli, a copy of Go's <code>wasm_exec</code> glue that lets the Go runtime call into the browser, and a worker to run it in. <code>initialize()</code> fetches and compiles the wasm and starts the Go program. From then on, every <code>transform()</code> turns its options into flags, encodes the input to UTF-8, sends both to Go as a packet, and decodes the reply.</p>
+    <p>That is a fair price for a build tool that starts once. It hurts when a tool runs esbuild in a browser tab, such as a code playground or an in-browser runtime like <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>, over many small files. A cold <code>initialize()</code> plus the first <code>transform()</code> takes 152 ms with esbuild-wasm and 56 ms with fast-esbuild-wasm (Chromium, medians of fresh processes). Go's own runtime and garbage collector also live inside the wasm memory. Earlier versions of this package still shipped the Go binary and tried to tune it: a garbage collector setting made big inputs 1.3x faster but grew memory that never shrinks, and a wasm optimizer made it smaller but not faster. <a href="../method/#dead-ends">The attempts are written down</a>.</p>
+    <h2>Why JavaScript can win here</h2>
+    <p>The port is not faster because JavaScript is a faster language than Go. It is faster in a browser because it removes what surrounds the work: the 14 MB download and compile, the start of Go's runtime, and the encoding of every input into bytes for another runtime to read. The compiler, parser and printer become ordinary JavaScript that the browser's engine compiles and optimizes like any other code, with strings that stay JavaScript strings.</p>
+    <p>The gain has a shape, and the demos on this page show it. It is largest on small inputs, where the fixed costs dominate: 4 to 6x for inputs up to about 50 KB, and 10x for a 1.6 KB Vite <code>renderChunk</code>. It shrinks to about 3x on megabyte inputs, where the time is the compiler's own work. And it costs more for input nested so deeply that the port needs its slower mode.</p>
+  </div>
+
+  <h2 style="margin-top: 56px">What runs where</h2>
+  <div class="layers">
+    <div class="layer you"><b>Your code</b><span><code>esbuild.transform(code, { loader: "tsx" })</code>, <code>esbuild.build({ plugins })</code>, exactly as before.</span></div>
+    <div class="layer kept"><b>esbuild-wasm's JavaScript</b><span>The package's own browser code, with a few mechanical patches: option validation, flag generation, error objects, result shaping and the plugin protocol.</span></div>
+    <div class="layer new"><b>Transform shortcut</b><span>Answers a <code>transform</code> request with the response packet the service would send. Runs in the page for inputs up to 64 KB, in the engine's own worker above that.</span></div>
+    <div class="layer new"><b>Service</b><span>A port of esbuild's <code>cmd/esbuild/service.go</code>. It reads the packets the glue writes and answers in the same format. Builds, contexts and <code>formatMessages</code> go here, in the page.</span></div>
+    <div class="layer new"><b>Engine in JavaScript</b><span>esbuild 0.28.2 translated function by function, about 100,000 lines: lexer, parser, printer, renamer, CSS, bundler, linker, resolver and the parts of Go's standard library whose behaviour shows.</span></div>
+    <div class="layer gone"><b>Removed</b><span><code>esbuild.wasm</code>, Go's runtime, the <code>wasm_exec</code> glue and the worker that ran them.</span></div>
+  </div>
+  <p class="key"><span><i class="k-kept"></i>esbuild-wasm's own code</span><span><i class="k-new"></i>new machinery</span><span><i class="k-gone"></i>no longer shipped</span></p>
+
+  <div class="prose">
+    <h2>How it stays identical</h2>
+    <p>Two decisions do most of the work. The first is to keep esbuild-wasm's own JavaScript as it is. Option validation, flag generation, error objects and the plugin protocol are esbuild's code, so a wrong option throws the same error and a plugin sees the same arguments. The patches are few: <code>initialize()</code> starts the in-page service instead of loading the Go binary, <code>transform()</code> asks the shortcut first, and in Node the default working directory is the process's. Every patch has to match the upstream text exactly once, or the package does not build.</p>
+    <p>The second is to keep the protocol. What esbuild's JavaScript writes to Go's stdin goes to the port of the service, in the same packets, and the answers come back the same way. That is why <code>initialize()</code> still checks <code>wasmURL</code>, <code>wasmModule</code> and <code>worker</code> and raises the same errors, and then ignores the binary. Any URL is accepted, because nothing is fetched.</p>
+    <h2>A translation, not a rewrite</h2>
+    <p>The engine follows a written rule set, <code>CONVENTIONS.md</code>: translate function by function, do not improve or simplify esbuild's logic, do not reorder conditions, do not merge functions. Names are derived mechanically so files ported in parallel agree: Go's <code>ASCIIOnly</code> becomes <code>asciiOnly</code>, methods on enum types become functions such as <code>opCodeIsPrefix(op)</code>, and constants keep their exact Go names, <code>BinOpAdd</code> stays <code>BinOpAdd</code>.</p>
+    <p>Most of the care goes into where Go and JavaScript disagree. Go copies a struct on assignment and JavaScript shares it, so the port clones wherever Go copies and then mutates. Go works on UTF-8 bytes and JavaScript on UTF-16 strings, so every location is a UTF-16 offset and message columns are converted back to Go's byte columns. Bytes that are not valid UTF-8 travel as lone surrogates, so they survive to the output unchanged. And the port follows esbuild-wasm, which is Go on <code>js/wasm</code>, not native esbuild. Go converts <code>NaN</code> to an integer as 0 on wasm and as the minimum integer on amd64, so <code>1 >>> NaN</code> folds under <code>minifySyntax</code> in esbuild-wasm and in the port, but not in native esbuild.</p>
+  </div>
+
+  <section class="lab" id="build" aria-labelledby="build-h" style="margin-top: 40px">
+    <div class="lab-bar"><h2 id="build-h">Bundle a project that lives in memory</h2></div>
+    <div class="lab-body">
+      <div class="gate" id="gate-build" style="margin-bottom: 18px"></div>
+      <div class="controls">
+        <label class="field"><span>Project</span>
+          <select id="proj">
+            <option value="small">Small project, 5 files (editable)</option>
+            <option value="gen100">Generated, 100 TypeScript modules</option>
+            <option value="gen400">Generated, 400 TypeScript modules</option>
+          </select>
+        </label>
+        <label class="field"><span>Format</span>
+          <select id="b-format">
+            <option value="esm">esm</option>
+            <option value="cjs">cjs</option>
+            <option value="iife">iife</option>
+          </select>
+        </label>
+        <label class="field check-field"><input type="checkbox" id="b-minify"><span>Minify</span></label>
+        <label class="field check-field"><input type="checkbox" id="b-map"><span>Source map</span></label>
+        <label class="field check-field"><input type="checkbox" id="b-broken"><span>Add an import that does not exist</span></label>
+        <button class="btn" id="b-run" type="button">Run</button>
+      </div>
+      <div id="editor">
+        <ul class="tabs" id="files" aria-label="Project files"></ul>
+        <label class="field" for="file-src" style="margin-top: 8px"><span id="file-name">File</span>
+          <textarea id="file-src" rows="9" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+        </label>
+      </div>
+      <p class="note-line" id="b-note"></p>
+      <div id="b-lanes" style="margin-top: 20px"></div>
+      <div class="panes">
+        <div class="pane"><h4 id="b-o-h">esbuild-wasm output</h4><pre id="b-out-o" tabindex="0" aria-labelledby="b-o-h"></pre></div>
+        <div class="pane"><h4 id="b-f-h">fast-esbuild-wasm output</h4><pre id="b-out-f" tabindex="0" aria-labelledby="b-f-h"></pre></div>
+      </div>
+      <p class="note-line" id="b-info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> A browser has no file system, so a plugin answers <code>onResolve</code> and <code>onLoad</code> from an object in memory, and both builds get the same plugin code. Every build also asks for a metafile, and the comparison covers each output file's path, text and hash, the metafile, and the messages. The plugin callbacks are counted: both sides should make the same calls.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <h2 style="margin-top: 0">Where the speed comes from</h2>
+    <p>Being a port of the same algorithm sets the ceiling. What sets the floor is how the port starts, where it runs, and what it avoids doing twice.</p>
+    <ul>
+      <li><strong>It is compiled while the script loads.</strong> The engine is wrapped in a parenthesized function, which V8 compiles right away. A function without them would be pre-parsed at load and parsed again on the first call, about 20 ms according to the build's comment. In the builds that are not minified the engine is also compacted, keeping its function and class names for stack traces.</li>
+      <li><strong>esbuild's runtime helpers are not parsed at run time.</strong> Helpers such as <code>__toCommonJS</code> are code that esbuild parses on first use. The build bakes in a snapshot of their syntax tree, and the tests check it against a fresh parse. It covers target <code>esnext</code> without <code>minifySyntax</code> or <code>minifyIdentifiers</code>. Other options parse the runtime on their first use.</li>
+      <li><strong>The engine warms up before you ask.</strong> The engine's worker starts in a task right after <code>initialize()</code> and runs a few representative transforms. <code>initialize()</code> itself resolves in under 1 ms.</li>
+      <li><strong>Small inputs stay in the page.</strong> A round trip to a worker costs about 50 µs plus 2 µs per KB in Chromium: 40% of a 1.6 KB transform and 7% of an 80 KB one. So inputs up to 64 KB run in the page, once its copy of the engine has warmed up in idle time. A 64 KB transform keeps the page busy for about 2.5 ms at most. Larger inputs go to the worker, and the page stays responsive.</li>
+      <li><strong>Repeated work is cached, and the caches are tested.</strong> The printed code of the runtime helpers, several linker steps that depend only on the runtime, and the reserved names its scope contributes are reused when nothing they depend on has changed. A test hook re-computes every cache hit and fails on a mismatch.</li>
+      <li><strong>Small things add up.</strong> The printer writes into a growable UTF-8 buffer and decodes it once per part. Functions that return several values are read by index instead of by array destructuring. Binary-expression visitors are pooled, and a symbol lookup reuses its result object.</li>
+    </ul>
+    <p>The next panel races both builds on generated TypeScript from 1 KB to 1 MB, so you can see how the speedup moves with size, and times fast-esbuild-wasm on deeply nested input.</p>
+  </div>
+
+  <section class="lab" id="sweep" aria-labelledby="sweep-h" style="margin-top: 32px">
+    <div class="lab-bar">
+      <h3 id="sweep-h">Input size and nesting depth</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="size-run" type="button" disabled>Run the sizes</button>
+      <button class="btn quiet" id="depth-run" type="button" disabled>Run the nesting depths</button>
+    </div>
+    <div class="lab-body">
+      <div class="gate" id="gate-sweep" style="margin-bottom: 16px"></div>
+      <div id="sweep-out" class="sweep"><p class="note-line" style="margin:0">Each row transforms the same input with both builds. The sizes run generated TypeScript from 1 KB to 1 MB, and the depths run arrays nested that many levels. Both take a few seconds.</p></div>
+    </div>
+  </section>
+
+  <div class="beside">
+    <div class="prose">
+      <h2>Deep input is slower, and that is the price of not crashing</h2>
+      <p>Go grows its stack as a program needs it. A JavaScript thread's stack is small and fixed. The engine runs in the calling thread, so input nested more deeply than the stack allows, a few hundred to a few thousand levels depending on the construct, would overflow it. When that happens the engine runs the step again in deep mode: at build time every recursive function of the engine gets a generator copy that runs on an explicit stack, so depth is limited by memory instead.</p>
+      <p>Deep mode is 2 to 20 times slower than the normal code. It only runs for input that needs it, and the nesting rows in the panel above show it as a rise in the time per level. In exchange every construct the tests measure, from arrays and calls to JSX, TypeScript types and CSS rules, goes at least twice as deep as esbuild-wasm does in the calling thread (16,384 or more nested arrays against 6,016, for example, in the calling thread). Past the port's own limit, about 130,000 nested arrays, you get esbuild's panic message. esbuild-wasm fails with <code>Maximum call stack size exceeded</code> and its Go program exits.</p>
+    </div>
+    <aside><strong>Real code rarely goes here.</strong> The depths in this panel are a stress test, and ordinary source files nest far less. The cost only matters if your input looks like the nesting rows.</aside>
+  </div>
+
+  <div class="prose">
+    <h2>What is different</h2>
+    <p><code>initialize()</code> never loads a binary. A <code>wasmURL</code> that cannot be downloaded, or a <code>wasmModule</code> that is not esbuild's, does not make it reject. It still validates the options and raises esbuild-wasm's errors for bad ones. The package holds one WebAssembly module of 549 bytes, which hashes output files of 256 bytes and more; without WebAssembly the same hash is computed in JavaScript.</p>
+    <p>In worker mode, esbuild-wasm runs everything in its worker. Here transforms run in the engine's worker or, when small, in the page, and builds run in the page: they are asynchronous, but their work happens on the page's thread. A large build can hold the page for its whole duration, in exchange for taking 2.4 to 3.2x less time.</p>
+    <p>A few corners differ on purpose. A build input that ends in a truncated UTF-8 sequence, with a source map requested, makes esbuild hang in Go's <code>QuoteForJSON</code>; the port reports a panic instead. Panic messages show the JavaScript stack where Go shows its goroutine trace. A genuine lone surrogate between U+DC80 and U+DCFF in a string value is printed as the raw byte, because that is how the port carries invalid UTF-8. The hidden <code>--timing</code> flag lists chunks in chunk order. Where <code>worker_threads</code> is missing, <code>buildSync()</code> runs the package's own <code>bin/esbuild</code> as a child process.</p>
+    <p>On size, the browser bundle drops from 14.05 MB to 2.17 MB minified, and from 2.72 MB to 0.40 MB with brotli. The npm tarball shrinks less: 2.73 MB against 3.86 MB, and the unpacked package is 12.36 MB against 14.53 MB, because it ships four copies of the browser build (<code>lib/</code> and <code>esm/</code>, plain and minified) and the Node build.</p>
+  </div>
+
+  <div class="prose">
+    <h2>What has been checked</h2>
+    <p>Every comparison is against esbuild-wasm 0.28.2, or against native esbuild 0.28.2 where the two agree. The last full run found 0 differences in: 126,258 JavaScript and TypeScript transform outputs over 3,944 files and 57 option sets (code, source map, warnings and errors); 94,144 CSS outputs; 852 plus 1,155 builds with a plugin file system and with the real one; 73,724 resolver results; and messages under 12 log settings. A separate check written independently, calling the public <code>transform()</code> API the way an application does, compared 8,075 outputs. The browser builds run in Chromium, Firefox and WebKit next to esbuild-wasm, and a test fails if any file of the published package is a Go binary or needs one.</p>
+    <p>That is a lot of agreement, and it is still a sample. If the two ever return different bytes for the same call, the port is wrong, not esbuild-wasm. The package counts the transforms its shortcut passed on to the service because the engine threw, either a Go panic that esbuild would report too or a bug in the port, and asks you to report those.</p>
+  </div>
+
+  <h2 id="results" style="margin-top: 56px">Recorded results</h2>
+  <p class="section-lede" style="margin-bottom: 20px">Measured on a Ryzen 7 7800X3D with Chromium 149 and Node 24.16, one call per row: esbuild-wasm's time, fast-esbuild-wasm's time, and the ratio. The implementations alternate in fresh processes and each row keeps the best of three rounds. There are three tables. The first is the browser build in Chromium in worker mode. The second is the calls Vite makes, also in Chromium. The third is Node, with native esbuild for reference.</p>
+  <div class="prose">
+    <p>Read the Node table with care. In Node, esbuild-wasm waits for the operating system's timer, 15.6 ms on Windows, on every call. That inflates the speedup on small inputs: the 24x on twenty small components comes from a 15.4 ms call that is close to one such wait. The browser tables are the fairer comparison. Native esbuild is a different animal, not something a browser can run, but it is a useful yardstick: it is still faster on three of the five Node rows, and fast-esbuild-wasm takes 9% to 42% longer than it there. On the other two, the small <code>.tsx</code> input and <code>vite:define</code>, fast-esbuild-wasm is ahead of native esbuild.</p>
+  </div>
+  {{results:esbuild}}
+</div>
