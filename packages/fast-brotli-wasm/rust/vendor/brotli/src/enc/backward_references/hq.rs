@@ -2455,6 +2455,8 @@ mod fast_tests {
 pub fn FastBenchFindAllMatches(input: &[u8]) -> u64 {
     use super::hash_to_binary_tree::InitializeH10;
     use enc::StandardAlloc;
+    // (no encoder state here: the dictionary tables are built explicitly)
+    ::enc::fast_tables::init();
     let mut params = BrotliEncoderParams::default();
     params.quality = 11;
     let n = input.len();

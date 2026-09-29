@@ -5,93 +5,11 @@
 import { pbkdf2 } from "./pbkdf2.js";
 import { sha256 } from "./sha2.js";
 // prettier-ignore
-import { anumber, asyncLoop, checkOpts, clean, rotl, swap32IfBE, u32 } from "./utils.js";
-// fast-noble-hashes: ROMix in a wasm instance of its own
-import { fastScrypt, fastScryptRun, fastScryptRunAsync } from "./_fast.js";
-const EMPTY = /* @__PURE__ */ new Uint32Array(0);
-// The main Scrypt loop: uses Salsa extensively.
-// Six versions of the function were tried, this is the fastest one.
-// prettier-ignore
-function XorAndSalsa(prev, pi, input, ii, out, oi) {
-    // Based on https://cr.yp.to/salsa20.html
-    // Xor blocks
-    let y00 = prev[pi++] ^ input[ii++], y01 = prev[pi++] ^ input[ii++];
-    let y02 = prev[pi++] ^ input[ii++], y03 = prev[pi++] ^ input[ii++];
-    let y04 = prev[pi++] ^ input[ii++], y05 = prev[pi++] ^ input[ii++];
-    let y06 = prev[pi++] ^ input[ii++], y07 = prev[pi++] ^ input[ii++];
-    let y08 = prev[pi++] ^ input[ii++], y09 = prev[pi++] ^ input[ii++];
-    let y10 = prev[pi++] ^ input[ii++], y11 = prev[pi++] ^ input[ii++];
-    let y12 = prev[pi++] ^ input[ii++], y13 = prev[pi++] ^ input[ii++];
-    let y14 = prev[pi++] ^ input[ii++], y15 = prev[pi++] ^ input[ii++];
-    // Save state to temporary variables (salsa)
-    let x00 = y00, x01 = y01, x02 = y02, x03 = y03, x04 = y04, x05 = y05, x06 = y06, x07 = y07, x08 = y08, x09 = y09, x10 = y10, x11 = y11, x12 = y12, x13 = y13, x14 = y14, x15 = y15;
-    // Main loop (salsa)
-    for (let i = 0; i < 8; i += 2) {
-        x04 ^= rotl(x00 + x12 | 0, 7);
-        x08 ^= rotl(x04 + x00 | 0, 9);
-        x12 ^= rotl(x08 + x04 | 0, 13);
-        x00 ^= rotl(x12 + x08 | 0, 18);
-        x09 ^= rotl(x05 + x01 | 0, 7);
-        x13 ^= rotl(x09 + x05 | 0, 9);
-        x01 ^= rotl(x13 + x09 | 0, 13);
-        x05 ^= rotl(x01 + x13 | 0, 18);
-        x14 ^= rotl(x10 + x06 | 0, 7);
-        x02 ^= rotl(x14 + x10 | 0, 9);
-        x06 ^= rotl(x02 + x14 | 0, 13);
-        x10 ^= rotl(x06 + x02 | 0, 18);
-        x03 ^= rotl(x15 + x11 | 0, 7);
-        x07 ^= rotl(x03 + x15 | 0, 9);
-        x11 ^= rotl(x07 + x03 | 0, 13);
-        x15 ^= rotl(x11 + x07 | 0, 18);
-        x01 ^= rotl(x00 + x03 | 0, 7);
-        x02 ^= rotl(x01 + x00 | 0, 9);
-        x03 ^= rotl(x02 + x01 | 0, 13);
-        x00 ^= rotl(x03 + x02 | 0, 18);
-        x06 ^= rotl(x05 + x04 | 0, 7);
-        x07 ^= rotl(x06 + x05 | 0, 9);
-        x04 ^= rotl(x07 + x06 | 0, 13);
-        x05 ^= rotl(x04 + x07 | 0, 18);
-        x11 ^= rotl(x10 + x09 | 0, 7);
-        x08 ^= rotl(x11 + x10 | 0, 9);
-        x09 ^= rotl(x08 + x11 | 0, 13);
-        x10 ^= rotl(x09 + x08 | 0, 18);
-        x12 ^= rotl(x15 + x14 | 0, 7);
-        x13 ^= rotl(x12 + x15 | 0, 9);
-        x14 ^= rotl(x13 + x12 | 0, 13);
-        x15 ^= rotl(x14 + x13 | 0, 18);
-    }
-    // Write output (salsa)
-    out[oi++] = (y00 + x00) | 0;
-    out[oi++] = (y01 + x01) | 0;
-    out[oi++] = (y02 + x02) | 0;
-    out[oi++] = (y03 + x03) | 0;
-    out[oi++] = (y04 + x04) | 0;
-    out[oi++] = (y05 + x05) | 0;
-    out[oi++] = (y06 + x06) | 0;
-    out[oi++] = (y07 + x07) | 0;
-    out[oi++] = (y08 + x08) | 0;
-    out[oi++] = (y09 + x09) | 0;
-    out[oi++] = (y10 + x10) | 0;
-    out[oi++] = (y11 + x11) | 0;
-    out[oi++] = (y12 + x12) | 0;
-    out[oi++] = (y13 + x13) | 0;
-    out[oi++] = (y14 + x14) | 0;
-    out[oi++] = (y15 + x15) | 0;
-}
-function BlockMix(input, ii, out, oi, r) {
-    // The block B is r 128-byte chunks (which is equivalent of 2r 64-byte chunks)
-    let head = oi + 0;
-    let tail = oi + 16 * r;
-    for (let i = 0; i < 16; i++)
-        out[tail + i] = input[ii + (2 * r - 1) * 16 + i]; // X ← B[2r−1]
-    for (let i = 0; i < r; i++, head += 16, ii += 16) {
-        // We write odd & even Yi at same time. Even: 0bXXXXX0 Odd:  0bXXXXX1
-        XorAndSalsa(out, tail, input, ii, out, head); // head[i] = Salsa(blockIn[2*i] ^ tail[i-1])
-        if (i > 0)
-            tail += 16; // First iteration overwrites tmp value in tail
-        XorAndSalsa(out, head, input, (ii += 16), out, tail); // tail[i] = Salsa(blockIn[2*i+1] ^ head[i])
-    }
-}
+import { anumber, checkOpts, clean } from "./utils.js";
+// fast-noble-hashes: ROMix in wasm
+import { fastScrypt, fastScryptAsync, wasmFamily, WASM_SCRYPT } from "./_fast.js";
+const FAST_SCRYPT = /* @__PURE__ */ wasmFamily(WASM_SCRYPT);
+// fast-noble-hashes: XorAndSalsa and BlockMix are in the wasm
 // Common prologue and epilogue for sync/async functions
 function scryptInit(password, salt, _opts) {
     // Maxmem - 1GB+1KB by default
@@ -110,7 +28,6 @@ function scryptInit(password, salt, _opts) {
     if (onProgress !== undefined && typeof onProgress !== 'function')
         throw new Error('progressCb should be function');
     const blockSize = 128 * r;
-    const blockSize32 = blockSize / 4;
     // Max N is 2^32 (Integrify is 32-bit). Real limit is 2^22: JS engines Uint8Array limit is 4GB in 2024.
     // Spec check `N >= 2^(blockSize / 8)` is not done for compat with popular libs,
     // which used incorrect r: 1, p: 8. Also, the check seems to be a spec error:
@@ -132,29 +49,11 @@ function scryptInit(password, salt, _opts) {
     // [B0...Bp−1] ← PBKDF2HMAC-SHA256(Passphrase, Salt, 1, blockSize*ParallelizationFactor)
     // Since it has only one iteration there is no reason to use async variant
     const B = pbkdf2(sha256, password, salt, { c: 1, dkLen: blockSize * p });
-    const B32 = u32(B);
-    const F = r >= 1 && p >= 1 ? fastScrypt(r, N, p) : null;
-    // Re-used between parallel iterations. Array(iterations) of B
-    const V = F ? EMPTY : u32(new Uint8Array(blockSize * N));
-    const tmp = F ? EMPTY : u32(new Uint8Array(blockSize));
-    let blockMixCb = () => { };
-    if (onProgress) {
-        const totalBlockMix = 2 * N * p;
-        // Invoke callback if progress changes from 10.01 to 10.02
-        // Allows to draw smooth progress bar on up to 8K screen
-        const callbackPer = Math.max(Math.floor(totalBlockMix / 10000), 1);
-        let blockMixCnt = 0;
-        blockMixCb = () => {
-            blockMixCnt++;
-            if (onProgress && (!(blockMixCnt % callbackPer) || blockMixCnt === totalBlockMix))
-                onProgress(blockMixCnt / totalBlockMix);
-        };
-    }
-    return { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick, F, onProgress };
+    return { N, r, p, dkLen, B, onProgress, asyncTick };
 }
-function scryptOutput(password, dkLen, B, V, tmp) {
+function scryptOutput(password, dkLen, B) {
     const res = pbkdf2(sha256, password, B, { c: 1, dkLen });
-    clean(B, V, tmp);
+    clean(B);
     return res;
 }
 /**
@@ -174,33 +73,9 @@ function scryptOutput(password, dkLen, B, V, tmp) {
  * scrypt('password', 'salt', { N: 2**18, r: 8, p: 1, dkLen: 32 });
  */
 export function scrypt(password, salt, opts) {
-    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, F, onProgress } = scryptInit(password, salt, opts);
-    if (F) {
-        fastScryptRun(F, B, N, p, onProgress);
-        return scryptOutput(password, dkLen, B, V, tmp);
-    }
-    swap32IfBE(B32);
-    for (let pi = 0; pi < p; pi++) {
-        const Pi = blockSize32 * pi;
-        for (let i = 0; i < blockSize32; i++)
-            V[i] = B32[Pi + i]; // V[0] = B[i]
-        for (let i = 0, pos = 0; i < N - 1; i++) {
-            BlockMix(V, pos, V, (pos += blockSize32), r); // V[i] = BlockMix(V[i-1]);
-            blockMixCb();
-        }
-        BlockMix(V, (N - 1) * blockSize32, B32, Pi, r); // Process last element
-        blockMixCb();
-        for (let i = 0; i < N; i++) {
-            // First u32 of the last 64-byte block (u32 is LE)
-            const j = B32[Pi + blockSize32 - 16] % N; // j = Integrify(X) % iterations
-            for (let k = 0; k < blockSize32; k++)
-                tmp[k] = B32[Pi + k] ^ V[j * blockSize32 + k]; // tmp = B ^ V[j]
-            BlockMix(tmp, 0, B32, Pi, r); // B = BlockMix(B ^ V[j])
-            blockMixCb();
-        }
-    }
-    swap32IfBE(B32);
-    return scryptOutput(password, dkLen, B, V, tmp);
+    const { N, r, p, dkLen, B, onProgress } = scryptInit(password, salt, opts);
+    fastScrypt(FAST_SCRYPT, B, r, N, p, onProgress);
+    return scryptOutput(password, dkLen, B);
 }
 /**
  * Scrypt KDF from RFC 7914. Async version.
@@ -208,32 +83,7 @@ export function scrypt(password, salt, opts) {
  * await scryptAsync('password', 'salt', { N: 2**18, r: 8, p: 1, dkLen: 32 });
  */
 export async function scryptAsync(password, salt, opts) {
-    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick, F, onProgress } = scryptInit(password, salt, opts);
-    if (F) {
-        await fastScryptRunAsync(F, B, N, p, onProgress, asyncTick);
-        return scryptOutput(password, dkLen, B, V, tmp);
-    }
-    swap32IfBE(B32);
-    for (let pi = 0; pi < p; pi++) {
-        const Pi = blockSize32 * pi;
-        for (let i = 0; i < blockSize32; i++)
-            V[i] = B32[Pi + i]; // V[0] = B[i]
-        let pos = 0;
-        await asyncLoop(N - 1, asyncTick, () => {
-            BlockMix(V, pos, V, (pos += blockSize32), r); // V[i] = BlockMix(V[i-1]);
-            blockMixCb();
-        });
-        BlockMix(V, (N - 1) * blockSize32, B32, Pi, r); // Process last element
-        blockMixCb();
-        await asyncLoop(N, asyncTick, () => {
-            // First u32 of the last 64-byte block (u32 is LE)
-            const j = B32[Pi + blockSize32 - 16] % N; // j = Integrify(X) % iterations
-            for (let k = 0; k < blockSize32; k++)
-                tmp[k] = B32[Pi + k] ^ V[j * blockSize32 + k]; // tmp = B ^ V[j]
-            BlockMix(tmp, 0, B32, Pi, r); // B = BlockMix(B ^ V[j])
-            blockMixCb();
-        });
-    }
-    swap32IfBE(B32);
-    return scryptOutput(password, dkLen, B, V, tmp);
+    const { N, r, p, dkLen, B, onProgress, asyncTick } = scryptInit(password, salt, opts);
+    await fastScryptAsync(FAST_SCRYPT, B, r, N, p, onProgress, asyncTick);
+    return scryptOutput(password, dkLen, B);
 }

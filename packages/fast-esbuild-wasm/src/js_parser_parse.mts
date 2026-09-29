@@ -5,14 +5,41 @@
 //
 // Notes on the port (see CONVENTIONS.md):
 // - storeNameInRef()/loadNameFromRef() are the identity on name strings.
-// - The fast path always has UnsupportedJSFeatures == 0, so every
-//   markSyntaxFeature(compat.X, r) call in this range (none of them is
-//   compat.TopLevelAwait) is a no-op returning false and has been dropped
-//   (marked "(markSyntaxFeature ... no-op)").
-// - Error/warning messages are not built: the Log throws BAIL.
-import { bail, LEXER_PANIC } from "./bail.mjs";
-import { Range, RANGE_ZERO, rangeEnd, Warning, Debug, MsgID_JS_AssignToDefine, MsgData } from "./logger.mjs";
-import { quoteSingle } from "./helpers.mjs";
+import { API, CLIAPI, JSAPI, GoAPI } from "./logger.mjs";
+import { goQuote } from "./gostd.mjs";
+import { LEXER_PANIC, GoPanic } from "./gopanic.mjs";
+import {
+  jsFeatureHas,
+  ArraySpread,
+  Bigint,
+  ClassPrivateBrandCheck,
+  ConstAndLet,
+  DefaultArgument,
+  Destructuring,
+  Generator,
+  ImportDefer,
+  ImportSource,
+  NestedRestBinding,
+  NewTarget,
+  ObjectAccessors,
+  ObjectExtensions,
+  RestArgument,
+} from "./compat.mjs";
+import {
+  Range,
+  RANGE_ZERO,
+  rangeEnd,
+  Warning,
+  Debug,
+  MsgID_JS_AssignToDefine,
+  MsgData,
+  mkRange,
+  ByteRange,
+} from "./logger.mjs";
+import {
+  quoteSingle,
+  utf8Len,
+} from "./helpers.mjs";
 import {
   InvalidRef,
   LocRef,
@@ -50,6 +77,7 @@ import {
   EvaluationPhase,
   DeferPhase,
   SourcePhase,
+  findAssertOrWithEntry,
 } from "./ast.mjs";
 import {
   LLowest,
@@ -157,6 +185,7 @@ import {
   SymbolUse,
 } from "./js_ast.mjs";
 import { assign, joinAllWithComma, isPropertyAccess, forEachIdentifierBinding } from "./js_ast_helpers.mjs";
+import { restoreLexer } from "./ts_parser.mjs";
 import { ModeBundle, True, shouldCallRuntimeRequire } from "./config.mjs";
 import {
   Keywords,
@@ -210,6 +239,9 @@ import {
   TTrue,
   TTypeof,
   TVoid,
+  rangeOfImportAssertOrWith,
+  KeyAndValueRange,
+  TQuestionQuestion,
 } from "./js_lexer.mjs";
 import {
   scopeOrder,
@@ -251,6 +283,16 @@ import {
 
 // runtime.SourceIndex (internal/runtime is not a dependency of this module)
 const runtimeSourceIndex = 0;
+
+// These properties have special semantics in JavaScript. They must not be
+// mangled or we could potentially fail to parse valid JavaScript syntax or
+// generate invalid JavaScript syntax as output.
+//
+// This list is only intended to contain properties specific to the JavaScript
+// language itself to avoid syntax errors in the generated output. It's not
+// intended to contain properties for JavaScript APIs. Those must be provided
+// by the user.
+const permanentReservedProps = new Set(["__proto__", "constructor", "prototype"]);
 
 // Read-only "parseStmtOpts{}" passed to declareBinding() (which only reads it)
 const PARSE_STMT_OPTS_ZERO = new parseStmtOpts();
@@ -332,7 +374,9 @@ export const parseMethods = {
     const p = this;
 
     // Use "var" instead of "let" and "const" if they aren't supported
-    // (compat.ConstAndLet is always supported in the fast path)
+    if ((kind === LocalLet || kind === LocalConst) && jsFeatureHas(p.options.unsupportedJSFeatures, ConstAndLet)) {
+      return LocalVar;
+    }
 
     // Use "var" instead of "let" and "const" if the variable declaration may
     // need to be separated from the initializer. This allows us to safely move
@@ -374,7 +418,7 @@ export const parseMethods = {
     if (p.scopesInOrder.length > 0) {
       const prevStart = p.scopesInOrder[p.scopesInOrder.length - 1].loc;
       if (prevStart >= loc) {
-        bail(); // Go: panic("Scope location %d must be greater than %d")
+        throw new GoPanic("Scope location " + loc + " must be greater than " + prevStart);
       }
     }
 
@@ -383,7 +427,7 @@ export const parseMethods = {
     // arguments.
     if (kind === ScopeFunctionBody) {
       if (scope.parent.kind !== ScopeFunctionArgs) {
-        bail(); // Go: panic("Internal error")
+        throw new GoPanic("Internal error");
       }
       for (const [name, member] of scope.parent.members) {
         // Don't copy down the optional function expression name. Re-declaring
@@ -431,7 +475,7 @@ export const parseMethods = {
       const parent = scope.parent;
       const last = parent.children.length - 1;
       if (parent.children[last] !== scope) {
-        bail(); // Go: panic("Internal error")
+        throw new GoPanic("Internal error");
       }
       parent.children.pop();
     }
@@ -462,7 +506,7 @@ export const parseMethods = {
     // Remove the last child from the parent scope
     const last = parent.children.length - 1;
     if (parent.children[last] !== toFlatten) {
-      bail(); // Go: panic("Internal error")
+      throw new GoPanic("Internal error");
     }
     parent.children.pop();
 
@@ -622,8 +666,9 @@ export const parseMethods = {
 
   addSymbolAlreadyDeclaredError(name, newLoc, oldLoc) {
     const p = this;
-    // "The symbol %q has already been declared"
-    p.log.addErrorWithNotes();
+    p.log.addErrorWithNotes(p.tracker, rangeOfIdentifier(p.source, newLoc), "The symbol " + goQuote(name) + " has already been declared", [
+      p.tracker.msgData(rangeOfIdentifier(p.source, oldLoc), "The symbol " + goQuote(name) + " was originally declared here:"),
+    ]);
   },
 
   declareSymbol(kind, loc, name) {
@@ -694,10 +739,22 @@ export const parseMethods = {
         if (symbolKindIsFunction(symbol.kind)) {
           const member = scope.members.get(symbol.originalName);
           if (member !== undefined && symbolKindIsFunction(p.symbols[refInner(member.ref)].kind)) {
-            // The notes come from p.whyESModule() / p.whyStrictMode(scope),
-            // which only build message text; the error bails anyway.
-            // "The symbol %q has already been declared"
-            p.log.addErrorWithNotes();
+            let notes;
+            if (scope.parent === null && p.isFileConsideredESM) {
+              notes = p.whyESModule()[1];
+              notes[0].text = "Duplicate top-level function declarations are not allowed in an ECMAScript module. " + notes[0].text;
+            } else {
+              const $w = p.whyStrictMode(scope);
+              notes = $w[1];
+              notes[0].text = "Duplicate function declarations are not allowed in nested blocks " + $w[0] + ". " + notes[0].text;
+            }
+
+            p.log.addErrorWithNotes(
+              p.tracker,
+              rangeOfIdentifier(p.source, member.loc),
+              "The symbol " + goQuote(symbol.originalName) + " has already been declared",
+              [p.tracker.msgData(rangeOfIdentifier(p.source, replaced.loc), "The symbol " + goQuote(symbol.originalName) + " was originally declared here:"), ...notes],
+            );
           }
         }
       }
@@ -1056,7 +1113,7 @@ export const parseMethods = {
   // This is the inverse of storeNameInRef() above
   loadNameFromRef(ref) {
     if (typeof ref !== "string") {
-      bail(); // Go: panic("Internal error: invalid symbol reference")
+      throw new GoPanic("Internal error: invalid symbol reference");
     }
     return ref;
   },
@@ -1064,32 +1121,42 @@ export const parseMethods = {
   logExprErrors(errors) {
     const p = this;
     if (errors.invalidExprDefaultValue.len > 0) {
-      // "Unexpected \"=\""
-      p.log.addError();
+      p.log.addError(p.tracker, errors.invalidExprDefaultValue, 'Unexpected "="');
     }
 
     if (errors.invalidExprAfterQuestion.len > 0) {
-      // "Unexpected %q"
-      p.log.addError();
+      const r = errors.invalidExprAfterQuestion;
+      p.log.addError(p.tracker, r, "Unexpected " + goQuote(p.source.contents.slice(r.loc, r.loc + r.len)));
     }
 
     if (errors.arraySpreadFeature.len > 0) {
-      // (markSyntaxFeature(compat.ArraySpread) no-op)
+      p.markSyntaxFeature(ArraySpread, errors.arraySpreadFeature);
     }
   },
 
   logDeferredArrowArgErrors(errors) {
     const p = this;
     for (let i = 0; i < errors.invalidParens.length; i++) {
-      // "Invalid binding pattern"
-      p.log.addError();
+      p.log.addError(p.tracker, errors.invalidParens[i], "Invalid binding pattern");
     }
   },
 
   logNullishCoalescingErrorPrecedenceError(op) {
     const p = this;
-    // "Cannot use %q with %q without parentheses"
-    p.log.addErrorWithNotes();
+    let prevOp = "??";
+    if (p.lexer.token === TQuestionQuestion) {
+      const t = op;
+      op = prevOp;
+      prevOp = t;
+    }
+    p.log.addErrorWithNotes(p.tracker, p.lexer.range(), "Cannot use " + goQuote(op) + " with " + goQuote(prevOp) + " without parentheses", [
+      new MsgData(
+        null,
+        null,
+        'Expressions of the form "x ' + prevOp + " y " + op + ' z" are not allowed in JavaScript. ' +
+          'You must disambiguate between "(x ' + prevOp + " y) " + op + ' z" and "x ' + prevOp + " (y " + op + ' z)" by adding parentheses.',
+      ),
+    ]);
   },
 
   logAssignToDefine(r, name, expr) {
@@ -1132,32 +1199,36 @@ export const parseMethods = {
       kind = Debug;
     }
 
-    // "Suspicious assignment to defined constant %q"
-    p.log.addIDWithNotes(MsgID_JS_AssignToDefine, kind, p.tracker, r);
+    p.log.addIDWithNotes(MsgID_JS_AssignToDefine, kind, p.tracker, r, "Suspicious assignment to defined constant " + goQuote(name), [
+      new MsgData(
+        null,
+        null,
+        "The expression " + goQuote(name) + ' has been configured to be replaced with a constant using the "define" feature. ' +
+          "If this expression is supposed to be a compile-time constant, then it doesn't make sense to assign to it here. " +
+          'Or if this expression is supposed to change at run-time, this "define" substitution should be removed.',
+      ),
+    ]);
   },
 
   logArrowArgErrors(errors) {
     const p = this;
     if (errors.invalidExprAwait.len > 0) {
-      // "Cannot use an \"await\" expression here:"
-      p.log.addError();
+      p.log.addError(p.tracker, errors.invalidExprAwait, 'Cannot use an "await" expression here:');
     }
 
     if (errors.invalidExprYield.len > 0) {
-      // "Cannot use a \"yield\" expression here:"
-      p.log.addError();
+      p.log.addError(p.tracker, errors.invalidExprYield, 'Cannot use a "yield" expression here:');
     }
   },
 
-  // (only used to build error messages, which bail; not Go-%q-exact)
   keyNameForError(key) {
     const p = this;
     const k = key.data;
     switch (k.k) {
       case E_STRING:
-        return JSON.stringify(k.value);
+        return goQuote(k.value);
       case E_PRIVATE_IDENTIFIER:
-        return JSON.stringify(p.loadNameFromRef(k.ref));
+        return goQuote(p.loadNameFromRef(k.ref));
     }
     return "property";
   },
@@ -1172,10 +1243,16 @@ export const parseMethods = {
     }
   },
 
-  // Only used as notes for messages about JSON import assertions (bundle
-  // mode only, and errors/warnings bail), so the ranges are not computed.
   notesForAssertTypeJSON(record, alias) {
-    return [new MsgData("The JSON import assertion is here:"), new MsgData("")];
+    const p = this;
+    return [
+      p.tracker.msgData(rangeOfImportAssertOrWith(p.source, findAssertOrWithEntry(record.assertOrWith.entries, "type"), KeyAndValueRange), "The JSON import assertion is here:"),
+      new MsgData(
+        null,
+        null,
+        'You can either keep the import assertion and only use the "default" import, ' + "or you can remove the import assertion and use the " + goQuote(alias) + " import.",
+      ),
+    ];
   },
 
   // This assumes the caller has already checked for TStringLiteral or TNoSubstitutionTemplateLiteral
@@ -1209,7 +1286,11 @@ export const parseMethods = {
 
   parseBigIntOrStringIfUnsupported() {
     const p = this;
-    // (compat.Bigint is always supported in the fast path)
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, Bigint)) {
+      // Go: fmt.Sscan into a big.Int (base prefixes "0b", "0o", "0x" in either
+      // case are accepted, like JS's BigInt()) and then i.String() in base 10
+      return new Expr(new EString(BigInt(p.lexer.identifier).toString()), p.lexer.loc());
+    }
     return new Expr(new EBigInt(p.lexer.identifier), p.lexer.loc());
   },
 
@@ -1220,7 +1301,7 @@ export const parseMethods = {
     let flags = 0;
     let key = null;
     let closeBracketLoc = 0;
-    // (Go's "keyRange := p.lexer.Range()" is only used for error messages)
+    const keyRange = p.lexer.range();
 
     switch (p.lexer.token) {
       case TNumericLiteral:
@@ -1243,13 +1324,11 @@ export const parseMethods = {
 
       case TPrivateIdentifier: {
         if (p.options.ts.parse && p.options.ts.config.experimentalDecorators === True && opts.decorators.length > 0) {
-          // "TypeScript experimental decorators cannot be used on private identifiers"
-          p.log.addError();
+          p.log.addError(p.tracker, p.lexer.range(), "TypeScript experimental decorators cannot be used on private identifiers");
         } else if (!opts.isClass) {
           p.lexer.expected(TIdentifier);
         } else if (opts.tsDeclareRange.len !== 0) {
-          // "\"declare\" cannot be used with a private identifier"
-          p.log.addError();
+          p.log.addError(p.tracker, opts.tsDeclareRange, '"declare" cannot be used with a private identifier');
         }
         const name = p.lexer.identifier;
         key = new Expr(new EPrivateIdentifier(p.storeNameInRef(name)), p.lexer.loc());
@@ -1260,7 +1339,7 @@ export const parseMethods = {
 
       case TOpenBracket: {
         flags |= PropertyIsComputed;
-        // (markSyntaxFeature(compat.ObjectExtensions) no-op)
+        p.markSyntaxFeature(ObjectExtensions, p.lexer.range());
         p.lexer.next();
         const wasIdentifier = p.lexer.token === TIdentifier;
         const expr = p.parseExpr(LComma);
@@ -1269,8 +1348,7 @@ export const parseMethods = {
         if (p.options.ts.parse && p.lexer.token === TColon && wasIdentifier && opts.isClass) {
           if (expr.data instanceof EIdentifier) {
             if (opts.tsDeclareRange.len !== 0) {
-              // "\"declare\" cannot be used with an index signature"
-              p.log.addError();
+              p.log.addError(p.tracker, opts.tsDeclareRange, '"declare" cannot be used with an index signature');
             }
 
             // "[key: string]: any;"
@@ -1336,14 +1414,14 @@ export const parseMethods = {
             switch (raw) {
               case "get":
                 if (!opts.isAsync) {
-                  // (markSyntaxFeature(compat.ObjectAccessors) no-op)
+                  p.markSyntaxFeature(ObjectAccessors, nameRange);
                   return p.parseProperty(startLoc, PropertyGetter, opts, null);
                 }
                 break;
 
               case "set":
                 if (!opts.isAsync) {
-                  // (markSyntaxFeature(compat.ObjectAccessors) no-op)
+                  p.markSyntaxFeature(ObjectAccessors, nameRange);
                   return p.parseProperty(startLoc, PropertySetter, opts, null);
                 }
                 break;
@@ -1523,8 +1601,7 @@ export const parseMethods = {
         ) {
           // Forbid invalid identifiers
           if ((p.fnOrArrowDataParse.await !== allowIdent && name === "await") || (p.fnOrArrowDataParse.yield !== allowIdent && name === "yield")) {
-            // "Cannot use %q as an identifier here:"
-            p.log.addError();
+            p.log.addError(p.tracker, nameRange, "Cannot use " + goQuote(name) + " as an identifier here:");
           }
 
           const ref = p.storeNameInRef(name);
@@ -1585,8 +1662,7 @@ export const parseMethods = {
       if ((flags & PropertyIsComputed) === 0) {
         const str = key.data;
         if (str instanceof EString && (str.value === "constructor" || (opts.isStatic && str.value === "prototype"))) {
-          // "Invalid field name %q"
-          p.log.addError();
+          p.log.addError(p.tracker, keyRange, "Invalid field name " + goQuote(str.value));
         }
       }
 
@@ -1616,8 +1692,7 @@ export const parseMethods = {
       if (private_ instanceof EPrivateIdentifier) {
         const name = p.loadNameFromRef(private_.ref);
         if (name === "#constructor") {
-          // "Invalid field name %q"
-          p.log.addError();
+          p.log.addError(p.tracker, keyRange, "Invalid field name " + goQuote(name));
         }
         let declare;
         if (kind === PropertyAutoAccessor) {
@@ -1651,8 +1726,13 @@ export const parseMethods = {
       let hasError = false;
 
       if (!hasError && opts.tsDeclareRange.len !== 0) {
-        // "\"declare\" cannot be used with a " + ("method" | "getter" | "setter")
-        p.log.addError();
+        let what = "method";
+        if (kind === PropertyGetter) {
+          what = "getter";
+        } else if (kind === PropertySetter) {
+          what = "setter";
+        }
+        p.log.addError(p.tracker, opts.tsDeclareRange, '"declare" cannot be used with a ' + what);
         hasError = true;
       }
 
@@ -1660,8 +1740,19 @@ export const parseMethods = {
         hasError = true;
       }
 
-      // (markSyntaxFeature(compat.Generator) and markSyntaxFeature(compat.ObjectExtensions)
-      // are no-ops returning false in the fast path, so "hasError" is unaffected)
+      if (!hasError && opts.isGenerator && p.markSyntaxFeature(Generator, opts.generatorRange)) {
+        hasError = true;
+      }
+
+      if (
+        !hasError &&
+        p.lexer.token === TOpenParen &&
+        kind !== PropertyGetter &&
+        kind !== PropertySetter &&
+        p.markSyntaxFeature(ObjectExtensions, p.lexer.range())
+      ) {
+        hasError = true;
+      }
 
       const loc = p.lexer.loc();
       const scopeIndex = p.pushScopeForParsePass(ScopeFunctionArgs, loc);
@@ -1673,23 +1764,18 @@ export const parseMethods = {
         if (str instanceof EString) {
           if (!opts.isStatic && str.value === "constructor") {
             if (kind === PropertyGetter) {
-              // "Class constructor cannot be a getter"
-              p.log.addError();
+              p.log.addError(p.tracker, keyRange, "Class constructor cannot be a getter");
             } else if (kind === PropertySetter) {
-              // "Class constructor cannot be a setter"
-              p.log.addError();
+              p.log.addError(p.tracker, keyRange, "Class constructor cannot be a setter");
             } else if (opts.isAsync) {
-              // "Class constructor cannot be an async function"
-              p.log.addError();
+              p.log.addError(p.tracker, keyRange, "Class constructor cannot be an async function");
             } else if (opts.isGenerator) {
-              // "Class constructor cannot be a generator"
-              p.log.addError();
+              p.log.addError(p.tracker, keyRange, "Class constructor cannot be a generator");
             } else {
               isConstructor = true;
             }
           } else if (opts.isStatic && str.value === "prototype") {
-            // "Invalid static method name \"prototype\""
-            p.log.addError();
+            p.log.addError(p.tracker, keyRange, 'Invalid static method name "prototype"');
           }
         }
       }
@@ -1734,15 +1820,18 @@ export const parseMethods = {
       switch (kind) {
         case PropertyGetter:
           if (fn.args.length > 0) {
-            // "Getter %s must have zero arguments"
-            p.log.addError();
+            const r = rangeOfIdentifier(p.source, fn.args[0].binding.loc);
+            p.log.addError(p.tracker, r, "Getter " + p.keyNameForError(key) + " must have zero arguments");
           }
           break;
 
         case PropertySetter:
           if (fn.args.length !== 1) {
-            // "Setter %s must have exactly one argument"
-            p.log.addError();
+            let r = rangeOfIdentifier(p.source, key.loc);
+            if (fn.args.length > 1) {
+              r = rangeOfIdentifier(p.source, fn.args[1].binding.loc);
+            }
+            p.log.addError(p.tracker, r, "Setter " + p.keyNameForError(key) + " must have exactly one argument");
           }
           break;
 
@@ -1782,8 +1871,7 @@ export const parseMethods = {
         }
         const name = p.loadNameFromRef(private_.ref);
         if (name === "#constructor") {
-          // "Invalid method name %q"
-          p.log.addError();
+          p.log.addError(p.tracker, keyRange, "Invalid method name " + goQuote(name));
         }
         private_.ref = p.declareSymbol(declare, key.loc, name);
         const methodRef = p.newSymbol(SymbolOther, name.slice(1) + suffix);
@@ -1862,8 +1950,7 @@ export const parseMethods = {
         if (p.lexer.token !== TColon && p.lexer.token !== TOpenParen) {
           // Forbid invalid identifiers
           if ((p.fnOrArrowDataParse.await !== allowIdent && name === "await") || (p.fnOrArrowDataParse.yield !== allowIdent && name === "yield")) {
-            // "Cannot use %q as an identifier here:"
-            p.log.addError();
+            p.log.addError(p.tracker, nameRange, "Cannot use " + goQuote(name) + " as an identifier here:");
           }
 
           const ref = p.storeNameInRef(name);
@@ -1893,13 +1980,26 @@ export const parseMethods = {
     return new PropertyBinding(key, value, defaultValueOrNil, loc, closeBracketLoc, isComputed, false, preferQuotedKey);
   },
 
+  // "p.options.mangleProps" / "p.options.reserveProps" are null or an object
+  // whose matchString(name) method is Go's (*regexp.Regexp).MatchString
   isMangledProp(name) {
     const p = this;
-    if (p.options.mangleProps == null) {
+    if (p.options.mangleProps === null) {
       return false;
     }
-    // "--mangle-props" (a Go RE2 regexp) is not supported by the fast path
-    bail();
+    if (
+      p.options.mangleProps.matchString(name) &&
+      !permanentReservedProps.has(name) &&
+      (p.options.reserveProps === null || !p.options.reserveProps.matchString(name))
+    ) {
+      return true;
+    }
+    let reservedProps = p.reservedProps;
+    if (reservedProps === null) {
+      reservedProps = new Map();
+      p.reservedProps = reservedProps;
+    }
+    reservedProps.set(name, true);
     return false;
   },
 
@@ -1948,8 +2048,7 @@ export const parseMethods = {
 
     // Newlines are not allowed before "=>"
     if (p.lexer.hasNewlineBefore) {
-      // "Unexpected newline before \"=>\""
-      p.log.addError();
+      p.log.addError(p.tracker, p.lexer.range(), 'Unexpected newline before "=>"');
       throw LEXER_PANIC;
     }
 
@@ -1991,6 +2090,7 @@ export const parseMethods = {
   checkForArrowAfterTheCurrentToken() {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.isLogDisabled = true;
 
     // Implement backtracking by restoring the lexer's memory to its original state
@@ -1998,11 +2098,11 @@ export const parseMethods = {
       p.lexer.next();
       const isArrowAfterThisToken = p.lexer.token === TEqualsGreaterThan;
 
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return isArrowAfterThisToken;
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return false;
     }
   },
@@ -2050,8 +2150,8 @@ export const parseMethods = {
 
               // Do not allow "for (async of []) ;" but do allow "for await (async of []) ;"
               if (!isArrowFn && (flags & exprFlagForAwaitLoopInit) === 0 && p.lexer.raw() === "of") {
-                // "For loop initializers cannot start with \"async of\""
-                p.log.addError();
+                const r = mkRange(asyncRange.loc, rangeEnd(p.lexer.range()) - asyncRange.loc);
+                p.log.addError(p.tracker, r, 'For loop initializers cannot start with "async of"');
                 throw LEXER_PANIC;
               }
             } else if (p.options.ts.parse && p.lexer.token === TIdentifier) {
@@ -2124,7 +2224,7 @@ export const parseMethods = {
     }
     if (isGenerator) {
       if (!hasError) {
-        // (markSyntaxFeature(compat.Generator) no-op)
+        p.markSyntaxFeature(Generator, p.lexer.range());
       }
       p.lexer.next();
     }
@@ -2211,7 +2311,7 @@ export const parseMethods = {
 
       if (isSpread) {
         spreadRange = p.lexer.range();
-        // (markSyntaxFeature(compat.RestArgument) no-op)
+        p.markSyntaxFeature(RestArgument, spreadRange);
         p.lexer.next();
       }
 
@@ -2320,8 +2420,7 @@ export const parseMethods = {
       // was prefixed by a TypeScript type parameter list such as "<T,>()"
       if (isArrowFn || opts.forceArrowFn) {
         if (commaAfterSpread !== 0) {
-          // "Unexpected \",\" after rest pattern"
-          p.log.addError();
+          p.log.addError(p.tracker, mkRange(commaAfterSpread, 1), 'Unexpected "," after rest pattern');
         }
         p.logArrowArgErrors(arrowArgErrors);
         p.logDeferredArrowArgErrors(errors);
@@ -2330,15 +2429,16 @@ export const parseMethods = {
         // conversion errors
         if (invLog.invalidTokens.length > 0) {
           for (let i = 0; i < invLog.invalidTokens.length; i++) {
-            // "Invalid binding pattern"
-            p.log.addError();
+            p.log.addError(p.tracker, invLog.invalidTokens[i], "Invalid binding pattern");
           }
           throw LEXER_PANIC;
         }
 
         // Also report syntax features used in bindings
-        // (markSyntaxFeature(entry.feature, entry.token) for each entry of
-        // invLog.syntaxFeatures: no-op in the fast path)
+        for (let i = 0, a = invLog.syntaxFeatures; i < a.length; i++) {
+          const entry = a[i];
+          p.markSyntaxFeature(entry.feature, entry.token);
+        }
 
         const data = new fnOrArrowDataParse();
         data.needsAsyncLoc = loc;
@@ -2358,8 +2458,7 @@ export const parseMethods = {
 
     // If this isn't an arrow function, then types aren't allowed
     if (typeColonRange.len > 0) {
-      // "Unexpected \":\""
-      p.log.addError();
+      p.log.addError(p.tracker, typeColonRange, 'Unexpected ":"');
       throw LEXER_PANIC;
     }
 
@@ -2374,8 +2473,7 @@ export const parseMethods = {
     if (items.length > 0) {
       p.logExprErrors(errors);
       if (spreadRange.len > 0) {
-        // "Unexpected \"...\""
-        p.log.addError();
+        p.log.addError(p.tracker, spreadRange, 'Unexpected "..."');
         throw LEXER_PANIC;
       }
       const value = joinAllWithComma(items);
@@ -2404,10 +2502,9 @@ export const parseMethods = {
     if (initializerOrNil !== null) {
       const equalsRange = p.source.rangeOfOperatorBefore(initializerOrNil.loc, "=");
       if (isSpread) {
-        // "A rest argument cannot have a default initializer"
-        p.log.addError();
+        p.log.addError(p.tracker, equalsRange, "A rest argument cannot have a default initializer");
       } else {
-        invLog.syntaxFeatures.push(new syntaxFeature(0 /* compat.DefaultArgument */, equalsRange));
+        invLog.syntaxFeatures.push(new syntaxFeature(DefaultArgument, equalsRange));
       }
     }
     return [binding, initializerOrNil, invLog];
@@ -2434,7 +2531,7 @@ export const parseMethods = {
         if (e.commaAfterSpread !== 0) {
           invLog.invalidTokens.push(new Range(e.commaAfterSpread, 1));
         }
-        invLog.syntaxFeatures.push(new syntaxFeature(0 /* compat.Destructuring */, p.source.rangeOfOperatorAfter(expr.loc, "[")));
+        invLog.syntaxFeatures.push(new syntaxFeature(Destructuring, p.source.rangeOfOperatorAfter(expr.loc, "[")));
         const items = [];
         let isSpread = false;
         for (let item of e.items) {
@@ -2443,7 +2540,7 @@ export const parseMethods = {
             isSpread = true;
             item = i.value;
             if (!(item.data instanceof EIdentifier)) {
-              // (markSyntaxFeature(compat.NestedRestBinding) no-op)
+              p.markSyntaxFeature(NestedRestBinding, p.source.rangeOfOperatorAfter(item.loc, "["));
             }
           }
           const $d105 = p.convertExprToBindingAndInitializer(item, invLog, isSpread);
@@ -2458,7 +2555,7 @@ export const parseMethods = {
         if (e.commaAfterSpread !== 0) {
           invLog.invalidTokens.push(new Range(e.commaAfterSpread, 1));
         }
-        invLog.syntaxFeatures.push(new syntaxFeature(0 /* compat.Destructuring */, p.source.rangeOfOperatorAfter(expr.loc, "{")));
+        invLog.syntaxFeatures.push(new syntaxFeature(Destructuring, p.source.rangeOfOperatorAfter(expr.loc, "{")));
         const properties = [];
         for (let $i46 = 0, $a46 = e.properties; $i46 < $a46.length; $i46++) {
           const property = $a46[$i46];
@@ -2516,7 +2613,7 @@ export const parseMethods = {
 
     switch (p.lexer.token) {
       case TSuper: {
-        // (Go's "superRange" is only used for the error message)
+        const superRange = p.lexer.range();
         p.lexer.next();
 
         switch (p.lexer.token) {
@@ -2534,8 +2631,7 @@ export const parseMethods = {
             break;
         }
 
-        // "Unexpected \"super\""
-        p.log.addError();
+        p.log.addError(p.tracker, superRange, 'Unexpected "super"');
         return new Expr(ESuperShared, loc);
       }
 
@@ -2587,8 +2683,7 @@ export const parseMethods = {
 
       case TThis:
         if (p.fnOrArrowDataParse.isThisDisallowed) {
-          // "Cannot use \"this\" here:"
-          p.log.addError();
+          p.log.addError(p.tracker, p.lexer.range(), 'Cannot use "this" here:');
         }
         p.lexer.next();
         return new Expr(EThisShared, loc);
@@ -2607,7 +2702,12 @@ export const parseMethods = {
         }
 
         // Make sure to lower all matching private names
-        // (compat.ClassPrivateBrandCheck is always supported in the fast path)
+        if (jsFeatureHas(p.options.unsupportedJSFeatures, ClassPrivateBrandCheck)) {
+          if (p.lowerAllOfThesePrivateNames === null) {
+            p.lowerAllOfThesePrivateNames = new Map();
+          }
+          p.lowerAllOfThesePrivateNames.set(name, true);
+        }
 
         return new Expr(new EPrivateIdentifier(p.storeNameInRef(name)), loc);
       }
@@ -2636,14 +2736,12 @@ export const parseMethods = {
           case "await":
             switch (p.fnOrArrowDataParse.await) {
               case forbidAll:
-                // "The keyword \"await\" cannot be used here:"
-                p.log.addError();
+                p.log.addError(p.tracker, nameRange, 'The keyword "await" cannot be used here:');
                 break;
 
               case allowExpr:
                 if (raw !== "await") {
-                  // "The keyword \"await\" cannot be escaped"
-                  p.log.addError();
+                  p.log.addError(p.tracker, nameRange, 'The keyword "await" cannot be escaped');
                 } else {
                   if (p.fnOrArrowDataParse.isTopLevel) {
                     p.topLevelAwaitKeyword = nameRange;
@@ -2670,18 +2768,15 @@ export const parseMethods = {
           case "yield":
             switch (p.fnOrArrowDataParse.yield) {
               case forbidAll:
-                // "The keyword \"yield\" cannot be used here:"
-                p.log.addError();
+                p.log.addError(p.tracker, nameRange, 'The keyword "yield" cannot be used here:');
                 break;
 
               case allowExpr:
                 if (raw !== "yield") {
-                  // "The keyword \"yield\" cannot be escaped"
-                  p.log.addError();
+                  p.log.addError(p.tracker, nameRange, 'The keyword "yield" cannot be escaped');
                 } else {
                   if (level > LAssign) {
-                    // "Cannot use a \"yield\" expression here without parentheses:"
-                    p.log.addError();
+                    p.log.addError(p.tracker, nameRange, 'Cannot use a "yield" expression here without parentheses:');
                   }
                   if (p.fnOrArrowDataParse.arrowArgErrors !== null) {
                     p.fnOrArrowDataParse.arrowArgErrors.invalidExprYield = nameRange;
@@ -2701,8 +2796,7 @@ export const parseMethods = {
                     case TNumericLiteral:
                     case TBigIntegerLiteral:
                     case TStringLiteral:
-                      // "Cannot use \"yield\" outside a generator function"
-                      p.log.addError();
+                      p.log.addError(p.tracker, nameRange, 'Cannot use "yield" outside a generator function');
                       return p.parseYieldExpr(loc);
                   }
                 }
@@ -2797,9 +2891,11 @@ export const parseMethods = {
         }
         const index = value.data;
         if (index instanceof EIndex) {
-          if (index.index.data instanceof EPrivateIdentifier) {
-            // "Deleting the private name %q is forbidden"
-            p.log.addError();
+          const private_ = index.index.data;
+          if (private_ instanceof EPrivateIdentifier) {
+            const name = p.loadNameFromRef(private_.ref);
+            const r = new ByteRange(index.index.loc, utf8Len(name));
+            p.log.addError(p.tracker, r, "Deleting the private name " + goQuote(name) + " is forbidden");
           }
         }
         const valueIsIdentifier = value.data instanceof EIdentifier;
@@ -2875,7 +2971,7 @@ export const parseMethods = {
             p.lexer.unexpected();
           }
           const r = new Range(loc, rangeEnd(p.lexer.range()) - loc);
-          // (markSyntaxFeature(compat.NewTarget) no-op)
+          p.markSyntaxFeature(NewTarget, r);
           p.lexer.next();
           return new Expr(new ENewTarget(r), loc);
         }
@@ -2913,7 +3009,7 @@ export const parseMethods = {
               if (errors !== null) {
                 errors.arraySpreadFeature = p.lexer.range();
               } else {
-                // (markSyntaxFeature(compat.ArraySpread) no-op)
+                p.markSyntaxFeature(ArraySpread, p.lexer.range());
               }
               const dotsLoc = p.saveExprCommentsHere();
               p.lexer.next();
@@ -3084,8 +3180,21 @@ export const parseMethods = {
 
         // Print a friendly error message when parsing JSX as JavaScript
         if (!p.options.jsx.parse && !p.options.ts.parse) {
-          // "The JSX syntax extension is not currently enabled"
-          p.log.addErrorWithNotes();
+          let how = "";
+          switch (API.kind) {
+            case CLIAPI:
+              how = ' You can use "--loader:.js=jsx" to do that.';
+              break;
+            case JSAPI:
+              how = " You can use \"loader: { '.js': 'jsx' }\" to do that.";
+              break;
+            case GoAPI:
+              how = " You can use 'Loader: map[string]api.Loader{\".js\": api.LoaderJSX}' to do that.";
+              break;
+          }
+          p.log.addErrorWithNotes(p.tracker, p.lexer.range(), "The JSX syntax extension is not currently enabled", [
+            new MsgData(null, null, 'The esbuild loader for this file is currently set to "js" but it must be set to "jsx" to be able to parse JSX syntax.' + how),
+          ]);
           p.options.jsx.parse = true;
         }
 
@@ -3109,8 +3218,7 @@ export const parseMethods = {
           // the use of an expression starting with "<" that would be ambiguous
           // when the file is in JSX mode.
           if (p.options.ts.noAmbiguousLessThan && !p.isTSArrowFnJSX()) {
-            // "This syntax is not allowed in files with the \".mts\" or \".cts\" extension"
-            p.log.addError();
+            p.log.addError(p.tracker, p.lexer.range(), 'This syntax is not allowed in files with the ".mts" or ".cts" extension');
           }
 
           // "<T>(x)"
@@ -3210,11 +3318,11 @@ export const parseMethods = {
         p.lexer.next();
         return new Expr(new EImportMeta(p.esmImportMeta.len), loc);
       } else if (p.lexer.isContextualKeyword("defer")) {
-        // (markSyntaxFeature(compat.ImportDefer) no-op)
+        p.markSyntaxFeature(ImportDefer, p.lexer.range());
         phase = DeferPhase;
         p.lexer.next();
       } else if (p.lexer.isContextualKeyword("source")) {
-        // (markSyntaxFeature(compat.ImportSource) no-op)
+        p.markSyntaxFeature(ImportSource, p.lexer.range());
         phase = SourcePhase;
         p.lexer.next();
       } else {
@@ -3223,8 +3331,8 @@ export const parseMethods = {
     }
 
     if (level > LCall) {
-      // "Cannot use an \"import\" expression here without parentheses:"
-      p.log.addError();
+      const r = rangeOfIdentifier(p.source, loc);
+      p.log.addError(p.tracker, r, 'Cannot use an "import" expression here without parentheses:');
     }
 
     // Allow "in" inside call arguments

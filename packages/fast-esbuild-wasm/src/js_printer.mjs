@@ -6,23 +6,33 @@
 // end with TextDecoder("utf-8"), which is very fast for the common ASCII-only
 // output. This allocates nothing per print() (unlike += ropes or an array of
 // chunks) and allows reading the last bytes back like Go does. Every saved
-// position is a byte length, as in Go. (A lone surrogate would be written as
-// its 3 WTF-8 bytes like in Go, which decode to U+FFFD each, like the glue's
-// TextDecoder does for Go's output; the printer never emits raw lone
-// surrogates anyway: strings escape them, and raw source text such as
-// comments or identifiers never contains them.)
-//
-// Supported option subset (print() bails otherwise): MinifySyntax false,
-// LineLimit 0, no metafile, and no
-// unsupported JS features (target esnext, so every
-// "UnsupportedFeatures.Has(compat.X)" is false). MinifyWhitespace and
-// MinifyIdentifiers are ported (but the fast path only uses false).
+// position is a byte length, as in Go. (A lone surrogate is written as its
+// 3 WTF-8 bytes like in Go, and a raw byte of invalid UTF-8 from the source
+// text, e.g. in a comment, as that byte: helpers.decodeGoString turns the
+// output back into a string, which keeps them. Strings escape lone
+// surrogates, so only raw source text can print them.)
 //
 // Source mappings: addSourceMapping passes the UTF-8 output buffer and its
 // length to the sourcemap.ChunkBuilder, which counts generated columns in
 // UTF-16 code units exactly like Go does.
-import { bail } from "./bail.mjs";
-import { escapeClosingTag, formatFloatG } from "./helpers.mjs";
+import { GoPanic, goTypeName } from "./gopanic.mjs";
+import {
+  JSFeatureNone,
+  jsFeatureHas,
+  InlineScript,
+  UnicodeEscapes,
+  ObjectExtensions,
+  TemplateLiteral,
+  DynamicImport,
+  Arrow,
+  ImportAssertions,
+  ImportAttributes,
+  FunctionOrClassPropertyAccess,
+  Bigint,
+} from "./compat.mjs";
+                                              
+import { escapeClosingTag, formatFloatG, containsNonBMPCodePoint, quoteForJSON, decodeGoString } from "./helpers.mjs";
+import { metafileFormatMaybeRemoveWhitespace } from "./config.mjs";
 import {
   InvalidRef,
   followSymbols,
@@ -41,7 +51,10 @@ import {
   IsEmptyFunction,
   IsIdentityFunction,
   CouldPotentiallyBeMutated,
+  AssertKeyword,
   assertOrWithKeywordString,
+  ShouldNotBeExternalInMetafile,
+  importKindStringForMetafile,
 } from "./ast.mjs";
 import {
   LLowest,
@@ -57,6 +70,7 @@ import {
   LCall,
   UnOpNeg,
   UnOpPos,
+  UnOpCpl,
   UnOpNot,
   UnOpTypeof,
   UnOpDelete,
@@ -103,10 +117,15 @@ import {
   ModuleUnknown,
   Expr,
   Stmt,
+  EArray,
   EBinary,
+  EIf,
+  EInlinedEnum,
   ENumber,
   EString,
   ETemplate,
+  EUnary,
+  EUndefinedShared,
   SExpr,
   B_MISSING,
   B_IDENTIFIER,
@@ -191,7 +210,19 @@ import {
   SourceMapNone,
 } from "./config.mjs";
 import { isIdentifier, isIdentifierES5AndESNext, isIdentifierES5AndESNextUTF16, isIdentifierContinue } from "./js_ident.mjs";
-import { joinWithComma, isPropertyAccess, isOptionalChain, inlinePrimitivesIntoTemplate } from "./js_ast_helpers.mjs";
+import {
+  joinWithComma,
+  isPropertyAccess,
+  isOptionalChain,
+  inlinePrimitivesIntoTemplate,
+  makeHelperContext,
+  toNumberWithoutSideEffects,
+  toInt32,
+  shouldFoldBinaryOperatorWhenMinifying,
+  foldBinaryOperator,
+  toBooleanWithSideEffects,
+  NoSideEffects,
+} from "./js_ast_helpers.mjs";
 import { ChunkBuilder } from "./sourcemap.mjs";
 
 const hexChars = "0123456789ABCDEF";
@@ -221,9 +252,6 @@ function signbit(x) {
   return x < 0 || (x === 0 && 1 / x < 0);
 }
 
-// Decodes the output buffer (see the comment at the top). (ignoreBOM: a
-// printed part may in theory start with U+FEFF, which must be kept.)
-const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
 // Code points that js_ast.IsIdentifierContinue accepts in the ASCII range
 const identContinueASCII = new Uint8Array(128);
@@ -261,9 +289,7 @@ function startsWithSlashScriptFold(value) {
 
 // Exported for other packages (the linker). "js" is the prefix to append to
 // (Go's []byte, may be null or ""). The result is a JS string.
-// unsupportedFeatures is always 0 in the fast path (see CONVENTIONS.md), so
-// Unicode escapes are always available.
-export function quoteIdentifier(js, name, unsupportedFeatures) {
+export function quoteIdentifier(js, name, unsupportedFeatures           ) {
   let out = js === null || js === undefined ? "" : js;
   let isASCII = false;
   let asciiStart = 0;
@@ -300,8 +326,11 @@ export function quoteIdentifier(js, name, unsupportedFeatures) {
         out += hex4(0xfffd) + hex4(0xfffd) + hex4(0xfffd);
       } else if (c <= 0xffff) {
         out += hex4(c);
-      } else {
+      } else if (!jsFeatureHas(unsupportedFeatures, UnicodeEscapes)) {
         out += unicodeEscapeBraces(c);
+      } else {
+        // Go: panic("Internal error: Cannot encode identifier: Unicode escapes are unsupported")
+        throw new GoPanic("Internal error: Cannot encode identifier: Unicode escapes are unsupported");
       }
     }
   }
@@ -312,9 +341,9 @@ export function quoteIdentifier(js, name, unsupportedFeatures) {
   return out;
 }
 
-// The per-character logic of Go's printUnquotedUTF16 (LineLimit is always 0
-// here, so the "wrapLongLines" logic is not ported). "c" is text[i]. Returns
-// the escape sequence to print instead of the character, or null if the
+// The per-character logic of Go's printUnquotedUTF16 (the "wrapLongLines"
+// logic is in printUnquotedUTF16WrapLongLines). "c" is text[i]. Returns the
+// escape sequence to print instead of the character, or null if the
 // character is printed verbatim. escapeNextIsPair tells whether the character
 // was the first half of a surrogate pair (then both code units are consumed).
 let escapeNextIsPair = false;
@@ -324,7 +353,7 @@ let escapeNextIsPair = false;
 const ESCAPE_CANDIDATE = new Uint8Array(0x7f);
 for (const c of [0x00, 0x07, 0x08, 0x0a, 0x0b, 0x0c, 0x0d, 0x1b, 0x22, 0x24, 0x27, 0x2f, 0x5c, 0x60]) ESCAPE_CANDIDATE[c] = 1;
 
-function escapeUnquotedChar(text, at, c, quote, asciiOnly, inlineScriptOK) {
+function escapeUnquotedChar(text, at, c, quote, asciiOnly, inlineScriptOK, unicodeEscapesOK) {
   const n = text.length;
   const i = at + 1; // (Go's "i" after decoding the character)
   escapeNextIsPair = false;
@@ -419,9 +448,11 @@ function escapeUnquotedChar(text, at, c, quote, asciiOnly, inlineScriptOK) {
         escapeNextIsPair = true;
 
         // Escape this character if UTF-8 isn't allowed
-        // (compat.UnicodeEscapes is always supported)
         if (asciiOnly) {
-          return unicodeEscapeBraces(r);
+          if (unicodeEscapesOK) {
+            return unicodeEscapeBraces(r);
+          }
+          return hex4(c) + hex4(c2);
         }
 
         // Otherwise, encode to UTF-8
@@ -610,7 +641,9 @@ function isASCII(text) {
 
 class printer {
   ;                               
+  ;                                 
   ;                    
+  ;                       
   ;                    
   ;                          
   ;                       
@@ -637,15 +670,22 @@ class printer {
   ;                                  
   ;                             
   ;                                    
+  ;                            
+  ;                          
   ;                               
   ;                          
   ;                      
   ;                       
   ;                                  
+  ;                                
+  ;                            
   constructor(symbols, renamer, importRecords, options, moduleType, exprComments, wasLazyExport) {
-    this.inlineScriptOK = true; // !options.unsupportedFeatures.Has(compat.InlineScript)
+    // JS-only: cached "!options.UnsupportedFeatures.Has(compat.X)" for the
+    // features checked per character
+    this.inlineScriptOK = !jsFeatureHas(options.unsupportedFeatures, InlineScript);
+    this.unicodeEscapesOK = !jsFeatureHas(options.unsupportedFeatures, UnicodeEscapes);
     this.symbols = symbols; // ast.SymbolMap
-    // (astHelpers is not needed: see simplifyUnusedExpr)
+    this.astHelpers = null; // js_ast.HelperContext (set by print())
     this.renamer = renamer;
     this.importRecords = importRecords;
     this.callTarget = null; // js_ast.E
@@ -679,7 +719,8 @@ class printer {
     this.needSpaceBeforeDot = -1;
     this.prevRegExpEnd = -1;
     this.noLeadingNewlineHere = -1;
-    // (oldLineStart / oldLineEnd: LineLimit is not supported)
+    this.oldLineStart = 0;
+    this.oldLineEnd = 0;
     this.needsSemicolon = false;
     this.wasLazyExport = wasLazyExport;
     this.prevOp = UnOpPos; // js_ast.OpCode zero value
@@ -688,6 +729,17 @@ class printer {
     // JS-only: whether any symbol is flagged IsEmptyFunction or
     // IsIdentityFunction (see simplifyUnusedExpr)
     this.hasInlinableCalls = true;
+
+    // JS-only: the comma expressions (their EBinary data) that
+    // simplifyUnusedExpr returned unchanged (see simplifyUnusedCommaChain)
+    this.unchangedByInlining = null;
+
+    // JS-only: lateConstantFoldUnaryOrBinaryOrIfExpr only changes an
+    // expression if it contains an inlined constant (options.ConstValues) or
+    // a cross-module enum value (options.TSEnums). Without either it returns
+    // its argument, so the pre-pass in printExpr is skipped.
+    this.canLateFold =
+      (options.constValues !== null && options.constValues.size > 0) || (options.tsEnums !== null && options.tsEnums.size > 0);
   }
 
   // Go: p.js = append(p.js, text...) (UTF-8 encoded)
@@ -738,6 +790,11 @@ class printer {
             continue;
           }
         }
+        if (c >= 0xdc80 && c <= 0xdcff) {
+          // A raw byte of invalid UTF-8 (see helpers.decodeGoString)
+          buf[len++] = c - 0xdc00;
+          continue;
+        }
         buf[len++] = 0xe0 | (c >> 12);
         buf[len++] = 0x80 | ((c >> 6) & 63);
         buf[len++] = 0x80 | (c & 63);
@@ -757,7 +814,7 @@ class printer {
 
   // The output as a JS string
   jsText() {
-    const text = this.jsLen === 0 ? "" : utf8Decoder.decode(this.jsBuf.subarray(0, this.jsLen));
+    const text = this.jsLen === 0 ? "" : decodeGoString(this.jsBuf.subarray(0, this.jsLen));
     releaseOutputBuffer(this.jsBuf);
     this.jsBuf = null;
     return text;
@@ -783,6 +840,12 @@ class printer {
   // output buffer; all others (see ESCAPE_CANDIDATE) go through the exact
   // per-character logic of Go's printUnquotedUTF16 (escapeUnquotedChar).
   printUnquotedUTF16(text, quote, flags) {
+    // Only compute the line length if necessary
+    if (this.options.lineLimit > 0 && (flags & printQuotedNoWrap) === 0) {
+      this.printUnquotedUTF16WrapLongLines(text, quote);
+      return;
+    }
+
     const n = text.length;
     let len = this.jsLen;
     let buf = this.jsBuf;
@@ -795,7 +858,7 @@ class printer {
         i++;
         continue;
       }
-      const esc = escapeUnquotedChar(text, i, c, quote, this.options.asciiOnly, this.inlineScriptOK);
+      const esc = escapeUnquotedChar(text, i, c, quote, this.options.asciiOnly, this.inlineScriptOK, this.unicodeEscapesOK);
       if (esc === null) {
         // Printed verbatim (one code unit, or a surrogate pair)
         if (c < 0x80) {
@@ -825,6 +888,45 @@ class printer {
       len += m;
     }
     this.jsLen = len;
+  }
+
+  // Go's printUnquotedUTF16 with "wrapLongLines" set (LineLimit > 0 and no
+  // printQuotedNoWrap flag). As in Go, "i" counts UTF-16 code units of the
+  // text while the line length is in bytes.
+  printUnquotedUTF16WrapLongLines(text, quote) {
+    const lineLimit = this.options.lineLimit;
+    let startLineLength = this.currentLineLength();
+    if (startLineLength > lineLimit) {
+      startLineLength = lineLimit;
+    }
+
+    const n = text.length;
+    let i = 0;
+    while (i < n) {
+      // Wrap long lines that are over the limit using escaped newlines
+      if (startLineLength + i >= lineLimit) {
+        this.print("\\\n");
+        startLineLength -= lineLimit;
+      }
+
+      const c = text.charCodeAt(i);
+      let width = 1;
+      let esc = null;
+      if (!(c < 0x7f && ESCAPE_CANDIDATE[c] === 0)) {
+        esc = escapeUnquotedChar(text, i, c, quote, this.options.asciiOnly, this.inlineScriptOK, this.unicodeEscapesOK);
+        if (escapeNextIsPair) width = 2;
+      }
+      if (esc !== null) {
+        this.print(esc);
+      } else {
+        if (c === 0x0a) {
+          // (Only reached for a backtick quote: otherwise it is escaped)
+          startLineLength = -(i + 1); // Printing a real newline resets the line length
+        }
+        this.print(width === 1 ? text[i] : text.slice(i, i + 2));
+      }
+      i += width;
+    }
   }
 
   // JSX tag syntax doesn't support character escapes so non-ASCII identifiers
@@ -967,16 +1069,15 @@ class printer {
   // contains an older version of Unicode or not. So for safety, we quote
   // anything that isn't guaranteed to be compatible with ES5, the oldest
   // JavaScript language target that we support.
-  //
-  // (compat.UnicodeEscapes is always supported, so the ASCIIOnly clause of the
-  // Go conditions is always true.)
 
   canPrintIdentifier(name) {
-    return isIdentifierES5AndESNext(name);
+    return isIdentifierES5AndESNext(name) && (!this.options.asciiOnly || this.unicodeEscapesOK || !containsNonBMPCodePoint(name));
   }
 
   canPrintIdentifierUTF16(name) {
-    return isIdentifierES5AndESNextUTF16(name);
+    return (
+      isIdentifierES5AndESNextUTF16(name) && (!this.options.asciiOnly || this.unicodeEscapesOK || !containsNonBMPCodePoint(name))
+    );
   }
 
   printIdentifier(name) {
@@ -994,7 +1095,7 @@ class printer {
     for (let i = 0; i < n; i++) {
       const c = name.charCodeAt(i);
       if (c > 0x7f) {
-        this.print(quoteIdentifier("", name, 0));
+        this.print(quoteIdentifier("", name, this.options.unsupportedFeatures));
         return;
       }
       buf[len + i] = c;
@@ -1031,8 +1132,11 @@ class printer {
         if (start < at) out += name.slice(start, at);
         if (c <= 0xffff) {
           out += hex4(c);
-        } else {
+        } else if (this.unicodeEscapesOK) {
           out += unicodeEscapeBraces(c);
+        } else {
+          // Go: panic("Internal error: Cannot encode identifier: Unicode escapes are unsupported")
+          throw new GoPanic("Internal error: Cannot encode identifier: Unicode escapes are unsupported");
         }
         start = i + 1;
       }
@@ -1361,7 +1465,7 @@ class printer {
 
       default:
         // Go: panic("Unexpected binding of type ...")
-        bail();
+        throw new GoPanic("Unexpected binding of type " + goTypeName("js_ast", b));
     }
   }
 
@@ -1377,13 +1481,34 @@ class printer {
     }
   }
 
-  // (currentLineLength is only used when LineLimit > 0, which is not supported;
-  // it would also need Go's byte-based line lengths)
+  // (The output buffer holds UTF-8 bytes, so this is Go's byte-based length)
+  currentLineLength() {
+    const p = this;
+    const js = p.jsBuf;
+    const n = p.jsLen;
+    const stop = p.oldLineEnd;
+
+    // Update "oldLineStart" to the start of the current line
+    for (let i = n; i > stop; i--) {
+      const c = js[i - 1];
+      if (c === 13 || c === 10) {
+        p.oldLineStart = i;
+        break;
+      }
+    }
+
+    p.oldLineEnd = n;
+    return n - p.oldLineStart;
+  }
 
   printNewlinePastLineLimit() {
-    // Only reachable when LineLimit > 0, which print() rejects
-    bail();
-    return false;
+    const p = this;
+    if (p.currentLineLength() < p.options.lineLimit) {
+      return false;
+    }
+    p.print("\n");
+    p.printIndent();
+    return true;
   }
 
   printSpaceBeforeOperator(next) {
@@ -1661,11 +1786,35 @@ class printer {
     }
 
     // Handle key syntax compression for cross-module constant inlining of enums
-    // (MinifySyntax only: the late constant folding of computed keys is not
-    // ported, so keyFlags stays 0 and the property is never modified)
-    const keyFlags = 0;
+    // (Go mutates its copy of the property: "propertyKey" and "propertyFlags"
+    // are that copy's Key and Flags)
+    let propertyKey = property.key;
+    let propertyFlags = property.flags;
+    let keyFlags = 0;
+    if (p.options.minifySyntax && (propertyFlags & PropertyIsComputed) !== 0) {
+      propertyKey = p.lateConstantFoldUnaryOrBinaryOrIfExpr(propertyKey);
+      keyFlags |= parentWasUnaryOrBinaryOrIfTest;
 
-    if ((property.flags & PropertyIsStatic) !== 0) {
+      if (propertyKey.data.k === E_INLINED_ENUM) {
+        propertyKey = propertyKey.data.value;
+      }
+
+      // Remove the computed flag if it's no longer needed
+      const key = propertyKey.data;
+      switch (key.k) {
+        case E_NUMBER:
+          propertyFlags &= ~PropertyIsComputed;
+          break;
+
+        case E_STRING:
+          if (key.value !== "__proto__" && key.value !== "constructor" && key.value !== "prototype") {
+            propertyFlags &= ~PropertyIsComputed;
+          }
+          break;
+      }
+    }
+
+    if ((propertyFlags & PropertyIsStatic) !== 0) {
       p.printSpaceBeforeIdentifier();
       p.addSourceMapping(property.loc);
       p.print("static");
@@ -1711,11 +1860,11 @@ class printer {
       }
     }
 
-    let isComputed = (property.flags & PropertyIsComputed) !== 0;
+    let isComputed = (propertyFlags & PropertyIsComputed) !== 0;
 
     // Automatically print numbers that would cause a syntax error as computed properties
     if (!isComputed) {
-      const key = property.key.data;
+      const key = propertyKey.data;
       if (key.k === E_NUMBER) {
         if (signbit(key.value) || (key.value === Infinity && p.options.minifySyntax)) {
           // "{ -1: 0 }" must be printed as "{ [-1]: 0 }"
@@ -1727,14 +1876,14 @@ class printer {
 
     if (isComputed) {
       p.addSourceMapping(property.loc);
-      const isMultiLine = p.willPrintExprCommentsAtLoc(property.key.loc) || p.willPrintExprCommentsAtLoc(property.closeBracketLoc);
+      const isMultiLine = p.willPrintExprCommentsAtLoc(propertyKey.loc) || p.willPrintExprCommentsAtLoc(property.closeBracketLoc);
       p.print("[");
       if (isMultiLine) {
         p.printNewline();
         p.options.indent++;
         p.printIndent();
       }
-      p.printExpr(property.key, LComma, keyFlags);
+      p.printExpr(propertyKey, LComma, keyFlags);
       if (isMultiLine) {
         p.printNewline();
         p.printExprCommentsAfterCloseTokenAtLoc(property.closeBracketLoc);
@@ -1766,11 +1915,11 @@ class printer {
       return;
     }
 
-    const key = property.key.data;
+    const key = propertyKey.data;
     switch (key.k) {
       case E_PRIVATE_IDENTIFIER: {
         const name = p.renamer.nameForSymbol(key.ref);
-        p.addSourceMappingForName(property.key.loc, name, key.ref);
+        p.addSourceMappingForName(propertyKey.loc, name, key.ref);
         p.printIdentifier(name);
         break;
       }
@@ -1779,12 +1928,11 @@ class printer {
         const name = p.mangledPropName(key.ref);
         if (p.canPrintIdentifier(name)) {
           p.printSpaceBeforeIdentifier();
-          p.addSourceMappingForName(property.key.loc, name, key.ref);
+          p.addSourceMappingForName(propertyKey.loc, name, key.ref);
           p.printIdentifier(name);
 
           // Use a shorthand property if the names are the same
-          // (compat.ObjectExtensions is always supported)
-          if (value !== null && !p.willPrintExprCommentsAtLoc(value.loc)) {
+          if (!jsFeatureHas(p.options.unsupportedFeatures, ObjectExtensions) && value !== null && !p.willPrintExprCommentsAtLoc(value.loc)) {
             const e = value.data;
             switch (e.k) {
               case E_IDENTIFIER:
@@ -1817,25 +1965,24 @@ class printer {
             }
           }
         } else {
-          p.addSourceMapping(property.key.loc);
+          p.addSourceMapping(propertyKey.loc);
           p.printQuotedUTF8(name, 0);
         }
         break;
       }
 
       case E_STRING: {
-        if ((property.flags & PropertyPreferQuotedKey) === 0 && p.canPrintIdentifierUTF16(key.value)) {
+        if ((propertyFlags & PropertyPreferQuotedKey) === 0 && p.canPrintIdentifierUTF16(key.value)) {
           p.printSpaceBeforeIdentifier();
 
           // Use a shorthand property if the names are the same
-          // (compat.ObjectExtensions is always supported)
-          if (value !== null && !p.willPrintExprCommentsAtLoc(value.loc)) {
+          if (!jsFeatureHas(p.options.unsupportedFeatures, ObjectExtensions) && value !== null && !p.willPrintExprCommentsAtLoc(value.loc)) {
             const e = value.data;
             switch (e.k) {
               case E_IDENTIFIER:
-                if (canUseShorthandProperty(key.value, p.renamer.nameForSymbol(e.ref), property.flags)) {
+                if (canUseShorthandProperty(key.value, p.renamer.nameForSymbol(e.ref), propertyFlags)) {
                   if (p.addSourceMappings) {
-                    p.addSourceMappingForName(property.key.loc, key.value, e.ref);
+                    p.addSourceMappingForName(propertyKey.loc, key.value, e.ref);
                   }
                   p.printIdentifierUTF16(key.value);
                   if (property.initializerOrNil !== null) {
@@ -1854,11 +2001,11 @@ class printer {
                 const symbol = p.symbols.get(ref);
                 if (
                   symbol.namespaceAlias === null &&
-                  canUseShorthandProperty(key.value, p.renamer.nameForSymbol(ref), property.flags) &&
+                  canUseShorthandProperty(key.value, p.renamer.nameForSymbol(ref), propertyFlags) &&
                   p.constValue(ref) === null
                 ) {
                   if (p.addSourceMappings) {
-                    p.addSourceMappingForName(property.key.loc, key.value, ref);
+                    p.addSourceMappingForName(propertyKey.loc, key.value, ref);
                   }
                   p.printIdentifierUTF16(key.value);
                   if (property.initializerOrNil !== null) {
@@ -1880,25 +2027,29 @@ class printer {
           // change because the prototype will now be set. Avoid using an identifier
           // by using a computed property with a string instead. For more info see:
           // https://tc39.es/ecma262/#sec-runtime-semantics-propertydefinitionevaluation
-          if ((property.flags & PropertyWasShorthand) !== 0 && key.value === "__proto__") {
+          if (
+            (propertyFlags & PropertyWasShorthand) !== 0 &&
+            !jsFeatureHas(p.options.unsupportedFeatures, ObjectExtensions) &&
+            key.value === "__proto__"
+          ) {
             p.print("[");
-            p.addSourceMapping(property.key.loc);
+            p.addSourceMapping(propertyKey.loc);
             p.printQuotedUTF16(key.value, 0);
             p.print("]");
             break;
           }
 
-          p.addSourceMapping(property.key.loc);
+          p.addSourceMapping(propertyKey.loc);
           p.printIdentifierUTF16(key.value);
         } else {
-          p.addSourceMapping(property.key.loc);
+          p.addSourceMapping(propertyKey.loc);
           p.printQuotedUTF16(key.value, 0);
         }
         break;
       }
 
       default:
-        p.printExpr(property.key, LLowest, keyFlags);
+        p.printExpr(propertyKey, LLowest, keyFlags);
     }
 
     if (isMethodFn) {
@@ -1921,7 +2072,9 @@ class printer {
   }
 
   printQuotedUTF16(data, flags) {
-    // (compat.TemplateLiteral is always supported, so backticks stay allowed)
+    if (jsFeatureHas(this.options.unsupportedFeatures, TemplateLiteral)) {
+      flags &= ~printQuotedAllowBacktick;
+    }
 
     let singleCost = 0;
     let doubleCost = 0;
@@ -2040,24 +2193,55 @@ class printer {
       }
 
       // External "import()"
-      // (compat.DynamicImport is always supported, so the
-      // "Promise.resolve().then(() => require())" form is never needed)
-      const kind = ImportDynamic;
-      p.printSpaceBeforeIdentifier();
-      switch (phase) {
-        case DeferPhase:
-          p.print("import.defer(");
-          break;
-        case SourcePhase:
-          p.print("import.source(");
-          break;
-        default:
-          p.print("import(");
+      let kind = ImportDynamic;
+      const dynamicImportOK = !jsFeatureHas(p.options.unsupportedFeatures, DynamicImport);
+      let deferDotThenSuffix = false;
+      let deferToESMSuffix = false;
+      if (dynamicImportOK) {
+        p.printSpaceBeforeIdentifier();
+        switch (phase) {
+          case DeferPhase:
+            p.print("import.defer(");
+            break;
+          case SourcePhase:
+            p.print("import.source(");
+            break;
+          default:
+            p.print("import(");
+        }
+      } else {
+        kind = ImportRequire;
+        p.printSpaceBeforeIdentifier();
+        p.print("Promise.resolve()");
+        p.printDotThenPrefix();
+        deferDotThenSuffix = true;
+
+        // Wrap this with a call to "__toESM()" if this is a CommonJS file
+        if ((record.flags & WrapWithToESM) !== 0) {
+          p.printSpaceBeforeIdentifier();
+          p.printIdentifier(p.renamer.nameForSymbol(p.options.toESMRef));
+          p.print("(");
+          deferToESMSuffix = true;
+        }
+
+        // Potentially substitute our own "__require" stub for "require"
+        p.printSpaceBeforeIdentifier();
+        if ((record.flags & CallRuntimeRequire) !== 0) {
+          p.printIdentifier(p.renamer.nameForSymbol(p.options.runtimeRequireRef));
+        } else {
+          p.print("require");
+        }
+
+        p.print("(");
       }
       const isMultiLine =
         p.willPrintExprCommentsAtLoc(record.range.loc) ||
         p.willPrintExprCommentsAtLoc(closeParenLoc) ||
-        (record.assertOrWith !== null && p.willPrintExprCommentsAtLoc(record.assertOrWith.outerOpenBraceLoc));
+        (record.assertOrWith !== null &&
+          dynamicImportOK &&
+          (!jsFeatureHas(p.options.unsupportedFeatures, ImportAssertions) ||
+            !jsFeatureHas(p.options.unsupportedFeatures, ImportAttributes)) &&
+          p.willPrintExprCommentsAtLoc(record.assertOrWith.outerOpenBraceLoc));
       if (isMultiLine) {
         p.printNewline();
         p.options.indent++;
@@ -2065,7 +2249,9 @@ class printer {
       }
       p.printExprCommentsAtLoc(record.range.loc);
       p.printPath(importRecordIndex, kind);
-      p.printImportCallAssertOrWith(record.assertOrWith, isMultiLine);
+      if (dynamicImportOK) {
+        p.printImportCallAssertOrWith(record.assertOrWith, isMultiLine);
+      }
       if (isMultiLine) {
         p.printNewline();
         p.printExprCommentsAfterCloseTokenAtLoc(closeParenLoc);
@@ -2076,6 +2262,17 @@ class printer {
         p.addSourceMapping(closeParenLoc);
       }
       p.print(")");
+
+      // Deferred calls, in reverse order of registration
+      if (deferToESMSuffix) {
+        if (moduleTypeIsESM(p.moduleType)) {
+          p.print(",");
+          p.printSpace();
+          p.print("1");
+        }
+        p.print(")");
+      }
+      if (deferDotThenSuffix) p.printDotThenSuffix();
       if (deferWrapParen) p.print(")");
       return;
     }
@@ -2166,18 +2363,40 @@ class printer {
     if (deferWrapParen) p.print(")");
   }
 
-  // (compat.Arrow is always supported)
   printDotThenPrefix() {
     const p = this;
-    p.print(".then(()");
-    p.printSpace();
-    p.print("=>");
-    p.printSpace();
-    return LComma;
+    if (jsFeatureHas(p.options.unsupportedFeatures, Arrow)) {
+      p.print(".then(function()");
+      p.printSpace();
+      p.print("{");
+      p.printNewline();
+      p.options.indent++;
+      p.printIndent();
+      p.print("return");
+      p.printSpace();
+      return LLowest;
+    } else {
+      p.print(".then(()");
+      p.printSpace();
+      p.print("=>");
+      p.printSpace();
+      return LComma;
+    }
   }
 
   printDotThenSuffix() {
-    this.print(")");
+    const p = this;
+    if (jsFeatureHas(p.options.unsupportedFeatures, Arrow)) {
+      if (!p.options.minifyWhitespace) {
+        p.print(";");
+      }
+      p.printNewline();
+      p.options.indent--;
+      p.printIndent();
+      p.print("})");
+    } else {
+      p.print(")");
+    }
   }
 
   printUndefined(loc, level) {
@@ -2213,62 +2432,107 @@ class printer {
   // in the printer. We may have already printed the leading indent, for example.
   //
   // Port note: the only rewrites happen for calls to symbols flagged
-  // IsEmptyFunction / IsIdentityFunction, and the parser only sets those flags
-  // when MinifySyntax is enabled (never in the fast path). Those branches bail,
-  // so the result is always "expr" itself. Go recurses into both operands of
-  // comma chains; this walks the left spine iteratively instead (same visiting
-  // set, no JS stack overflow on very long comma chains). And when no symbol
-  // has either flag at all (checked once in print()) nothing can change, so
-  // return right away: Go calls this for every level of a comma chain, which
-  // is O(n^2) in the chain length.
+  // IsEmptyFunction / IsIdentityFunction. JS-only: when no symbol has either
+  // flag at all (checked once in print()) nothing can change, so this returns
+  // right away. Comma chains are handled by simplifyUnusedCommaChain.
   simplifyUnusedExpr(expr) {
     const p = this;
     if (!p.hasInlinableCalls) {
       return expr;
     }
-    let current = expr;
-    for (;;) {
-      const e = current.data;
-      switch (e.k) {
-        case E_BINARY:
-          // Calls to be inlined may be hidden inside a comma operator chain
-          if (e.op === BinOpComma) {
-            p.simplifyUnusedExpr(e.right);
-            current = e.left;
-            continue;
-          }
-          break;
-
-        case E_CALL: {
-          let symbolFlags = 0;
-          const target = e.target.data;
-          switch (target.k) {
-            case E_IDENTIFIER:
-              symbolFlags = p.symbols.get(target.ref).flags;
-              break;
-            case E_IMPORT_IDENTIFIER: {
-              const ref = followSymbols(p.symbols, target.ref);
-              symbolFlags = p.symbols.get(ref).flags;
-              break;
-            }
-          }
-
-          // Replace non-mutated empty functions with their arguments at print time
-          if ((symbolFlags & (IsEmptyFunction | CouldPotentiallyBeMutated)) === IsEmptyFunction) {
-            bail(); // (MinifySyntax only)
-          }
-
-          // Inline non-mutated identity functions at print time
-          if ((symbolFlags & (IsIdentityFunction | CouldPotentiallyBeMutated)) === IsIdentityFunction && e.args.length === 1) {
-            if (e.args[0].data.k !== E_SPREAD) {
-              bail(); // (MinifySyntax only)
-            }
-          }
-          break;
+    const e = expr.data;
+    switch (e.k) {
+      case E_BINARY:
+        // Calls to be inlined may be hidden inside a comma operator chain
+        if (e.op === BinOpComma) {
+          return p.simplifyUnusedCommaChain(expr);
         }
+        break;
+
+      case E_CALL: {
+        let symbolFlags = 0;
+        const target = e.target.data;
+        switch (target.k) {
+          case E_IDENTIFIER:
+            symbolFlags = p.symbols.get(target.ref).flags;
+            break;
+          case E_IMPORT_IDENTIFIER: {
+            const ref = followSymbols(p.symbols, target.ref);
+            symbolFlags = p.symbols.get(ref).flags;
+            break;
+          }
+        }
+
+        // Replace non-mutated empty functions with their arguments at print time
+        if ((symbolFlags & (IsEmptyFunction | CouldPotentiallyBeMutated)) === IsEmptyFunction) {
+          let replacement = null;
+          for (let i = 0; i < e.args.length; i++) {
+            let arg = e.args[i];
+            if (arg.data.k === E_SPREAD) {
+              arg = new Expr(new EArray([arg], 0, 0, true), arg.loc);
+            }
+            replacement = joinWithComma(replacement, p.astHelpers.simplifyUnusedExpr(p.simplifyUnusedExpr(arg), p.options.unsupportedFeatures));
+          }
+          return replacement; // Don't add "undefined" here because the result isn't used
+        }
+
+        // Inline non-mutated identity functions at print time
+        if ((symbolFlags & (IsIdentityFunction | CouldPotentiallyBeMutated)) === IsIdentityFunction && e.args.length === 1) {
+          const arg = e.args[0];
+          if (arg.data.k !== E_SPREAD) {
+            return p.astHelpers.simplifyUnusedExpr(p.simplifyUnusedExpr(arg), p.options.unsupportedFeatures);
+          }
+        }
+        break;
       }
-      return expr;
     }
+
+    return expr;
+  }
+
+  // The comma case of Go's simplifyUnusedExpr:
+  //
+  //   left := p.simplifyUnusedExpr(e.Left)
+  //   right := p.simplifyUnusedExpr(e.Right)
+  //   if left.Data != e.Left.Data || right.Data != e.Right.Data {
+  //     return js_ast.JoinWithComma(left, right)
+  //   }
+  //   return expr
+  //
+  // JS-only: this walks the left spine of the chain iteratively (no JS stack
+  // overflow on very long chains) in the same evaluation order (the leftmost
+  // operand first, then the right operands from the innermost comma out).
+  // The result is a pure function of the subtree (the printer never mutates
+  // the AST and symbol flags do not change while printing), so the comma
+  // nodes that come back unchanged are remembered: Go re-simplifies the left
+  // operand at every level of a chain (see checkAndPrepare), which is O(n^2).
+  simplifyUnusedCommaChain(expr) {
+    const p = this;
+    let memo = p.unchangedByInlining;
+    if (memo === null) {
+      memo = new Set();
+      p.unchangedByInlining = memo;
+    }
+    const spine = [];
+    let current = expr;
+    while (current.data.k === E_BINARY && current.data.op === BinOpComma && !memo.has(current.data)) {
+      spine.push(current);
+      current = current.data.left;
+    }
+    let result = current.data.k === E_BINARY && current.data.op === BinOpComma ? current : p.simplifyUnusedExpr(current);
+    for (let i = spine.length - 1; i >= 0; i--) {
+      const node = spine[i];
+      const e = node.data;
+      const left = result;
+      const right = p.simplifyUnusedExpr(e.right);
+      if (exprData(left) !== e.left.data || exprData(right) !== e.right.data) {
+        result = joinWithComma(left, right);
+      } else {
+        memo.add(e);
+        result = node;
+      }
+    }
+    return result;
   }
 
   // This assumes the original expression was some form of indirect value, such
@@ -2314,7 +2578,117 @@ class printer {
     return expr;
   }
 
-  // (lateConstantFoldUnaryOrBinaryOrIfExpr is MinifySyntax only: not ported)
+  // Constant folding is already implemented once in the parser. A smaller form
+  // of constant folding (just for numbers) is implemented here to clean up cross-
+  // module numeric constants and bitwise operations. This is not a general-
+  // purpose/optimal approach and never will be. For example, we can't affect
+  // tree shaking at this stage because it has already happened.
+  lateConstantFoldUnaryOrBinaryOrIfExpr(expr) {
+    const p = this;
+    const e = expr.data;
+    switch (e.k) {
+      case E_IMPORT_IDENTIFIER: {
+        const ref = followSymbols(p.symbols, e.ref);
+        const value = p.constValue(ref);
+        if (value !== null) {
+          return constValueToExpr(expr.loc, value);
+        }
+        break;
+      }
+
+      case E_DOT: {
+        const value = p.tryToGetImportedEnumValue(e.target, e.name);
+        if (value !== null) {
+          let inlinedValue;
+          if (value.string !== null) {
+            inlinedValue = new Expr(new EString(value.string), expr.loc);
+          } else {
+            inlinedValue = new Expr(new ENumber(value.number), expr.loc);
+          }
+
+          if (e.name.includes("*/")) {
+            // Don't wrap with a comment
+            return inlinedValue;
+          }
+
+          // Wrap with a comment
+          return new Expr(new EInlinedEnum(inlinedValue, e.name), inlinedValue.loc);
+        }
+        break;
+      }
+
+      case E_UNARY: {
+        const value = p.lateConstantFoldUnaryOrBinaryOrIfExpr(e.value);
+
+        // Only fold again if something chained
+        if (value.data !== e.value.data) {
+          // Only fold certain operations (just like the parser)
+          const r = toNumberWithoutSideEffects(value.data);
+          if (r[1]) {
+            const v = r[0];
+            switch (e.op) {
+              case UnOpPos:
+                return new Expr(new ENumber(v), expr.loc);
+
+              case UnOpNeg:
+                return new Expr(new ENumber(-v), expr.loc);
+
+              case UnOpCpl:
+                return new Expr(new ENumber(~toInt32(v)), expr.loc);
+            }
+          }
+
+          // Don't mutate the original AST
+          expr = new Expr(new EUnary(value, e.op), expr.loc);
+        }
+        break;
+      }
+
+      case E_BINARY: {
+        const left = p.lateConstantFoldUnaryOrBinaryOrIfExpr(e.left);
+        const right = p.lateConstantFoldUnaryOrBinaryOrIfExpr(e.right);
+
+        // Only fold again if something changed
+        if (left.data !== e.left.data || right.data !== e.right.data) {
+          const binary = new EBinary(left, right, e.op);
+
+          // Only fold certain operations (just like the parser)
+          if (shouldFoldBinaryOperatorWhenMinifying(binary)) {
+            const result = foldBinaryOperator(expr.loc, binary);
+            if (result !== null) {
+              return result;
+            }
+          }
+
+          // Don't mutate the original AST
+          expr = new Expr(binary, expr.loc);
+        }
+        break;
+      }
+
+      case E_IF: {
+        const test = p.lateConstantFoldUnaryOrBinaryOrIfExpr(e.test);
+
+        // Only fold again if something changed
+        if (test.data !== e.test.data) {
+          const r = toBooleanWithSideEffects(test.data);
+          if (r[2] && r[1] === NoSideEffects) {
+            if (r[0]) {
+              return p.lateConstantFoldUnaryOrBinaryOrIfExpr(e.yes);
+            } else {
+              return p.lateConstantFoldUnaryOrBinaryOrIfExpr(e.no);
+            }
+          }
+
+          // Don't mutate the original AST
+          expr = new Expr(new EIf(test, e.yes, e.no), expr.loc);
+        }
+        break;
+      }
+    }
+
+    return expr;
+  }
 
   isUnboundIdentifier(expr) {
     const id = expr.data;
@@ -2460,8 +2834,24 @@ class printer {
   printExpr(expr, level, flags) {
     const p = this;
 
-    // (MinifySyntax only: the lateConstantFoldUnaryOrBinaryOrIfExpr pre-pass is
-    // not ported)
+    // If syntax compression is enabled, do a pre-pass over unary and binary
+    // operators to inline bitwise operations of cross-module inlined constants.
+    // This makes the output a little tighter if people construct bit masks in
+    // other files. This is not a general-purpose constant folding pass. In
+    // particular, it has no effect on tree shaking because that pass has already
+    // been run.
+    //
+    // This sets a flag to avoid doing this when the parent is a unary or binary
+    // operator so that we don't trigger O(n^2) behavior when traversing over a
+    // large expression tree.
+    //
+    // (JS-only: skipped when it can't change anything, see "canLateFold")
+    if (p.options.minifySyntax && (flags & parentWasUnaryOrBinaryOrIfTest) === 0 && p.canLateFold) {
+      const k = expr.data.k;
+      if (k === E_UNARY || k === E_BINARY || k === E_IF) {
+        expr = p.lateConstantFoldUnaryOrBinaryOrIfExpr(expr);
+      }
+    }
 
     p.printExprCommentsAtLoc(expr.loc);
 
@@ -2665,8 +3055,11 @@ class printer {
 
       case E_FUNCTION: {
         const n = p.jsLen;
-        // (compat.FunctionOrClassPropertyAccess is always supported)
-        const wrap = e.isParenthesized || p.stmtStart === n || p.exportDefaultStart === n;
+        const wrap =
+          e.isParenthesized ||
+          p.stmtStart === n ||
+          p.exportDefaultStart === n ||
+          ((flags & isPropertyAccessTarget) !== 0 && jsFeatureHas(p.options.unsupportedFeatures, FunctionOrClassPropertyAccess));
         if (wrap) {
           p.print("(");
         }
@@ -2698,8 +3091,10 @@ class printer {
 
       case E_CLASS: {
         const n = p.jsLen;
-        // (compat.FunctionOrClassPropertyAccess is always supported)
-        const wrap = p.stmtStart === n || p.exportDefaultStart === n;
+        const wrap =
+          p.stmtStart === n ||
+          p.exportDefaultStart === n ||
+          ((flags & isPropertyAccessTarget) !== 0 && jsFeatureHas(p.options.unsupportedFeatures, FunctionOrClassPropertyAccess));
         if (wrap) {
           p.print("(");
         }
@@ -2754,10 +3149,9 @@ class printer {
         }
 
         // If this was originally a template literal, print it as one as long as we're not minifying
-        // (compat.TemplateLiteral is always supported)
-        if (e.preferTemplate && !p.options.minifySyntax) {
+        if (e.preferTemplate && !p.options.minifySyntax && !jsFeatureHas(p.options.unsupportedFeatures, TemplateLiteral)) {
           p.print("`");
-          p.printUnquotedUTF16(e.value, 0x60, 0);
+          p.printUnquotedUTF16(e.value, 0x60, qflags);
           p.print("`");
           break;
         }
@@ -2798,12 +3192,14 @@ class printer {
         break;
 
       case E_BIG_INT:
-        // (compat.Bigint is always supported, so the "BigInt()" call form is
-        // never needed)
-        p.printSpaceBeforeIdentifier();
-        p.addSourceMapping(expr.loc);
-        p.print(e.value);
-        p.print("n");
+        if (!jsFeatureHas(p.options.unsupportedFeatures, Bigint)) {
+          p.printSpaceBeforeIdentifier();
+          p.addSourceMapping(expr.loc);
+          p.print(e.value);
+          p.print("n");
+          break;
+        }
+        p.printEBigIntCall(expr, e, level, flags);
         break;
 
       case E_NUMBER:
@@ -2943,7 +3339,7 @@ class printer {
 
       default:
         // Go: panic("Unexpected expression of type ...")
-        bail();
+        throw new GoPanic("Unexpected expression of type " + goTypeName("js_ast", e));
     }
   }
 
@@ -3071,8 +3467,8 @@ class printer {
     p.print(">");
 
     // Print the children. A nil child (Go: Expr{Loc: loc, Data: nil}, from
-    // "{/* comment */}") may be represented as "new Expr(null, loc)" (full
-    // fidelity) or as null (loc lost: bail if comments could be lost).
+    // "{/* comment */}") is "new Expr(null, loc)" (the parser never creates a
+    // null entry).
     for (const childOrNil of e.nullableChildren) {
       const child = childOrNil === null ? null : childOrNil.data;
       if (child !== null && child.k === E_JSX_ELEMENT) {
@@ -3096,14 +3492,6 @@ class printer {
         }
         p.print("}");
       } else {
-        if (
-          childOrNil === null &&
-          !p.options.minifyWhitespace &&
-          p.exprComments !== null &&
-          p.exprComments.size > p.printedExprComments.size
-        ) {
-          bail(); // Some unprinted comment might belong to this child's lost loc
-        }
         p.print("{");
         if (childOrNil !== null && p.willPrintExprCommentsAtLoc(childOrNil.loc)) {
           // Note: Some people use these comments for AST transformations
@@ -3197,8 +3585,86 @@ class printer {
   printECall(expr, e, level, flags) {
     const p = this;
 
-    // (MinifySyntax only: the print-time inlining of empty functions, identity
-    // functions and IIFEs is not ported)
+    if (p.options.minifySyntax) {
+      let symbolFlags = 0;
+      const target = e.target.data;
+      switch (target.k) {
+        case E_IDENTIFIER:
+          symbolFlags = p.symbols.get(target.ref).flags;
+          break;
+        case E_IMPORT_IDENTIFIER: {
+          const ref = followSymbols(p.symbols, target.ref);
+          symbolFlags = p.symbols.get(ref).flags;
+          break;
+        }
+      }
+
+      // Replace non-mutated empty functions with their arguments at print time
+      if ((symbolFlags & (IsEmptyFunction | CouldPotentiallyBeMutated)) === IsEmptyFunction) {
+        let replacement = null;
+        for (let i = 0; i < e.args.length; i++) {
+          let arg = e.args[i];
+          if (arg.data.k === E_SPREAD) {
+            arg = new Expr(new EArray([arg], 0, 0, true), arg.loc);
+          }
+          replacement = joinWithComma(replacement, p.astHelpers.simplifyUnusedExpr(arg, p.options.unsupportedFeatures));
+        }
+        if (replacement === null || (flags & exprResultIsUnused) === 0) {
+          replacement = joinWithComma(replacement, new Expr(EUndefinedShared, expr.loc));
+        }
+        p.printExpr(p.guardAgainstBehaviorChangeDueToSubstitution(replacement, flags), level, flags);
+        return;
+      }
+
+      // Inline non-mutated identity functions at print time
+      if ((symbolFlags & (IsIdentityFunction | CouldPotentiallyBeMutated)) === IsIdentityFunction && e.args.length === 1) {
+        let arg = e.args[0];
+        if (arg.data.k !== E_SPREAD) {
+          if ((flags & exprResultIsUnused) !== 0) {
+            arg = p.astHelpers.simplifyUnusedExpr(arg, p.options.unsupportedFeatures);
+            if (arg === null) {
+              // (Go sets the Data of the zero Expr, whose Loc is 0)
+              arg = new Expr(EUndefinedShared, 0);
+            }
+          }
+          p.printExpr(p.guardAgainstBehaviorChangeDueToSubstitution(arg, flags), level, flags);
+          return;
+        }
+      }
+
+      // Inline IIFEs that return expressions at print time
+      if (e.args.length === 0) {
+        // Note: Do not inline async arrow functions as they are not IIFEs. In
+        // particular, they are not necessarily invoked immediately, and any
+        // exceptions involved in their evaluation will be swallowed without
+        // bubbling up to the surrounding context.
+        const arrow = e.target.data;
+        if (arrow.k === E_ARROW && arrow.args.length === 0 && !arrow.isAsync) {
+          const stmts = arrow.body.block.stmts;
+
+          // "(() => {})()" => "void 0"
+          if (stmts.length === 0) {
+            const value = new Expr(EUndefinedShared, expr.loc);
+            p.printExpr(p.guardAgainstBehaviorChangeDueToSubstitution(value, flags), level, flags);
+            return;
+          }
+
+          // "(() => 123)()" => "123"
+          if (stmts.length === 1) {
+            const stmt = stmts[0].data;
+            if (stmt.k === S_RETURN) {
+              let value = stmt.valueOrNil;
+              if (value === null) {
+                // (Go sets the Data of the zero Expr, whose Loc is 0)
+                value = new Expr(EUndefinedShared, 0);
+              }
+              p.printExpr(p.guardAgainstBehaviorChangeDueToSubstitution(value, flags), level, flags);
+              return;
+            }
+          }
+        }
+      }
+    }
 
     let wrap = level >= LNew || (flags & isNewTarget) !== 0;
     let targetFlags = 0;
@@ -3283,8 +3749,9 @@ class printer {
     const p = this;
 
     // Only print the second argument if either import assertions or import attributes are supported
-    // (both are always supported)
-    const printImportAssertOrWith = e.optionsOrNil !== null;
+    const printImportAssertOrWith =
+      e.optionsOrNil !== null &&
+      (!jsFeatureHas(p.options.unsupportedFeatures, ImportAssertions) || !jsFeatureHas(p.options.unsupportedFeatures, ImportAttributes));
     const isMultiLine =
       !p.options.minifyWhitespace &&
       (p.willPrintExprCommentsAtLoc(e.expr.loc) ||
@@ -3769,6 +4236,71 @@ class printer {
     }
   }
 
+  // The EBigInt case of Go's printExpr when compat.Bigint is unsupported
+  printEBigIntCall(expr, e, level, flags) {
+    const p = this;
+    let wrap = level >= LNew || (flags & isNewTarget) !== 0;
+    const hasPureComment = !p.options.minifyWhitespace;
+
+    if (hasPureComment && level >= LPostfix) {
+      wrap = true;
+    }
+
+    if (wrap) {
+      p.print("(");
+    }
+
+    if (hasPureComment) {
+      const startFlags = p.saveExprStartFlags();
+      p.addSourceMapping(expr.loc);
+      p.print("/* @__PURE__ */ ");
+      p.restoreExprStartFlags(startFlags);
+    }
+
+    let value = e.value;
+    let useQuotes = true;
+
+    // When minifying, try to convert to a shorter form
+    if (p.options.minifySyntax) {
+      // Go: fmt.Sscan(value, &i) with a big.Int (the base prefix determines
+      // the base), then i.String()
+      const str = goScanBigInt(value);
+
+      // Print without quotes if it can be converted exactly
+      // (Go: strconv.ParseFloat(str, 64) succeeds and fmt.Sprintf("%.0f", num) == str)
+      const num = Number(str);
+      if (isFinite(num) && BigInt(num).toString() === str) {
+        useQuotes = false;
+      }
+
+      // Print the converted form if it's shorter (long hex strings may not be shorter)
+      if (str.length < value.length) {
+        value = str;
+      }
+    }
+
+    p.printSpaceBeforeIdentifier();
+    p.addSourceMapping(expr.loc);
+
+    if (useQuotes) {
+      p.print('BigInt("');
+    } else {
+      p.print("BigInt(");
+    }
+
+    p.print(value);
+
+    if (useQuotes) {
+      p.print('")');
+    } else {
+      p.print(")");
+    }
+
+    if (wrap) {
+      p.print(")");
+    }
+  }
+
   // The handling of binary expressions is convoluted because we're using
   // iteration on the heap instead of recursion on the call stack to avoid
   // stack overflow for deeply-nested ASTs. See the comments for the similar
@@ -4031,7 +4563,7 @@ class printer {
         break;
       default:
         // Go: panic("Internal error")
-        bail();
+        throw new GoPanic("Internal error");
     }
   }
 
@@ -4216,12 +4748,31 @@ class printer {
     p.addSourceMapping(record.range.loc);
     p.printQuotedUTF8(record.path.text, printQuotedNoWrap);
 
-    // (NeedsMetafile is never set here: print() rejects it, so no
-    // jsonMetadataImports entries are generated)
+    if (p.options.needsMetafile) {
+      let external = "";
+      if ((record.flags & ShouldNotBeExternalInMetafile) === 0) {
+        external = metafileFormatMaybeRemoveWhitespace(p.options.metafileFormat, ',\n          "external": true');
+      }
+      p.jsonMetadataImports.push(
+        metafileFormatMaybeRemoveWhitespace(p.options.metafileFormat, '\n        {\n          "path": ') +
+          quoteForJSON(record.path.text, p.options.asciiOnly) +
+          metafileFormatMaybeRemoveWhitespace(p.options.metafileFormat, ',\n          "kind": ') +
+          quoteForJSON(importKindStringForMetafile(importKind), p.options.asciiOnly) +
+          external +
+          metafileFormatMaybeRemoveWhitespace(p.options.metafileFormat, "\n        }"),
+      );
+    }
 
     if (record.assertOrWith !== null && importKind === ImportStmt) {
+      let feature = ImportAttributes;
+      if (record.assertOrWith.keyword === AssertKeyword) {
+        feature = ImportAssertions;
+      }
+
       // Omit import assertions/attributes on this import statement if they would cause a syntax error
-      // (compat.ImportAssertions / compat.ImportAttributes are always supported)
+      if (jsFeatureHas(p.options.unsupportedFeatures, feature)) {
+        return;
+      }
 
       p.printSpace();
       p.addSourceMapping(record.assertOrWith.keywordLoc);
@@ -4237,8 +4788,10 @@ class printer {
     // Omit import assertions/attributes if we know the "import()" syntax doesn't
     // support a second argument (i.e. both import assertions and import
     // attributes aren't supported) and doing so would cause a syntax error
-    // (both are always supported)
-    if (assertOrWith === null) {
+    if (
+      assertOrWith === null ||
+      (jsFeatureHas(p.options.unsupportedFeatures, ImportAssertions) && jsFeatureHas(p.options.unsupportedFeatures, ImportAttributes))
+    ) {
       return;
     }
 
@@ -4810,10 +5363,25 @@ class printer {
         break;
 
       case S_EXPR: {
-        const value = s.value;
+        let value = s.value;
 
         // Omit calls to empty functions from the output completely
-        // (MinifySyntax only: not ported)
+        if (p.options.minifySyntax) {
+          value = p.simplifyUnusedExpr(value);
+          if (value === null) {
+            // If this statement is not in a block, then we still need to emit something
+            if ((flags & canOmitStatement) === 0) {
+              // "if (x) empty();" => "if (x) ;"
+              p.addSourceMapping(stmt.loc);
+              p.printIndent();
+              p.print(";");
+              p.printNewline();
+            } else {
+              // "if (x) { empty(); }" => "if (x) {}"
+            }
+            break;
+          }
+        }
 
         // Avoid printing a source mapping when the expression would print one in
         // the same spot. We don't want to accidentally mask the mapping it emits.
@@ -4830,7 +5398,7 @@ class printer {
 
       default:
         // Go: panic("Unexpected statement of type ...")
-        bail();
+        throw new GoPanic("Unexpected statement of type " + goTypeName("js_ast", s));
     }
   }
 
@@ -4900,7 +5468,7 @@ class printer {
 
       default:
         // Go: panic("Internal error")
-        bail();
+        throw new GoPanic("Internal error");
     }
   }
 
@@ -5010,11 +5578,24 @@ class printer {
 
   printSFor(stmt, s) {
     const p = this;
-    const init = s.initOrNil;
-    const update = s.updateOrNil;
+    let init = s.initOrNil;
+    let update = s.updateOrNil;
 
     // Omit calls to empty functions from the output completely
-    // (MinifySyntax only: not ported)
+    if (p.options.minifySyntax) {
+      if (init !== null && init.data.k === S_EXPR) {
+        const expr = init.data;
+        const value = p.simplifyUnusedExpr(expr.value);
+        if (value === null) {
+          init = null;
+        } else if (value.data !== expr.value.data) {
+          init = new Stmt(new SExpr(value), init.loc);
+        }
+      }
+      if (update !== null) {
+        update = p.simplifyUnusedExpr(update);
+      }
+    }
 
     p.addSourceMapping(stmt.loc);
     p.printIndent();
@@ -5499,10 +6080,11 @@ function wrapToAvoidAmbiguousElse(s) {
   }
 }
 
-// (compat.UnicodeEscapes is always supported, so the ASCII-only clause of the Go
-// condition is always true)
-export function canEscapeIdentifier(name, unsupportedFeatures, asciiOnly) {
-  return isIdentifierES5AndESNext(name);
+export function canEscapeIdentifier(name, unsupportedFeatures           , asciiOnly) {
+  return (
+    isIdentifierES5AndESNext(name) &&
+    (!asciiOnly || !jsFeatureHas(unsupportedFeatures, UnicodeEscapes) || !containsNonBMPCodePoint(name))
+  );
 }
 
 export class Options {
@@ -5515,7 +6097,7 @@ export class Options {
   ;                             
   ;                        
   ;                                 
-  ;                                   
+  ;                                      
   ;                      
   ;                         
   ;                            
@@ -5538,7 +6120,7 @@ export class Options {
     toCommonJSRef = InvalidRef,
     toESMRef = InvalidRef,
     runtimeRequireRef = InvalidRef,
-    unsupportedFeatures = 0, // compat.JSFeature (must be 0)
+    unsupportedFeatures = JSFeatureNone, // compat.JSFeature
     indent = 0,
     lineLimit = 0,
     outputFormat = FormatPreserve,
@@ -5654,22 +6236,10 @@ export class PrintResult {
 }
 
 // Go: Print(tree js_ast.AST, symbols ast.SymbolMap, r renamer.Renamer, options Options) PrintResult
-// compat.InlineScript = 1 << 36
-export const INLINE_SCRIPT_FEATURE = 68719476736;
 
 export function print(tree, symbols, r, options) {
   // Go copies the Options struct (the printer mutates p.options.Indent)
   options = options instanceof Options ? options.clone() : Object.assign(new Options(), options);
-
-  // Only the fast-path option subset is ported
-  if (
-    options.minifySyntax ||
-    options.lineLimit > 0 ||
-    options.needsMetafile ||
-    (options.unsupportedFeatures !== 0 && options.unsupportedFeatures !== INLINE_SCRIPT_FEATURE)
-  ) {
-    bail();
-  }
 
   const moduleType = tree.moduleTypeData !== null ? tree.moduleTypeData.type : ModuleUnknown;
 
@@ -5681,22 +6251,22 @@ export function print(tree, symbols, r, options) {
   }
 
   const p = new printer(symbols, r, tree.importRecords, options, moduleType, exprComments, tree.hasLazyExport);
-  // compat.InlineScript (bit 36) is the only feature that can be unsupported
-  // here: esbuild marks it unsupported for non-browser platforms.
-  p.inlineScriptOK = options.unsupportedFeatures !== INLINE_SCRIPT_FEATURE;
 
   if (p.exprComments !== null) {
     p.printedExprComments = new Set();
     p.exprCommentBits = exprCommentBitsFor(p.exprComments);
   }
 
-  // The parser only sets IsEmptyFunction / IsIdentityFunction when minifying
-  // syntax, which the fast path never does (print() bails on minifySyntax), so
-  // no symbol can carry them and the scan over all symbols is skipped.
-  p.hasInlinableCalls = false;
+  p.astHelpers = makeHelperContext((ref) => {
+    ref = followSymbols(symbols, ref);
+    return symbols.get(ref).kind === SymbolUnbound;
+  });
 
-  // (p.astHelpers = js_ast.MakeHelperContext(...) is not needed: its only
-  // use, SimplifyUnusedExpr, is reached from MinifySyntax-only code)
+  // JS-only: the parser only sets IsEmptyFunction / IsIdentityFunction when
+  // minifying syntax, and a transform parses and prints with the same
+  // MinifySyntax setting, so without it no symbol can carry them and the scan
+  // over all symbols is skipped.
+  p.hasInlinableCalls = options.minifySyntax && anySymbolHasFlags(symbols, IsEmptyFunction | IsIdentityFunction);
 
   // Add the top-level directive if present
   if (tree.directives !== null) {
@@ -5725,5 +6295,40 @@ export function print(tree, symbols, r, options) {
     sourceMapChunk = p.builder.generateChunk(p.jsBuf, p.jsLen);
   }
   return new PrintResult(p.jsText(), p.extractedLegalComments, p.jsonMetadataImports, sourceMapChunk);
+}
+
+// fmt.Sscan(value, &i) for a big.Int i ("%v": big.Int's scan with base 0,
+// which takes the base from a "0b", "0o", "0x" or "0" prefix and allows
+// underscores between digits), then i.String(). The value is the text of a
+// bigint literal; scanning stops at the first character that is not a digit.
+function goScanBigInt(value        )         {
+  let s = value;
+  let base = 10;
+  if (s.length >= 2 && s[0] === "0") {
+    const c = s[1];
+    if (c === "b" || c === "B") {
+      base = 2;
+      s = s.slice(2);
+    } else if (c === "o" || c === "O") {
+      base = 8;
+      s = s.slice(2);
+    } else if (c === "x" || c === "X") {
+      base = 16;
+      s = s.slice(2);
+    } else {
+      base = 8;
+      s = s.slice(1);
+    }
+  }
+  const b = BigInt(base);
+  let n = BigInt(0);
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "_") continue;
+    const d = parseInt(ch, 36);
+    if (!(d < base)) break;
+    n = n * b + BigInt(d);
+  }
+  return n.toString();
 }
 // generated from js_printer.mts by tools/ts-build.mjs; edit that file

@@ -5,8 +5,17 @@
 //
 // All *parser methods live in `tsMethods` (mixed into Parser.prototype by
 // js_parser.mjs). See CONVENTIONS.md.
-import { LEXER_PANIC } from "./bail.mjs";
-import { Error as MsgKindError, LevelInfo, RANGE_ZERO } from "./logger.mjs";
+import { goQuote } from "./gostd.mjs";
+import { LEXER_PANIC } from "./gopanic.mjs";
+import { jsFeatureHas, Arrow, LogicalAssignment } from "./compat.mjs";
+import {
+  Error as MsgKindError,
+  LevelInfo,
+  RANGE_ZERO,
+  Msg,
+  Range,
+  rangeEnd,
+} from "./logger.mjs";
 import {
   InvalidRef,
   LocRef,
@@ -32,6 +41,7 @@ import {
   Binding,
   Arg,
   Decl,
+  Fn,
   FnBody,
   SBlock,
   BIdentifier,
@@ -39,6 +49,7 @@ import {
   EBinary,
   ECall,
   EDot,
+  EFunction,
   EIdentifier,
   EInlinedEnum,
   EObject,
@@ -173,6 +184,17 @@ export function skipTypeFlagsHas(flags, flag) {
   return (flags & flag) !== 0;
 }
 
+// Backtracking: Go restores a copy of the lexer struct taken earlier. That
+// copy's "AllComments" slice still has the old length, so comments appended by
+// the discarded lookahead are dropped (they are appended again when they are
+// scanned for real). lexer.clone() shares the array instead, so truncate it.
+// ("AllComments" feeds the character frequency used by minifyIdentifiers.)
+export function restoreLexer(p, oldLexer, allCommentsLen) {
+  const allComments = oldLexer.allComments;
+  if (allComments.length !== allCommentsLen) allComments.length = allCommentsLen;
+  p.lexer = oldLexer;
+}
+
 // Shared "skipTypeScriptTypeArgumentsOpts{}" (read-only, never mutate it)
 const SKIP_TYPE_ARGS_OPTS_DEFAULT = Object.freeze(new skipTypeScriptTypeArgumentsOpts());
 // Shared "skipTypeScriptTypeArgumentsOpts{isParseTypeArgumentsInExpression: true}"
@@ -181,9 +203,9 @@ const SKIP_TYPE_ARGS_OPTS_IN_EXPRESSION = Object.freeze(new skipTypeScriptTypeAr
 // Stand-in for "logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, nil)" as
 // used by the throw-away parser in
 // "isTypeScriptArrowReturnTypeAfterQuestionAndBeforeColon". The messages of
-// that log are never looked at, so unlike the fast path's Log (which throws
-// BAIL on errors/warnings) it must silently drop everything: in Go, errors
-// logged by the temporary parser do not stop it and have no visible effect.
+// that log are never looked at, so it silently drops everything: in Go,
+// errors logged by the temporary parser do not stop it and have no visible
+// effect.
 class discardedDeferLog {
   declare level: number;
   declare errors: boolean;
@@ -669,8 +691,7 @@ export const tsMethods = {
           // "[function?: number]"
           if ((flags & allowTupleLabelsFlag) !== 0 && p.lexer.isIdentifierOrKeyword()) {
             if (p.lexer.token !== TFunction) {
-              // (message text omitted: errors bail) Go: fmt.Sprintf("Unexpected %q", p.lexer.Raw())
-              p.log.addError(p.tracker, p.lexer.range(), "");
+              p.log.addError(p.tracker, p.lexer.range(), "Unexpected " + goQuote(p.lexer.raw()));
             }
             p.lexer.next();
             if (p.lexer.token !== TColon && p.lexer.token !== TQuestion) {
@@ -951,8 +972,7 @@ export const tsMethods = {
 
       // Only report an error for the first invalid modifier
       if (invalidModifierRange.len > 0) {
-        // (message text omitted: errors bail) Go: "The modifier %q is not valid here:"
-        p.log.addError(p.tracker, invalidModifierRange, "");
+        p.log.addError(p.tracker, invalidModifierRange, "The modifier " + goQuote(p.source.textForRange(invalidModifierRange)) + " is not valid here:");
       }
 
       // expectIdentifier => Mandatory identifier (e.g. after "type Foo <in ___")
@@ -1044,6 +1064,7 @@ export const tsMethods = {
   trySkipTypeArgumentsInExpressionWithBacktracking() {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.isLogDisabled = true;
 
     // Implement backtracking by restoring the lexer's memory to its original state
@@ -1061,7 +1082,7 @@ export const tsMethods = {
       return true;
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return false;
     }
   },
@@ -1069,6 +1090,7 @@ export const tsMethods = {
   trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking() {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.isLogDisabled = true;
 
     // Implement backtracking by restoring the lexer's memory to its original state
@@ -1084,7 +1106,7 @@ export const tsMethods = {
       return result;
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return didNotSkipAnything;
     }
   },
@@ -1092,6 +1114,7 @@ export const tsMethods = {
   trySkipTypeScriptArrowReturnTypeWithBacktracking() {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.isLogDisabled = true;
 
     // Implement backtracking by restoring the lexer's memory to its original state
@@ -1110,7 +1133,7 @@ export const tsMethods = {
       return true;
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return false;
     }
   },
@@ -1137,6 +1160,12 @@ export const tsMethods = {
   // so nothing needs to be restored afterwards.
   isTypeScriptArrowReturnTypeAfterQuestionAndBeforeColon(await_) {
     const originalParser = this;
+
+    // (JS-only: the lexer copy shares "allComments" with the original lexer, so
+    // drop what the temporary parser appends; Go's copy appends to its own
+    // slice header. See restoreLexer.)
+    const allComments = originalParser.lexer.allComments;
+    const allCommentsLen = allComments.length;
 
     // Implement "backtracking" by swallowing lexer errors on a temporary parser
     try {
@@ -1165,12 +1194,15 @@ export const tsMethods = {
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
       return false; // Swallow this error
+    } finally {
+      if (allComments.length !== allCommentsLen) allComments.length = allCommentsLen;
     }
   },
 
   trySkipTypeScriptArrowArgsWithBacktracking() {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.isLogDisabled = true;
 
     // Implement backtracking by restoring the lexer's memory to its original state
@@ -1184,7 +1216,7 @@ export const tsMethods = {
       return true;
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return false;
     }
   },
@@ -1192,6 +1224,7 @@ export const tsMethods = {
   trySkipTypeScriptConstraintOfInferTypeWithBacktracking(flags) {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.isLogDisabled = true;
 
     // Implement backtracking by restoring the lexer's memory to its original state
@@ -1208,7 +1241,7 @@ export const tsMethods = {
       return true;
     } catch (e) {
       if (e !== LEXER_PANIC) throw e;
-      p.lexer = oldLexer;
+      restoreLexer(p, oldLexer, oldAllCommentsLen);
       return false;
     }
   },
@@ -1219,6 +1252,7 @@ export const tsMethods = {
     const p = this;
     let isTSArrowFn = false;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.next();
 
     // Look ahead to see if this should be an arrow function instead
@@ -1236,7 +1270,7 @@ export const tsMethods = {
     }
 
     // Restore the lexer
-    p.lexer = oldLexer;
+    restoreLexer(p, oldLexer, oldAllCommentsLen);
     return isTSArrowFn;
   },
 
@@ -1405,12 +1439,13 @@ export const tsMethods = {
   tsLookAheadNextTokenIsOpenParenOrLessThanOrDot() {
     const p = this;
     const oldLexer = p.lexer.clone();
+    const oldAllCommentsLen = oldLexer.allComments.length;
     p.lexer.next();
 
     const result = p.lexer.token === TOpenParen || p.lexer.token === TLessThan || p.lexer.token === TDot;
 
     // Restore the lexer
-    p.lexer = oldLexer;
+    restoreLexer(p, oldLexer, oldAllCommentsLen);
     return result;
   },
 
@@ -1595,14 +1630,26 @@ export const tsMethods = {
 
       if (p.lexer.token !== TComma && p.lexer.token !== TSemicolon) {
         if (p.lexer.isIdentifierOrKeyword() || p.lexer.token === TStringLiteral) {
-          // (message text and location omitted: errors bail)
-          if (value.valueOrNil !== null) {
+          let errorLoc;
+          let errorText;
+
+          if (value.valueOrNil === null) {
+            errorLoc = rangeEnd(nameRange);
+            errorText = 'Expected "," after ' + goQuote(valueNameText) + " in enum";
+          } else {
+            let nextName;
             if (p.lexer.token === TStringLiteral) {
-              // Kept for fidelity: decoding the string literal can itself fail
-              p.lexer.stringLiteral();
+              nextName = p.lexer.stringLiteral();
+            } else {
+              nextName = p.lexer.identifier;
             }
+            errorLoc = p.lexer.loc();
+            errorText = 'Expected "," before ' + goQuote(nextName) + " in enum";
           }
-          p.log.addMsg({ kind: MsgKindError, data: null });
+
+          const data = p.tracker.msgData(new Range(errorLoc, 0), errorText);
+          data.location.suggestion = ",";
+          p.log.addMsg(new Msg(null, "", data, MsgKindError));
           throw LEXER_PANIC;
         }
         break;
@@ -1950,8 +1997,7 @@ export const tsMethods = {
     }
 
     let argExpr;
-    if (p.options.minifySyntax /* && !p.options.unsupportedJSFeatures.Has(compat.LogicalAssignment) */) {
-      // (minify only)
+    if (p.options.minifySyntax && !jsFeatureHas(p.options.unsupportedJSFeatures, LogicalAssignment)) {
       // If the "||=" operator is supported, our minified output can be slightly smaller
       if (isExport && p.enclosingNamespaceArgRef !== null) {
         // "name = (enclosing.name ||= {})"
@@ -2020,21 +2066,24 @@ export const tsMethods = {
     }
 
     // Try to use an arrow function if possible for compactness
-    // (The "function" form for "p.options.unsupportedJSFeatures.Has(compat.Arrow)"
-    // is not ported: arrows are always supported in the fast path.)
+    let targetExpr;
     const args = [new Arg(new Binding(new BIdentifier(argRef), nameLoc))];
-
-    // "(() => { foo() })()" => "(() => foo())()"
-    if (p.options.minifySyntax && stmtsInsideClosure.length === 1) {
-      const expr = stmtsInsideClosure[0].data;
-      if (expr.k === S_EXPR) {
-        stmtsInsideClosure[0] = new Stmt(new SReturn(expr.value), stmtsInsideClosure[0].loc);
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, Arrow)) {
+      // (Go's js_ast.Fn{} zero value has ArgumentsRef == ast.Ref{} == 0)
+      targetExpr = new Expr(new EFunction(new Fn(null, args, new FnBody(new SBlock(stmtsInsideClosure), stmtLoc), 0)), stmtLoc);
+    } else {
+      // "(() => { foo() })()" => "(() => foo())()"
+      if (p.options.minifySyntax && stmtsInsideClosure.length === 1) {
+        const expr = stmtsInsideClosure[0].data;
+        if (expr.k === S_EXPR) {
+          stmtsInsideClosure[0] = new Stmt(new SReturn(expr.value), stmtsInsideClosure[0].loc);
+        }
       }
+      targetExpr = new Expr(
+        new EArrow(args, new FnBody(new SBlock(stmtsInsideClosure), stmtLoc), false, false, true /* preferExpr */),
+        stmtLoc,
+      );
     }
-    const targetExpr = new Expr(
-      new EArrow(args, new FnBody(new SBlock(stmtsInsideClosure), stmtLoc), false, false, true /* preferExpr */),
-      stmtLoc,
-    );
 
     // Call the closure with the name object
     stmts.push(new Stmt(new SExpr(new Expr(new ECall(targetExpr, [argExpr]), stmtLoc)), stmtLoc));
@@ -2119,13 +2168,17 @@ export const tsMethods = {
     }
 
     // Try to use an arrow function if possible for compactness
-    // (The "function" form for "p.options.unsupportedJSFeatures.Has(compat.Arrow)"
-    // is not ported: arrows are always supported in the fast path.)
+    let targetExpr;
     const args = [new Arg(new Binding(new BIdentifier(argRef), nameLoc))];
-    const targetExpr = new Expr(
-      new EArrow(args, new FnBody(new SBlock(stmtsInsideClosure), stmtLoc), false, false, p.options.minifySyntax /* preferExpr */),
-      stmtLoc,
-    );
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, Arrow)) {
+      // (Go's js_ast.Fn{} zero value has ArgumentsRef == ast.Ref{} == 0)
+      targetExpr = new Expr(new EFunction(new Fn(null, args, new FnBody(new SBlock(stmtsInsideClosure), stmtLoc), 0)), stmtLoc);
+    } else {
+      targetExpr = new Expr(
+        new EArrow(args, new FnBody(new SBlock(stmtsInsideClosure), stmtLoc), false, false, p.options.minifySyntax /* preferExpr */),
+        stmtLoc,
+      );
+    }
 
     // Call the closure with the name object and store it to the variable
     const decls = [

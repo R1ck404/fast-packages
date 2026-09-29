@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Log, Source, PrettyPaths, Path } from "../src/logger.mjs";
 import { TSOptions, TSConfig } from "../src/config.mjs";
 import * as L from "../src/js_lexer.mjs";
-import { BAIL, LEXER_PANIC } from "../src/bail.mjs";
+import { LEXER_PANIC } from "../src/gopanic.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -43,8 +43,15 @@ function makeSource(file, contents) {
   return new Source(new PrettyPaths(file, file), "", contents, new Path(file));
 }
 
+// (the log of the most recent lex(): "reported" means that the lexer logged a
+// message, or panicked after logging an error)
+let lastLog = null;
 function lex(text, tsParse = false) {
-  return L.newLexer(new Log(), makeSource("<input>", text), new TSOptions(new TSConfig(), tsParse));
+  lastLog = new Log();
+  return L.newLexer(lastLog, makeSource("<input>", text), new TSOptions(new TSConfig(), tsParse));
+}
+function reported(threw) {
+  return threw === LEXER_PANIC || (threw === null && lastLog.msgs.length > 0) ? "reported" : threw;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +108,7 @@ function unitChecks() {
     } catch (e) {
       threw = e;
     }
-    check("number error " + text, threw, BAIL);
+    check("number error " + text, reported(threw), "reported");
   }
 
   // String escapes (inputs are built with BS to keep this file free of escapes)
@@ -138,7 +145,7 @@ function unitChecks() {
     check("legacy octal loc", lexer.legacyOctalLoc, 1);
   }
   {
-    // Invalid escapes: cooked is null for templates, BAIL for strings
+    // Invalid escapes: cooked is null for templates, an error for strings
     const lexer = lex("`" + BS + "unicode`");
     const [cooked, raw] = lexer.cookedAndRawTemplateContents();
     check("template invalid cooked", cooked, null);
@@ -149,14 +156,14 @@ function unitChecks() {
     } catch (e) {
       threw = e;
     }
-    check("string invalid escape", threw, BAIL);
+    check("string invalid escape", reported(threw), "reported");
     threw = null;
     try {
       lex('"' + BS + 'u{110000}"').stringLiteral();
     } catch (e) {
       threw = e;
     }
-    check("string out of range escape", threw, BAIL);
+    check("string out of range escape", reported(threw), "reported");
     // Go wraps the value; tagged templates keep going
     check("template out of range cooked", lex("`" + BS + "u{110000}`").cookedAndRawTemplateContents()[0], String.fromCharCode(0xd800, 0xdc00));
   }
@@ -258,7 +265,7 @@ function unitChecks() {
     } catch (e) {
       threw = e;
     }
-    check("regexp dup flag", threw, BAIL);
+    check("regexp dup flag", reported(threw), "reported");
   }
 
   // Punctuation splitting
@@ -294,7 +301,7 @@ function unitChecks() {
     } catch (e) {
       threw = e;
     }
-    check("unterminated template", threw, BAIL);
+    check("unterminated template", reported(threw), "reported");
     const l2 = lex("x");
     l2.isLogDisabled = true;
     threw = null;
@@ -310,7 +317,7 @@ function unitChecks() {
     } catch (e) {
       threw = e;
     }
-    check("html comment warning bails", threw, BAIL);
+    check("html comment warning", reported(threw), "reported");
   }
 
   // JSX
@@ -531,7 +538,7 @@ try {
   unitChecks();
 } catch (e) {
   failures++;
-  console.log(`FAIL unit checks threw ${e === BAIL ? "BAIL" : e === LEXER_PANIC ? "LEXER_PANIC" : e && e.stack} after check "${lastCheck}"`);
+  console.log(`FAIL unit checks threw ${e === LEXER_PANIC ? "LEXER_PANIC" : e && e.stack} after check "${lastCheck}"`);
 }
 console.log(failures === 0 ? "unit checks: ok" : `unit checks: ${failures} FAILED`);
 
@@ -551,7 +558,7 @@ for (const { path, ts } of files) {
     count = walk(path, contents, ts, null, decodeAll);
   } catch (e) {
     failures++;
-    console.log(`FAIL ${path}: threw ${e === BAIL ? "BAIL" : e === LEXER_PANIC ? "LEXER_PANIC" : e && e.stack}`);
+    console.log(`FAIL ${path}: threw ${e === LEXER_PANIC ? "LEXER_PANIC" : e && e.stack}`);
     continue;
   }
   let best = Infinity;

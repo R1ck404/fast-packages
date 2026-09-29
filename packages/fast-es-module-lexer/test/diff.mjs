@@ -6,17 +6,25 @@
 // Every check runs @r1ck404/fast-es-module-lexer once per way of getting the source
 // into wasm memory (Node Buffer copy, V8 JS-string builtins: charCodeAt or
 // intoCharCodeArray, encodeInto / JS copy as in other browsers).
-// usage: node packages/fast-es-module-lexer/test/diff.mjs [--quick] [--seed=N] [--variants=N] [--modes=node,v8,v8-into,encode]
-import * as F from "../lexer.mjs"; // (with the test hooks)
+// Results must equal the original's (one instance for the whole run). When
+// the lexer read outside the source (malformed code, where the original
+// reads memory outside it and its answer depends on history, see
+// history.mjs), the result must instead equal the original's on a fresh
+// instance, whatever the long-lived instance says.
+// usage: node packages/fast-es-module-lexer/test/diff.mjs [--quick] [--seed=N] [--variants=N] [--modes=node,v8,v8-into,encode] [--file=browser.mjs]
 import * as O from "es-module-lexer";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { listFiles, nm } from "../../../bench/corpus.mjs";
-
-F.initSync();
-O.initSync();
+import { withHooks } from "./hooks.mjs";
+import { freshParse } from "./history.mjs";
 
 const args = process.argv.slice(2);
+const file = args.find((a) => a.startsWith("--file="))?.slice(7) || "index.mjs";
+const F = await withHooks(file);
+F.initSync();
+O.initSync();
+console.log("module:", file);
 const quick = args.includes("--quick");
 const seedArg = args.find((a) => a.startsWith("--seed="));
 const variantsArg = args.find((a) => a.startsWith("--variants="));
@@ -42,9 +50,9 @@ const perMode = Object.fromEntries(modes.map((m) => [m, 0]));
 const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
 
 const ser = (x) => JSON.stringify(x, (k, v) => (v === undefined ? "\u0000undef" : v));
-function run(P, src) {
+function run(parse, src) {
   try {
-    return ser(P.parse(src));
+    return ser(parse(src));
   } catch (e) {
     return "ERR " + e.constructor.name + " " + e.message + " idx=" + e.idx + " keys=" + Object.keys(e).join(",");
   }
@@ -63,38 +71,44 @@ files = [...new Set(files)];
 if (quick) files = files.filter((_, i) => i % 10 === 0);
 console.log("files:", files.length);
 
-const EDITS = ["/", "'", '"', "`", "{", "}", "(", ")", "${", "*/", "/*", "//", "\n", "import", "export ", "import(", "import.meta", "\\", " ", "é", "\u00a0", "\u2028", "\ud800", "[", "]", ".", "...", "=>", "class ", "\r\n", "\0",
+const EDITS = ["/", "'", '"', "`", "{", "}", "(", ")", "${", "*/", "/*", "//", "\n", "import", "export ", "import(", "import.meta", "\\", " ", "é", " ", " ", "\ud800", "[", "]", ".", "...", "=>", "class ", "\r\n", "\0",
   // chars above 0xff whose low byte is a token char (U+0127 has 0x27 = ', ...)
-  "\u0127", "\u0128", "\u0129", "\u012f", "\u0160", "\u017b", "\u017d", "\u015c", "\u0122", "\u0165", "\u0169", "\uff08", "\u2029", "\u00ff", "\u0080"];
-const tricky = ["é", "\u00a0", "\u2028", "\ud83d\ude00", "\ud800", "\uffff", "ſ", "\u0127", "\u017b", "\u00ff"];
+  "ħ", "Ĩ", "ĩ", "į", "Š", "Ż", "Ž", "Ŝ", "Ģ", "ť", "ũ", "（", " ", "ÿ", "\u0080"];
+const tricky = ["é", " ", " ", "😀", "\ud800", "￿", "ſ", "ħ", "Ż", "ÿ"];
 
-// history-dependent inputs (the original reads stale memory): see history.mjs
-import { historyDependent } from "./history.mjs";
-
-let total = 0, mismatches = 0, bytes = 0, historyDep = 0;
+// outside: inputs on which the lexer read outside the source (checked
+// against a fresh original); history: those on which the long-lived
+// original answered differently (its answer depended on its history)
+let total = 0, mismatches = 0, bytes = 0, outside = 0, history = 0;
 const t0 = Date.now();
-let histKnown = null;
 function check(src, label) {
   total++;
-  const a = run(O, src);
-  histKnown = null;
+  const a = run(O.parse, src);
+  let fresh = null, out = false;
   for (const m of modes) {
     F.__mode(m);
     perMode[m]++;
-    const fb = F.__stats.fallback;
-    const b = run(F, src);
-    if (a !== b && F.__stats.fallback > fb && (histKnown ??= historyDependent(src))) {
-      historyDep++;
-      continue;
+    const o0 = F.__stats().outside;
+    const b = run(F.parse, src);
+    const read = F.__stats().outside > o0;
+    let want = a;
+    if (read) {
+      fresh ??= run(freshParse, src);
+      want = fresh;
+      out = true;
     }
-    if (a !== b) {
+    if (b !== want) {
       mismatches++;
       if (mismatches <= 15) {
-        console.log(`MISMATCH [${m}] ${label} (len ${src.length}): ${JSON.stringify(src.length < 300 ? src : src.slice(0, 200) + "...")}`);
-        console.log("  orig:", a.slice(0, 400));
+        console.log(`MISMATCH [${m}] ${label} (len ${src.length})${read ? " (read outside the source)" : ""}: ${JSON.stringify(src.length < 300 ? src : src.slice(0, 200) + "...")}`);
+        console.log(`  ${read ? "fresh original" : "original"}:`, want.slice(0, 400));
         console.log("  fast:", b.slice(0, 400));
       }
     }
+  }
+  if (out) {
+    outside++;
+    if (fresh !== a) history++;
   }
 }
 
@@ -118,5 +132,5 @@ for (const f of files) {
     check(s, rel + ` [variant ${v}]`);
   }
 }
-console.log(`checks: ${total} (x ${modes.length} modes: ${Object.entries(perMode).map(([m, n]) => m + " " + n).join(", ")}), mismatches: ${mismatches}, history-dependent (original reads stale memory): ${historyDep}, fallbacks: ${F.__stats.fallback}, source MB: ${(bytes / 1e6).toFixed(1)}, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+console.log(`checks: ${total} (x ${modes.length} modes: ${Object.entries(perMode).map(([m, n]) => m + " " + n).join(", ")}), mismatches: ${mismatches}, read outside the source: ${outside} (all checked against a fresh original; the long-lived original answered differently on ${history}), source MB: ${(bytes / 1e6).toFixed(1)}, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 process.exit(mismatches ? 1 : 0);

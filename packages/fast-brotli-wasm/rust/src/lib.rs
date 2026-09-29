@@ -11,7 +11,6 @@ use brotli::enc::encode::{
 };
 use brotli::enc::StandardAlloc;
 use brotli::{BrotliDecompressStream, BrotliResult, BrotliState};
-use serde::Deserialize;
 
 // fast one-shot decoder (see dec_api.rs)
 #[cfg(feature = "fastdec")]
@@ -20,7 +19,7 @@ mod dec_api;
 static mut OUT: Vec<u8> = Vec::new();
 
 /// Results: [0] data pointer, [1] data length (the output, or a UTF-8 error
-/// message), [2] quality / stream result code, [3] stream input offset.
+/// message), [2] stream result code, [3] stream input offset.
 pub(crate) static mut HDR: [u32; 8] = [0; 8];
 
 #[no_mangle]
@@ -59,55 +58,119 @@ pub unsafe extern "C" fn release() {
 
 // ------------------------------------------------------------------ options
 
-#[derive(Deserialize)]
-struct Options {
-    #[serde(default = "default_quality")]
-    quality: i32,
-}
-
-fn default_quality() -> i32 {
-    11
-}
-
-/// brotli-wasm reads `compress` options as `serde_json::from_str(JSON.stringify(options)).unwrap()`.
-/// 0: quality in HDR[2]; 1: that unwrap panics, the panic message is the result.
+/// compress() options (serde_json's parsing without serde, see options/src/lib.rs):
+/// 0: the quality in HDR[2]; 1: the unwrap panics, its message is the
+/// result; 2: the same, with a float to format in place of the NUL (HDR[4..6]).
 #[no_mangle]
 pub unsafe extern "C" fn parse_options(p: *const u8, n: usize) -> i32 {
-    let json = core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, n));
-    match serde_json::from_str::<Options>(json) {
-        Ok(o) => {
-            HDR[2] = o.quality as u32;
+    match fastbrotli_options::parse_options(core::slice::from_raw_parts(p, n)) {
+        Ok(q) => {
+            HDR[2] = q as u32;
             0
         }
-        Err(e) => {
-            finish(format!("called `Result::unwrap()` on an `Err` value: {:?}", e).into_bytes());
-            1
+        Err((message, float)) => {
+            finish(message);
+            match float {
+                None => 1,
+                Some(f) => {
+                    HDR[4] = f.to_bits() as u32;
+                    HDR[5] = (f.to_bits() >> 32) as u32;
+                    2
+                }
+            }
         }
     }
 }
 
 // ------------------------------------------------------------------ one-shot
 
+// brotli-wasm's compress/decompress call brotli::BrotliCompress /
+// BrotliDecompress with a slice reader and a Vec writer. These are those
+// functions' loops (BrotliCompressCustomIoCustomDict,
+// BrotliDecompressCustomIoCustomDict) with that reader and writer inlined:
+// the same calls with the same 4096-byte buffers. Neither reader nor writer
+// can fail, so the only error is their `unexpected_eof_error_constant`,
+// io::Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"), whose Debug
+// form is in the messages below (no io::Error / fmt code in the module).
+
+/// The metablock callback of every compress_stream call: one function type,
+/// so one copy of compress_stream for compress() and CompressStream.
+fn nop_callback(
+    _data: &mut brotli::interface::PredictionModeContextMap<brotli::interface::InputReferenceMut>,
+    _cmds: &mut [brotli::interface::StaticCommand],
+    _mb: brotli::interface::InputPair,
+    _m: &mut StandardAlloc,
+) {
+}
+
+/// the next up to 4096 bytes of `rest` into `buf` (Read for &[u8])
+fn read_chunk(rest: &mut &[u8], buf: &mut [u8; 4096]) -> usize {
+    let size = rest.len().min(buf.len());
+    buf[..size].copy_from_slice(&rest[..size]);
+    *rest = &rest[size..];
+    size
+}
+
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn compress(p: *const u8, n: usize, quality: i32) -> i32 {
-    let input = core::slice::from_raw_parts(p, n);
+    let mut rest = core::slice::from_raw_parts(p, n);
     let mut out = Vec::<u8>::new();
-    let mut params = brotli::enc::BrotliEncoderParams::default();
-    params.quality = quality;
+    let mut s = BrotliEncoderStateStruct::new(StandardAlloc::default());
+    s.params.quality = quality;
     // the whole input is known: lets the q10/q11 hasher size itself to it
     brotli::enc::hash_to_binary_tree::FAST_INPUT_SIZE_HINT = n.max(1);
-    let r = brotli::BrotliCompress(&mut &input[..], &mut out, &params);
+    let mut input_buffer = [0u8; 4096];
+    let mut output_buffer = [0u8; 4096];
+    let mut next_in_offset: usize = 0;
+    let mut next_out_offset: usize = 0;
+    let mut total_out = Some(0);
+    let mut available_in: usize = 0;
+    let mut available_out: usize = output_buffer.len();
+    let mut eof = false;
+    let ok = loop {
+        if available_in == 0 && !eof {
+            next_in_offset = 0;
+            available_in = read_chunk(&mut rest, &mut input_buffer);
+            eof = available_in == 0;
+        }
+        let op = if available_in == 0 {
+            BrotliEncoderOperation::BROTLI_OPERATION_FINISH
+        } else {
+            BrotliEncoderOperation::BROTLI_OPERATION_PROCESS
+        };
+        let result = s.compress_stream(
+            op,
+            &mut available_in,
+            &input_buffer,
+            &mut next_in_offset,
+            &mut available_out,
+            &mut output_buffer,
+            &mut next_out_offset,
+            &mut total_out,
+            &mut nop_callback,
+        );
+        let fin = s.is_finished();
+        if available_out == 0 || fin {
+            out.extend_from_slice(&output_buffer[..output_buffer.len() - available_out]);
+            available_out = output_buffer.len();
+            next_out_offset = 0;
+        }
+        if !result {
+            break false;
+        }
+        if fin {
+            break true;
+        }
+    };
+    BrotliEncoderDestroyInstance(&mut s);
     brotli::enc::hash_to_binary_tree::FAST_INPUT_SIZE_HINT = 0;
-    match r {
-        Ok(_) => {
-            finish(out);
-            0
-        }
-        Err(e) => {
-            finish(format!("Brotli compress failed: {:?}", e).into_bytes());
-            1
-        }
+    if ok {
+        finish(out);
+        0
+    } else {
+        finish(b"Brotli compress failed: Custom { kind: UnexpectedEof, error: \"Unexpected EOF\" }".to_vec());
+        1
     }
 }
 
@@ -115,17 +178,57 @@ pub unsafe extern "C" fn compress(p: *const u8, n: usize, quality: i32) -> i32 {
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn decompress(p: *const u8, n: usize) -> i32 {
-    let input = core::slice::from_raw_parts(p, n);
+    let mut rest = core::slice::from_raw_parts(p, n);
     let mut out = Vec::<u8>::new();
-    match brotli::BrotliDecompress(&mut &input[..], &mut out) {
-        Ok(_) => {
-            finish(out);
-            0
+    let alloc = StandardAlloc::default();
+    let mut state = BrotliState::new(alloc, alloc, alloc);
+    let mut input_buffer = [0u8; 4096];
+    let mut output_buffer = [0u8; 4096];
+    let mut available_out: usize = output_buffer.len();
+    let mut available_in: usize = 0;
+    let mut input_offset: usize = 0;
+    let mut output_offset: usize = 0;
+    let mut result = BrotliResult::NeedsMoreInput;
+    let ok = loop {
+        match result {
+            BrotliResult::NeedsMoreInput => {
+                input_offset = 0;
+                available_in = read_chunk(&mut rest, &mut input_buffer);
+                if available_in == 0 {
+                    break false;
+                }
+            }
+            BrotliResult::NeedsMoreOutput => {
+                out.extend_from_slice(&output_buffer[..output_offset]);
+                output_offset = 0;
+            }
+            BrotliResult::ResultSuccess => break true,
+            BrotliResult::ResultFailure => break false,
         }
-        Err(e) => {
-            finish(format!("Brotli decompress failed: {:?}", e).into_bytes());
-            1
+        let mut written: usize = 0;
+        result = BrotliDecompressStream(
+            &mut available_in,
+            &mut input_offset,
+            &input_buffer,
+            &mut available_out,
+            &mut output_offset,
+            &mut output_buffer,
+            &mut written,
+            &mut state,
+        );
+        if output_offset != 0 {
+            out.extend_from_slice(&output_buffer[..output_offset]);
+            output_offset = 0;
+            available_out = output_buffer.len();
         }
+    };
+    drop(state);
+    if ok {
+        finish(out);
+        0
+    } else {
+        finish(b"Brotli decompress failed: Custom { kind: UnexpectedEof, error: \"Unexpected EOF\" }".to_vec());
+        1
     }
 }
 
@@ -188,12 +291,6 @@ pub unsafe extern "C" fn cs_compress(
     output_size: usize,
 ) -> i32 {
     let this = &mut *s;
-    let mut nop_callback = |_data: &mut brotli::interface::PredictionModeContextMap<
-        brotli::interface::InputReferenceMut,
-    >,
-                            _cmds: &mut [brotli::interface::StaticCommand],
-                            _mb: brotli::interface::InputPair,
-                            _mfv: &mut StandardAlloc| ();
     let mut output = vec![0; output_size];
     let mut input_offset = 0;
     let mut available_out = output_size;
@@ -301,8 +398,26 @@ pub unsafe extern "C" fn ds_decompress(
         &mut this.state,
     ) {
         BrotliResult::ResultFailure => {
-            let err_code = this.state.error_code as i32;
-            stream_error(&format!("Brotli streaming decompress failed: Error code {}", err_code))
+            // format!("Brotli streaming decompress failed: Error code {}", err_code)
+            let mut msg = b"Brotli streaming decompress failed: Error code ".to_vec();
+            let code = this.state.error_code as i32;
+            if code < 0 {
+                msg.push(b'-');
+            }
+            let mut digits = [0u8; 10];
+            let mut k = digits.len();
+            let mut u = code.unsigned_abs();
+            loop {
+                k -= 1;
+                digits[k] = b'0' + (u % 10) as u8;
+                u /= 10;
+                if u == 0 {
+                    break;
+                }
+            }
+            msg.extend_from_slice(&digits[k..]);
+            finish(msg);
+            1
         }
         BrotliResult::NeedsMoreOutput => stream_result(NEEDS_MORE_OUTPUT, output, input_offset),
         BrotliResult::ResultSuccess => {

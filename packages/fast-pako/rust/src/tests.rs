@@ -6,7 +6,7 @@
 use crate::*;
 
 fn corpus(name: &str) -> Vec<u8> {
-    let p = format!("{}/../../corpus/{}", env!("CARGO_MANIFEST_DIR"), name);
+    let p = format!("{}/../../../corpus/{}", env!("CARGO_MANIFEST_DIR"), name);
     std::fs::read(&p).unwrap_or_else(|_| panic!("missing {}", p))
 }
 
@@ -15,14 +15,14 @@ unsafe fn stream_inflate(data: &[u8], step: usize, fast: bool) -> Vec<u8> {
     crate::inflate::FAST_ON = fast;
     #[allow(static_mut_refs)]
     EMITTED.clear();
-    let s = inf_init(core::ptr::null_mut(), 47, 65536, 1, 0);
+    let s = inf_init(core::ptr::null_mut(), 7, 15, 1);
     assert!(!s.is_null());
     let mut i = 0;
     while i < data.len() {
         let n = step.min(data.len() - i);
         let p = inf_input(s, n);
         core::ptr::copy_nonoverlapping(data.as_ptr().add(i), p, n);
-        let r = inf_push(s, n, 0, 0);
+        let r = inf_push(s, n, 0, 0, 65536);
         assert!(r >= 0, "push failed r={} at {}", r, i);
         let res = &*fz_res();
         if res.ended != 0 {
@@ -59,17 +59,17 @@ fn native_inflate_speed() {
     // cargo test --release --target x86_64-pc-windows-msvc -- --ignored --nocapture native_inflate_speed
     let raw = std::env::var("RAW").is_ok();
     let tgz = corpus(if raw { "typescript.raw" } else { "typescript-5.9.3.tgz" });
-    let wb: i32 = if raw { -15 } else { 47 };
+    let (wrap, wb) = if raw { (0, 15) } else { (7, 15) };
     unsafe {
-        let s = inf_init(core::ptr::null_mut(), wb, 65536, 0, 0);
+        let s = inf_init(core::ptr::null_mut(), wrap, wb, 0);
         let mut best = f64::MAX;
         let mut out_len = 0;
         for _ in 0..8 {
-            let cs: usize = std::env::var("CS").ok().map(|v| v.parse().unwrap()).unwrap_or(65536); let s = inf_init(s, wb, cs, 0, 0);
+            let cs: usize = std::env::var("CS").ok().map(|v| v.parse().unwrap()).unwrap_or(65536); let s = inf_init(s, wrap, wb, 0);
             let p = inf_input(s, tgz.len());
             core::ptr::copy_nonoverlapping(tgz.as_ptr(), p, tgz.len());
             let t0 = std::time::Instant::now();
-            inf_push(s, tgz.len(), 0, 0);
+            inf_push(s, tgz.len(), 0, 0, cs);
             let dt = t0.elapsed().as_secs_f64();
             out_len = (*fz_res()).out_len;
             if dt < best { best = dt; }
@@ -165,4 +165,68 @@ fn chorba_relation() {
     }
     assert_eq!(pw[0] ^ pw[89] ^ pw[117] ^ pw[155] ^ pw[300], 0);
     assert_ne!(pw[0] ^ pw[89] ^ pw[117] ^ pw[155] ^ pw[299], 0);
+}
+
+/// code_table (code-length code) builds the same table as zlib's
+/// inflate_table(CODES) and accepts/rejects the same sets
+#[test]
+fn code_table_matches_inflate_table() {
+    use crate::inftrees::{code_table, inflate_table, CODES};
+    let mut rng: u64 = 0x2545f4914f6cdd1d;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    for iter in 0..300_000u32 {
+        let mut lens = [0u16; 320];
+        if iter % 3 == 0 {
+            // arbitrary lengths (mostly rejected sets)
+            let maxl = 1 + next() % 7;
+            let density = next() % 19;
+            for l in lens[..19].iter_mut() {
+                if next() % 19 <= density {
+                    *l = (next() % (maxl + 1)) as u16;
+                }
+            }
+        } else {
+            // a random complete code: split leaves (depth <= 7)
+            let n = 2 + (next() % 18) as usize;
+            let mut depths = vec![0u16];
+            while depths.len() < n {
+                let cand: Vec<usize> = (0..depths.len()).filter(|&i| depths[i] < 7).collect();
+                if cand.is_empty() {
+                    break;
+                }
+                let i = cand[(next() as usize) % cand.len()];
+                depths[i] += 1;
+                let d = depths[i];
+                depths.push(d);
+            }
+            let mut syms: Vec<usize> = (0..19).collect();
+            for i in (1..19).rev() {
+                syms.swap(i, (next() as usize) % (i + 1));
+            }
+            for (k, &d) in depths.iter().enumerate() {
+                lens[syms[k]] = d;
+            }
+            if iter % 7 == 0 {
+                // perturb one length
+                let s = (next() as usize) % 19;
+                lens[s] = (next() % 8) as u16;
+            }
+        }
+        let mut t1 = [0u32; 128];
+        let mut t2 = [0u32; 128];
+        let mut work = [0u16; 288];
+        let mut b = 7;
+        let r = inflate_table(CODES, &lens, 19, &mut t1, &mut work, &mut b);
+        let c = code_table(&lens, &mut t2);
+        assert_eq!(r == 0, c.is_some(), "accept {:?}", &lens[..19]);
+        if r == 0 {
+            assert_eq!(c.unwrap(), b);
+            assert_eq!(&t1[..1 << b], &t2[..1 << b], "table {:?}", &lens[..19]);
+        }
+    }
 }

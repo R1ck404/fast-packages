@@ -8,16 +8,17 @@ Don't use them in a new protocol. What "weak" means:
 - HMAC seems kinda ok: https://datatracker.ietf.org/doc/html/rfc6151
  * @module
  */
-import { Chi, HashMD, Maj } from "./_md.js";
+import { HashMD } from "./_md.js";
 import { clean, createHasher, rotl } from "./utils.js";
-// fast-noble-hashes: wasm block functions and one-shot hashers
-import { defineFast, fastHasher } from "./_fast.js";
+// fast-noble-hashes: the compression functions and the one-shot hashers in wasm
+import { fastHasher, fastProcess, wasmFamily, MD5_X, WASM_MD5, WASM_SHA1 } from "./_fast.js";
+const FAST_SHA1 = /* @__PURE__ */ wasmFamily(WASM_SHA1, 64, 8, 5);
+const FAST_MD5 = /* @__PURE__ */ wasmFamily(WASM_MD5, 64, 8, 4, () => K.map(BigInt), MD5_X);
 /** Initial SHA1 state */
 const SHA1_IV = /* @__PURE__ */ Uint32Array.from([
     0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0,
 ]);
-// Reusable temporary buffer
-const SHA1_W = /* @__PURE__ */ new Uint32Array(80);
+// fast-noble-hashes: SHA1_W is in the wasm
 /** SHA1 legacy hash class. */
 export class SHA1 extends HashMD {
     constructor() {
@@ -40,47 +41,9 @@ export class SHA1 extends HashMD {
         this.E = E | 0;
     }
     process(view, offset) {
-        for (let i = 0; i < 16; i++, offset += 4)
-            SHA1_W[i] = view.getUint32(offset, false);
-        for (let i = 16; i < 80; i++)
-            SHA1_W[i] = rotl(SHA1_W[i - 3] ^ SHA1_W[i - 8] ^ SHA1_W[i - 14] ^ SHA1_W[i - 16], 1);
-        // Compression function main loop, 80 rounds
-        let { A, B, C, D, E } = this;
-        for (let i = 0; i < 80; i++) {
-            let F, K;
-            if (i < 20) {
-                F = Chi(B, C, D);
-                K = 0x5a827999;
-            }
-            else if (i < 40) {
-                F = B ^ C ^ D;
-                K = 0x6ed9eba1;
-            }
-            else if (i < 60) {
-                F = Maj(B, C, D);
-                K = 0x8f1bbcdc;
-            }
-            else {
-                F = B ^ C ^ D;
-                K = 0xca62c1d6;
-            }
-            const T = (rotl(A, 5) + F + E + K + SHA1_W[i]) | 0;
-            E = D;
-            D = C;
-            C = rotl(B, 30);
-            B = A;
-            A = T;
-        }
-        // Add the compressed chunk to the current hash value
-        A = (A + this.A) | 0;
-        B = (B + this.B) | 0;
-        C = (C + this.C) | 0;
-        D = (D + this.D) | 0;
-        E = (E + this.E) | 0;
-        this.set(A, B, C, D, E);
+        fastProcess(this, view, offset, FAST_SHA1);
     }
     roundClean() {
-        clean(SHA1_W);
     }
     destroy() {
         this.set(0, 0, 0, 0, 0);
@@ -88,15 +51,13 @@ export class SHA1 extends HashMD {
     }
 }
 /** SHA1 (RFC 3174) legacy hash function. It was cryptographically broken. */
-defineFast(SHA1, 'sha1');
-export const sha1 = /* @__PURE__ */ fastHasher(() => new SHA1());
+export const sha1 = /* @__PURE__ */ fastHasher(() => new SHA1(), FAST_SHA1);
 /** Per-round constants */
 const p32 = /* @__PURE__ */ Math.pow(2, 32);
 const K = /* @__PURE__ */ Array.from({ length: 64 }, (_, i) => Math.floor(p32 * Math.abs(Math.sin(i + 1))));
 /** md5 initial state: same as sha1, but 4 u32 instead of 5. */
 const MD5_IV = /* @__PURE__ */ SHA1_IV.slice(0, 4);
-// Reusable temporary buffer
-const MD5_W = /* @__PURE__ */ new Uint32Array(16);
+// fast-noble-hashes: MD5_W is in the wasm
 /** MD5 legacy hash class. */
 export class MD5 extends HashMD {
     constructor() {
@@ -117,47 +78,9 @@ export class MD5 extends HashMD {
         this.D = D | 0;
     }
     process(view, offset) {
-        for (let i = 0; i < 16; i++, offset += 4)
-            MD5_W[i] = view.getUint32(offset, true);
-        // Compression function main loop, 64 rounds
-        let { A, B, C, D } = this;
-        for (let i = 0; i < 64; i++) {
-            let F, g, s;
-            if (i < 16) {
-                F = Chi(B, C, D);
-                g = i;
-                s = [7, 12, 17, 22];
-            }
-            else if (i < 32) {
-                F = Chi(D, B, C);
-                g = (5 * i + 1) % 16;
-                s = [5, 9, 14, 20];
-            }
-            else if (i < 48) {
-                F = B ^ C ^ D;
-                g = (3 * i + 5) % 16;
-                s = [4, 11, 16, 23];
-            }
-            else {
-                F = C ^ (B | ~D);
-                g = (7 * i) % 16;
-                s = [6, 10, 15, 21];
-            }
-            F = F + A + K[i] + MD5_W[g];
-            A = D;
-            D = C;
-            C = B;
-            B = B + rotl(F, s[i % 4]);
-        }
-        // Add the compressed chunk to the current hash value
-        A = (A + this.A) | 0;
-        B = (B + this.B) | 0;
-        C = (C + this.C) | 0;
-        D = (D + this.D) | 0;
-        this.set(A, B, C, D);
+        fastProcess(this, view, offset, FAST_MD5);
     }
     roundClean() {
-        clean(MD5_W);
     }
     destroy() {
         this.set(0, 0, 0, 0);
@@ -173,8 +96,7 @@ export class MD5 extends HashMD {
  * - Non-linear index selection: huge speed-up for unroll
  * - Per round constants: more memory accesses, additional speed-up for unroll
  */
-defineFast(MD5, 'md5');
-export const md5 = /* @__PURE__ */ fastHasher(() => new MD5());
+export const md5 = /* @__PURE__ */ fastHasher(() => new MD5(), FAST_MD5);
 // RIPEMD-160
 const Rho160 = /* @__PURE__ */ Uint8Array.from([
     7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,

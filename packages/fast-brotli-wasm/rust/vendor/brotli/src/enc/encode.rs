@@ -472,6 +472,8 @@ fn RingBufferInit<AllocU8: alloc::Allocator<u8>>() -> RingBuffer<AllocU8> {
 
 impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
     pub fn new(m8: Alloc) -> Self {
+        // fast-brotli-wasm: the big lookup tables are built on first use
+        super::fast_tables::init();
         let cache: [i32; 16] = [4, 11, 15, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         Self {
             params: BrotliEncoderInitParams(),

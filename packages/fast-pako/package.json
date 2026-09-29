@@ -28,14 +28,18 @@
   "type": "module",
   "main": "./index.mjs",
   "module": "./index.mjs",
+  "types": "./index.d.mts",
   "exports": {
-    ".": "./index.mjs",
+    ".": {
+      "types": "./index.d.mts",
+      "default": "./index.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "index.mjs",
+    "index.d.mts",
     "fastzlib.wasm.mjs",
-    "vendor/pako.esm.mjs",
     "LICENSE"
   ],
   "sideEffects": false,
@@ -44,12 +48,13 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/equiv.mjs --quick && node test/fuzz.mjs --quick",
-    "test:full": "node test/equiv.mjs && node test/fuzz.mjs && node test/corpus.mjs"
+    "test": "node test/types.mjs && node test/load.mjs && node test/equiv.mjs --quick && node test/fuzz.mjs --quick && node test/exotic.mjs --quick",
+    "test:full": "node test/types.mjs && node test/load.mjs && node test/equiv.mjs && node test/fuzz.mjs && node test/exotic.mjs && node test/corpus.mjs"
   },
   "devDependencies": {
-    "pako": "2.1.0",
-    "binaryen": "^132.0.0"
+    "@types/pako": "2.0.4",
+    "binaryen": "^132.0.0",
+    "pako": "2.1.0"
   },
   "publishConfig": {
     "access": "public"

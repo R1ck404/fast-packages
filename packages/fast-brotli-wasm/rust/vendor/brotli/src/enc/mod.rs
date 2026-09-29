@@ -12,6 +12,7 @@ pub mod constants;
 pub mod dictionary_hash;
 pub mod entropy_encode;
 pub mod fast_log;
+pub mod fast_tables;
 pub mod histogram;
 pub mod input_pair;
 pub mod literal_cost;

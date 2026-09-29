@@ -2,13 +2,15 @@
 // Parser class (fields + mixins), Options, Parse(), toAST() and the
 // import/export scanning. The other parser methods live in the part files
 // listed in CONVENTIONS.md section 8 and are mixed into Parser.prototype here.
-import { bail, BAIL, LEXER_PANIC } from "./bail.mjs";
-import { RANGE_ZERO, mkRange, LineColumnTracker, MsgID_JS_UnsupportedJSXComment, Warning } from "./logger.mjs";
+import { goQuote } from "./gostd.mjs";
+import { LEXER_PANIC, GoPanic } from "./gopanic.mjs";
+import { RANGE_ZERO, mkRange, LineColumnTracker, MsgData, MsgID_JS_UnsupportedJSXComment, Warning, DiscardLog, Source } from "./logger.mjs";
 import type { Range } from "./logger.mjs";
-import { isInsideNodeModules } from "./helpers.mjs";
+import { isInsideNodeModules, globPatternToString, compareWTF8At } from "./helpers.mjs";
 import {
   InvalidRef,
   LocRef,
+  GlobPattern,
   NamespaceAlias,
   SymbolUnbound,
   SymbolHoisted,
@@ -22,7 +24,11 @@ import {
   ContainsDefaultAlias,
   ContainsESModuleAlias,
   refInner,
+  SlotMustNotBeRenamed,
+  newCharFreq,
+  charFreqScan,
 } from "./ast.mjs";
+import { assignNestedScopeSlots } from "./renamer.mjs";
 import {
   Expr,
   Stmt,
@@ -37,10 +43,16 @@ import {
   Decl,
   SLocal,
   SImport,
+  LocalVar,
   BIdentifier,
   EObject,
   ScopeEntry,
   ScopeMember,
+  ECall as ECallForHelper,
+  EDot as EDotForHelper,
+  EIdentifier as EIdentifierForHelper,
+  NormalCall as NormalCallForHelper,
+  TargetWasOriginallyPropertyAccess as TargetWasOriginallyPropertyAccessForHelper,
   ImplicitStrictModeTSAlwaysStrict,
   ImplicitStrictModeESM,
   ImplicitStrictModeJSXAutomaticRuntime,
@@ -82,6 +94,7 @@ import {
   S_EXPORT_FROM,
   S_EXPORT_EQUALS,
   S_ENUM,
+  SLazyExport,
 } from "./js_ast.mjs";
 import {
   DefineExpr,
@@ -114,8 +127,22 @@ import {
   whyESMTypeModulePackageJSON,
   whyESMImportStatement,
   legacyOctalEscape,
+  injectedDotName,
+  injectedSymbolSource,
 } from "./js_parser_types.mjs";
-import { newLexer, TEndOfFile, THashbang, TNull, TThis, TImport, Keywords } from "./js_lexer.mjs";
+import {
+  newLexer,
+  Lexer,
+  JSON as JSONFlavorJSON,
+  TEndOfFile,
+  THashbang,
+  TNull,
+  TThis,
+  TImport,
+  Keywords,
+  rangeOfIdentifier,
+} from "./js_lexer.mjs";
+import { parseJSON, JSONOptions } from "./json_parser.mjs";
 import { isIdentifier } from "./js_ident.mjs";
 import { makeHelperContext, forEachIdentifierBindingInDecls, KeepExportClauses } from "./js_ast_helpers.mjs";
 import { parseMethods } from "./js_parser_parse.mjs";
@@ -125,6 +152,8 @@ import { visitStmtMethods, duplicateCaseChecker } from "./js_parser_visit_stmt.m
 import { visitStmt2Methods } from "./js_parser_visit_stmt2.mjs";
 import { visitExprMethods } from "./js_parser_visit_expr.mjs";
 import { lowerMethods } from "./js_parser_lower.mjs";
+import { JSFeatureNone } from "./compat.mjs";
+import type { JSFeature } from "./compat.mjs";
 
 // The parser methods (mixed into Parser.prototype at the end of this file)
 type ParserMixins = typeof parseMethods &
@@ -153,9 +182,9 @@ export class Options {
   declare defines: any;
   declare originalTargetEnv: string;
   declare moduleTypeData: ModuleTypeData;
-  declare unsupportedJSFeatures: number;
-  declare unsupportedJSFeatureOverrides: number;
-  declare unsupportedJSFeatureOverridesMask: number;
+  declare unsupportedJSFeatures: JSFeature;
+  declare unsupportedJSFeatureOverrides: JSFeature;
+  declare unsupportedJSFeatureOverridesMask: JSFeature;
   declare ts: TSOptions;
   declare mode: number;
   declare platform: number;
@@ -185,9 +214,9 @@ export class Options {
 
     this.originalTargetEnv = "";
     this.moduleTypeData = new ModuleTypeData();
-    this.unsupportedJSFeatures = 0;
-    this.unsupportedJSFeatureOverrides = 0;
-    this.unsupportedJSFeatureOverridesMask = 0;
+    this.unsupportedJSFeatures = JSFeatureNone;
+    this.unsupportedJSFeatureOverrides = JSFeatureNone;
+    this.unsupportedJSFeatureOverridesMask = JSFeatureNone;
 
     this.ts = new TSOptions();
     this.mode = ModePassThrough;
@@ -550,7 +579,7 @@ const defaultJSXFactory = ["React", "createElement"];
 const defaultJSXFragment = ["React", "Fragment"];
 const defaultJSXImportSource = "react";
 
-// Parse returns [ast, ok]. Any error/warning throws BAIL (see logger.mjs).
+// Parse returns [ast, ok]
 export function parse(log, source, options): [AST, boolean] {
   options = options.clone();
   try {
@@ -628,7 +657,65 @@ export function parse(log, source, options): [AST, boolean] {
     let after = [];
 
     // Insert any injected import statements now that symbols have been declared
-    if (p.options.injectedFiles.length > 0) bail();
+    for (let $i = 0; $i < p.options.injectedFiles.length; $i++) {
+      const file = p.options.injectedFiles[$i];
+      const exportsNoConflict = [];
+      const symbols = new Map(); // map[string]ast.LocRef
+
+      if (file.defineName !== "") {
+        const ref = p.newSymbol(SymbolOther, file.defineName);
+        p.moduleScope.generated.push(ref);
+        symbols.set("default", new LocRef(0, ref));
+        exportsNoConflict.push("default");
+        p.injectedDefineSymbols.push(ref);
+      } else {
+        nextExport: for (const export_ of file.exports) {
+          // Skip injecting this symbol if it's already declared locally (i.e. it's not a reference to a global)
+          if (p.moduleScope.members.has(export_.alias)) {
+            continue;
+          }
+
+          const parts = export_.alias.split(".");
+
+          // The key must be a dot-separated identifier list
+          for (const part of parts) {
+            if (!isIdentifier(part)) {
+              continue nextExport;
+            }
+          }
+
+          const ref = p.newSymbol(SymbolInjected, export_.alias);
+          symbols.set(export_.alias, new LocRef(0, ref));
+          if (parts.length === 1) {
+            // Handle the identifier case by generating an injected symbol directly
+            p.moduleScope.members.set(export_.alias, new ScopeMember(ref, 0));
+          } else {
+            // Handle the dot case using a map. This map is similar to the map
+            // "options.defines.DotDefines" but is kept separate instead of being
+            // implemented using the same mechanism because we allow you to use
+            // "define" to rewrite something to an injected symbol (i.e. we allow
+            // two levels of mappings). This was historically necessary to be able
+            // to map a dot name to an injected symbol because we previously didn't
+            // support dot names as injected symbols. But now dot names as injected
+            // symbols has been implemented, so supporting two levels of mappings
+            // is only for backward-compatibility.
+            const tail = parts[parts.length - 1];
+            let list = p.injectedDotNames.get(tail);
+            if (list === undefined) p.injectedDotNames.set(tail, (list = []));
+            list.push(new injectedDotName(parts, p.injectedDefineSymbols.length));
+            p.injectedDefineSymbols.push(ref);
+          }
+          exportsNoConflict.push(export_.alias);
+          p.injectedSymbolSources.set(ref, new injectedSymbolSource(file.source, export_.loc));
+        }
+      }
+
+      if (file.isCopyLoader) {
+        [before] = p.generateImportStmt(file.source.keyPath.text, RANGE_ZERO, exportsNoConflict, before, symbols, null, file.source.index);
+      } else {
+        [before] = p.generateImportStmt(file.source.keyPath.text, RANGE_ZERO, exportsNoConflict, before, symbols, file.source.index, null);
+      }
+    }
 
     p.willWrapModuleInTryCatchForUsing = p.shouldLowerUsingDeclarations(stmts);
 
@@ -721,13 +808,93 @@ export function parse(log, source, options): [AST, boolean] {
   }
 }
 
-// LazyExportAST / GlobResolveAST are only used for non-JS loaders and glob
-// imports, which the fast path never handles.
-export function lazyExportAST() {
-  bail();
+export class HelperCall {
+  declare global: string[] | null;
+  declare runtime: string;
+  constructor(global: string[] | null = null, runtime = "") {
+    this.global = global;
+    this.runtime = runtime;
+  }
 }
-export function globResolveAST() {
-  bail();
+
+// LazyExportAST
+export function lazyExportAST(log, source, options, expr, helperCall) {
+  // Don't create a new lexer using js_lexer.NewLexer() here since that will
+  // actually attempt to parse the first token, which might cause a syntax
+  // error.
+  const p = newParser(log, source, new Lexer(), options);
+  p.prepareForVisitPass();
+
+  // Defer the actual code generation until linking
+  const part = new Part();
+
+  // Optionally call a runtime API function to transform the expression
+  if (helperCall !== null) {
+    p.currentPart = part;
+    if (helperCall.global !== null && helperCall.global.length > 0) {
+      const ref = p.newSymbol(SymbolUnbound, helperCall.global[0]);
+      p.recordUsage(ref);
+      let target = new Expr(new EIdentifierForHelper(ref), 0);
+      let kind = NormalCallForHelper;
+      for (const name of helperCall.global.slice(1)) {
+        target = new Expr(new EDotForHelper(target, name), 0);
+        kind = TargetWasOriginallyPropertyAccessForHelper;
+      }
+      expr = new Expr(new ECallForHelper(target, [expr], 0, 0 /* OptionalChainNone */, kind), expr.loc);
+    } else {
+      expr = p.callRuntime(expr.loc, helperCall.runtime, [expr]);
+    }
+    p.currentPart = null;
+  }
+  part.stmts = [new Stmt(new SLazyExport(expr), expr.loc)];
+
+  // Add an empty part for the namespace export that we can fill in later
+  const nsExportPart = new Part();
+  nsExportPart.canBeRemovedIfUnused = true;
+
+  const ast = p.toAST([nsExportPart], [part], [], "", []);
+  ast.hasLazyExport = true;
+  return ast;
+}
+
+// GlobResolveAST ("object" is a *js_ast.EObject)
+export function globResolveAST(log, source, importRecords, object, name) {
+  // Don't create a new lexer using js_lexer.NewLexer() here since that will
+  // actually attempt to parse the first token, which might cause a syntax
+  // error.
+  const p = newParser(log, source, new Lexer(), new Options());
+  p.prepareForVisitPass();
+
+  // Add an empty part for the namespace export that we can fill in later
+  const nsExportPart = new Part();
+  nsExportPart.canBeRemovedIfUnused = true;
+
+  if (p.importRecords.length !== 0) {
+    throw new GoPanic("Internal error");
+  }
+  p.importRecords = importRecords;
+
+  const importRecordIndices = new Array(importRecords.length);
+  for (let importRecordIndex = 0; importRecordIndex < importRecords.length; importRecordIndex++) {
+    importRecordIndices[importRecordIndex] = importRecordIndex;
+  }
+
+  const ref = p.newSymbol(SymbolOther, name);
+  p.moduleScope.generated.push(ref);
+  const part = new Part();
+  part.importRecordIndices = importRecordIndices;
+
+  p.currentPart = part;
+  part.stmts = [
+    new Stmt(
+      new SLocal([new Decl(new Binding(new BIdentifier(ref), 0), p.callRuntime(0, "__glob", [new Expr(object, 0)]))], LocalVar, true /* isExport */),
+      0,
+    ),
+  ];
+  p.currentPart = null;
+
+  p.esmExportKeyword = mkRange(p.esmExportKeyword.loc, 1);
+  return p.toAST([nsExportPart], [part], [], "", []);
 }
 
 // ParseDefineExpr(text) -> [DefineExpr, E|null]
@@ -755,33 +922,24 @@ export function parseDefineExpr(text: string): [DefineExpr, any] {
   if (parts !== null) return [new DefineExpr(null, parts), null];
 
   // Try parsing a value
-  const data = parseJSONForDefine(text);
-  if (data === null) return [new DefineExpr(), null];
+  // (Go logs to a deferred log that nobody reads: errors and warnings are
+  // dropped, and only a lexer panic makes the parse fail)
+  const $d = parseJSON(new DiscardLog(), new Source(undefined, "", text), new JSONOptions(JSFeatureNone, JSONFlavorJSON, "", true));
+  const expr = $d[0], ok = $d[1];
+  if (!ok) return [new DefineExpr(), null];
 
   // Only primitive literals are inlined directly
-  switch (data.k) {
+  switch (expr.data.k) {
     case E_NULL:
     case E_BOOLEAN:
     case E_STRING:
     case E_NUMBER:
     case E_BIG_INT:
-      return [new DefineExpr(data), null];
+      return [new DefineExpr(expr.data), null];
   }
 
   // If it's not a primitive, return the whole compound JSON value to be injected out-of-line
-  return [new DefineExpr(), data];
-}
-
-// A minimal stand-in for ParseJSON(..., {IsForDefine: true}) that only handles
-// the primitive literals the fast path supports; anything else bails.
-function parseJSONForDefine(text) {
-  const t = text.trim();
-  if (t === "null") return ENullShared;
-  if (t === "true") return new EBoolean(true);
-  if (t === "false") return new EBoolean(false);
-  if (/^"(?:[^"\\\x00-\x1f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"$/.test(t)) return new EString(JSON.parse(t));
-  if (/^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$/.test(t)) return new ENumber(Number(t));
-  bail();
+  return [new DefineExpr(), expr.data];
 }
 
 // Sort the keys for determinism (Go's sort.Strings sorts by bytes = UTF-8,
@@ -793,6 +951,46 @@ function sortedKeysOfMapStringLocRef(m) {
   return keys;
 }
 
+// JS-only: "charFreq.Scan(p.source.Contents, 1)" for the whole file. Counts
+// every ASCII code unit in a 128-entry histogram first (one branch per
+// character instead of a range test per class) and then folds it into the
+// 64 CharFreq slots in the same way charFreqScan() maps characters. The
+// result is identical (int32 arithmetic, only ASCII letters, digits, "_" and
+// "$" are counted).
+const asciiHistogram = new Int32Array(128);
+function charFreqScanWholeSource(freq, text) {
+  const hist = asciiHistogram;
+  hist.fill(0);
+  for (let i = 0, n = text.length; i < n; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 128) hist[c]++;
+  }
+  charFreqAddHistogram(freq, hist, 1);
+}
+
+// JS-only: "charFreq.Scan(p.source.TextForRange(commentRange), -1)" for every
+// comment, without creating substrings (same histogram technique as above)
+function charFreqSubtractComments(freq, text, ranges) {
+  const hist = asciiHistogram;
+  hist.fill(0);
+  for (let r = 0; r < ranges.length; r++) {
+    const range = ranges[r];
+    for (let i = range.loc, n = range.loc + range.len; i < n; i++) {
+      const c = text.charCodeAt(i);
+      if (c < 128) hist[c]++;
+    }
+  }
+  charFreqAddHistogram(freq, hist, -1);
+}
+
+function charFreqAddHistogram(freq, hist, sign) {
+  for (let c = 97; c <= 122; c++) freq[c - 97] += sign * hist[c];
+  for (let c = 65; c <= 90; c++) freq[c - (65 - 26)] += sign * hist[c];
+  for (let c = 48; c <= 57; c++) freq[c + (52 - 48)] += sign * hist[c];
+  freq[62] += sign * hist[95];
+  freq[63] += sign * hist[36];
+}
+
 // Byte-wise (UTF-8) string comparison like Go's "<" on strings
 export function compareStringsUTF8(a, b) {
   const n = Math.min(a.length, b.length);
@@ -801,13 +999,9 @@ export function compareStringsUTF8(a, b) {
     let cb = b.charCodeAt(i);
     if (ca !== cb) {
       // Surrogates (U+D800-DFFF) encode code points above U+FFFF, which sort
-      // after U+E000-U+FFFF in UTF-8 but before them in UTF-16.
-      const sa = ca >= 0xd800 && ca <= 0xdfff;
-      const sb = cb >= 0xd800 && cb <= 0xdfff;
-      if (sa !== sb) {
-        if (sa && cb >= 0xe000) return 1;
-        if (sb && ca >= 0xe000) return -1;
-      }
+      // after U+E000-U+FFFF in UTF-8 but before them in UTF-16 (and a lone
+      // surrogate is its own code point in Go's WTF-8)
+      if ((ca >= 0xd800 && ca <= 0xdfff) || (cb >= 0xd800 && cb <= 0xdfff)) return compareWTF8At(a, b, i);
       return ca < cb ? -1 : 1;
     }
   }
@@ -820,9 +1014,12 @@ export function compareStringsUTF8(a, b) {
 export const coreMethods = {
   recordExport(loc, alias, ref) {
     const p = this;
-    if (p.namedExports.has(alias)) {
+    const name = p.namedExports.get(alias);
+    if (name !== undefined) {
       // Duplicate exports are an error
-      p.log.addErrorWithNotes();
+      p.log.addErrorWithNotes(p.tracker, rangeOfIdentifier(p.source, loc), "Multiple exports with the same name " + goQuote(alias), [
+        p.tracker.msgData(rangeOfIdentifier(p.source, name.aliasLoc), "The name " + goQuote(alias) + " was originally exported here:"),
+      ]);
     } else {
       p.namedExports.set(alias, new NamedExport(ref, loc));
     }
@@ -892,8 +1089,24 @@ export const coreMethods = {
           const keepUnusedImports =
             p.options.ts.parse && (unusedImportFlags & TSUnusedImport_KeepValues) !== 0 && p.options.mode !== ModeBundle && !p.options.minifyIdentifiers;
 
-          // Forbid non-default imports for JSON import assertions (bundle only)
-          if ((record.flags & AssertTypeJSON) !== 0 && p.options.mode === ModeBundle && s.items !== null) bail();
+          // Forbid non-default imports for JSON import assertions
+          if ((record.flags & AssertTypeJSON) !== 0 && p.options.mode === ModeBundle && s.items !== null) {
+            for (let i = 0, a = s.items; i < a.length; i++) {
+              const item = a[i];
+              if (p.options.ts.parse && p.tsUseCounts[refInner(item.name.ref)] === 0 && (unusedImportFlags & TSUnusedImport_KeepValues) === 0) {
+                // Do not count imports that TypeScript interprets as type annotations
+                continue;
+              }
+              if (item.alias !== "default") {
+                p.log.addErrorWithNotes(
+                  p.tracker,
+                  rangeOfIdentifier(p.source, item.aliasLoc),
+                  "Cannot use non-default import " + goQuote(item.alias) + " with a JSON import assertion",
+                  p.notesForAssertTypeJSON(record, item.alias),
+                );
+              }
+            }
+          }
 
           // TypeScript always trims unused imports.
           if ((p.options.minifySyntax || p.options.ts.parse) && !keepUnusedImports) {
@@ -1098,8 +1311,19 @@ export const coreMethods = {
             else if (item.originalName === "__esModule") record.flags |= ContainsESModuleAlias;
           }
 
-          // Forbid non-default imports for JSON import assertions (bundle only)
-          if ((record.flags & AssertTypeJSON) !== 0 && p.options.mode === ModeBundle) bail();
+          // Forbid non-default imports for JSON import assertions
+          if ((record.flags & AssertTypeJSON) !== 0 && p.options.mode === ModeBundle) {
+            for (let i = 0, a = s.items; i < a.length; i++) {
+              if (a[i].originalName !== "default") {
+                p.log.addErrorWithNotes(
+                  p.tracker,
+                  rangeOfIdentifier(p.source, a[i].name.loc),
+                  "Cannot use non-default import " + goQuote(a[i].originalName) + " with a JSON import assertion",
+                  p.notesForAssertTypeJSON(record, a[i].originalName),
+                );
+              }
+            }
+          }
 
           // TypeScript always trims unused re-exports.
           if (p.options.ts.parse && s.items.length === 0 && (unusedImportFlags & TSUnusedImport_KeepStmt) === 0) continue outer;
@@ -1163,15 +1387,22 @@ export const coreMethods = {
   },
 
   // Returns [whyESM, notes]
-  whyESModule() {
+  whyESModule(): [number, MsgData[] | null] {
     const p = this;
-    if (p.esmExportKeyword.len > 0) return [whyESMExportKeyword, null];
-    if (p.esmImportMeta.len > 0) return [whyESMImportMeta, null];
-    if (p.topLevelAwaitKeyword.len > 0) return [whyESMTopLevelAwait, null];
-    if (p.options.moduleTypeData.type === ModuleESM_MJS) return [whyESMFileMJS, null];
-    if (p.options.moduleTypeData.type === ModuleESM_MTS) return [whyESMFileMTS, null];
-    if (p.options.moduleTypeData.type === ModuleESM_PackageJSON) return [whyESMTypeModulePackageJSON, null];
-    if (p.esmImportStatementKeyword.len > 0) return [whyESMImportStatement, null];
+    const because = "This file is considered to be an ECMAScript module because";
+    if (p.esmExportKeyword.len > 0) return [whyESMExportKeyword, [p.tracker.msgData(p.esmExportKeyword, because + ' of the "export" keyword here:')]];
+    if (p.esmImportMeta.len > 0) return [whyESMImportMeta, [p.tracker.msgData(p.esmImportMeta, because + ' of the use of "import.meta" here:')]];
+    if (p.topLevelAwaitKeyword.len > 0) return [whyESMTopLevelAwait, [p.tracker.msgData(p.topLevelAwaitKeyword, because + ' of the top-level "await" keyword here:')]];
+    if (p.options.moduleTypeData.type === ModuleESM_MJS) return [whyESMFileMJS, [new MsgData(null, null, because + ' the file name ends in ".mjs".')]];
+    if (p.options.moduleTypeData.type === ModuleESM_MTS) return [whyESMFileMTS, [new MsgData(null, null, because + ' the file name ends in ".mts".')]];
+    if (p.options.moduleTypeData.type === ModuleESM_PackageJSON) {
+      const tracker = new LineColumnTracker(p.options.moduleTypeData.source);
+      return [whyESMTypeModulePackageJSON, [tracker.msgData(p.options.moduleTypeData.range, because + ' the enclosing "package.json" file sets the type of this file to "module":')]];
+    }
+    // This case must come last because some code cares about the "import"
+    // statement keyword and some doesn't, and we don't want to give code
+    // that doesn't care about the "import" statement the wrong error message.
+    if (p.esmImportStatementKeyword.len > 0) return [whyESMImportStatement, [p.tracker.msgData(p.esmImportStatementKeyword, because + ' of the "import" keyword here:')]];
     return [whyESMUnknown, null];
   },
 
@@ -1191,7 +1422,10 @@ export const coreMethods = {
     p.isFileConsideredESM = p.isFileConsideredToHaveESMExports || p.esmImportStatementKeyword.len > 0;
 
     // Legacy HTML comments are not allowed in ESM files
-    if (p.isFileConsideredESM && p.lexer.legacyHTMLCommentRange.len > 0) p.log.addErrorWithNotes();
+    if (p.isFileConsideredESM && p.lexer.legacyHTMLCommentRange.len > 0) {
+      const notes = p.whyESModule()[1];
+      p.log.addErrorWithNotes(p.tracker, p.lexer.legacyHTMLCommentRange, "Legacy HTML single-line comments are not allowed in ECMAScript modules", notes);
+    }
 
     // ECMAScript modules are always interpreted as strict mode. This has to be
     // done before "hoistSymbols" because strict mode can alter hoisting (!).
@@ -1226,38 +1460,47 @@ export const coreMethods = {
         } else if (jsxRuntime.text === "classic") {
           p.options.jsx.automaticRuntime = false;
         } else {
-          p.log.addIDWithNotes(MsgID_JS_UnsupportedJSXComment, Warning);
+          p.log.addIDWithNotes(MsgID_JS_UnsupportedJSXComment, Warning, p.tracker, jsxRuntime.range, "Invalid JSX runtime: " + goQuote(jsxRuntime.text), [
+            new MsgData(null, null, 'The JSX runtime can only be set to either "classic" or "automatic".'),
+          ]);
         }
       }
 
       const jsxFactory = p.lexer.jsxFactoryPragmaComment;
       if (jsxFactory.text !== "") {
         if (p.options.jsx.automaticRuntime) {
-          p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
+          p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning, p.tracker, jsxFactory.range, `The JSX factory cannot be set when using React's "automatic" JSX transform`);
         } else {
           const $d67 = parseDefineExpr(jsxFactory.text);
           const expr = $d67[0];
           if (expr.parts !== null && expr.parts.length > 0) p.options.jsx.factory = expr;
-          else p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
+          else p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning, p.tracker, jsxFactory.range, "Invalid JSX factory: " + jsxFactory.text);
         }
       }
 
       const jsxFragment = p.lexer.jsxFragmentPragmaComment;
       if (jsxFragment.text !== "") {
         if (p.options.jsx.automaticRuntime) {
-          p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
+          p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning, p.tracker, jsxFragment.range, `The JSX fragment cannot be set when using React's "automatic" JSX transform`);
         } else {
           const $d68 = parseDefineExpr(jsxFragment.text);
           const expr = $d68[0];
           if ((expr.parts !== null && expr.parts.length > 0) || expr.constant !== null) p.options.jsx.fragment = expr;
-          else p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning);
+          else p.log.addID(MsgID_JS_UnsupportedJSXComment, Warning, p.tracker, jsxFragment.range, "Invalid JSX fragment: " + jsxFragment.text);
         }
       }
 
       const jsxImportSource = p.lexer.jsxImportSourcePragmaComment;
       if (jsxImportSource.text !== "") {
         if (!p.options.jsx.automaticRuntime) {
-          p.log.addIDWithNotes(MsgID_JS_UnsupportedJSXComment, Warning);
+          p.log.addIDWithNotes(
+            MsgID_JS_UnsupportedJSXComment,
+            Warning,
+            p.tracker,
+            jsxImportSource.range,
+            "The JSX import source cannot be set without also enabling React's \"automatic\" JSX transform",
+            [new MsgData(null, null, `You can enable React's "automatic" JSX transform for this file by using a "@jsxRuntime automatic" comment.`)],
+          );
         } else {
           p.options.jsx.importSource = jsxImportSource.text;
         }
@@ -1296,8 +1539,59 @@ export const coreMethods = {
   },
 
   // Minify-only
+  // Compute a character frequency histogram for everything that's not a bound
+  // symbol. This is used to modify how minified names are generated for slightly
+  // better gzip compression. Even though it's a very small win, we still do it
+  // because it's simple to do and very cheap to compute.
   computeCharacterFrequency() {
-    return null;
+    const p = this;
+    if (!p.options.minifyIdentifiers || p.source.index === RUNTIME_SOURCE_INDEX) {
+      return null;
+    }
+
+    // Add everything in the file to the histogram
+    const charFreq = newCharFreq();
+    charFreqScanWholeSource(charFreq, p.source.contents);
+
+    // Subtract out all comments
+    charFreqSubtractComments(charFreq, p.source.contents, p.lexer.allComments);
+
+    // Subtract out all import paths
+    for (let i = 0, a = p.importRecords; i < a.length; i++) {
+      const record = a[i];
+      if (!(record.sourceIndex >= 0)) {
+        charFreqScan(charFreq, record.path.text, -1);
+      }
+    }
+
+    // Subtract out all symbols that will be minified
+    const visit = (scope) => {
+      for (const member of scope.members.values()) {
+        const symbol = p.symbols[refInner(member.ref)];
+        // (JS-only: skip the zero use counts that charFreqScan ignores anyway)
+        if (symbol.useCountEstimate !== 0 && symbol.slotNamespace() !== SlotMustNotBeRenamed) {
+          charFreqScan(charFreq, symbol.originalName, -(symbol.useCountEstimate | 0));
+        }
+      }
+      if (scope.label.ref !== InvalidRef) {
+        const symbol = p.symbols[refInner(scope.label.ref)];
+        if (symbol.slotNamespace() !== SlotMustNotBeRenamed) {
+          charFreqScan(charFreq, symbol.originalName, (-(symbol.useCountEstimate | 0) - 1) | 0);
+        }
+      }
+      for (let i = 0, a = scope.children; i < a.length; i++) {
+        visit(a[i]);
+      }
+    };
+    visit(p.moduleScope);
+
+    // Subtract out all properties that will be mangled
+    for (const ref of p.mangledProps.values()) {
+      const symbol = p.symbols[refInner(ref)];
+      charFreqScan(charFreq, symbol.originalName, -(symbol.useCountEstimate | 0));
+    }
+
+    return charFreq;
   },
 
   // Returns [parts, importRecordIndex]
@@ -1369,8 +1663,17 @@ export const coreMethods = {
       [before] = p.generateImportStmt(path, RANGE_ZERO, keys, before, p.jsxLegacyImports, null, null);
     }
 
-    // Insert imports for each glob pattern (bundling only)
-    if (p.globPatternImports.length > 0) bail();
+    // Insert imports for each glob pattern
+    for (let i = 0, a = p.globPatternImports; i < a.length; i++) {
+      const glob = a[i];
+      const symbols = new Map([[glob.name, new LocRef(glob.approximateRange.loc, glob.ref)]]);
+      const $g = p.generateImportStmt(globPatternToString(glob.parts), glob.approximateRange, [glob.name], before, symbols, null, null);
+      before = $g[0];
+      const record = p.importRecords[$g[1]];
+      record.assertOrWith = glob.assertOrWith;
+      record.phase = glob.phase;
+      record.globPattern = new GlobPattern(glob.parts, glob.name, glob.kind);
+    }
 
     // Generated imports are inserted before other code
     if (before.length > 0) parts = before.concat(parts);
@@ -1467,8 +1770,14 @@ export const coreMethods = {
     // Make a wrapper symbol in case we need to be wrapped in a closure
     const wrapperRef = p.newSymbol(SymbolOther, "require_" + p.source.identifierName);
 
-    // Nested scope slots are only assigned when minifying identifiers
-    const nestedScopeSlotCounts = [0, 0, 0, 0];
+    // Assign slots to symbols in nested scopes. This is some precomputation for
+    // the symbol renaming pass that will happen later in the linker. It's done
+    // now in the parser because we want it to be done in parallel per file and
+    // we're already executing code in a dedicated goroutine for this file.
+    let nestedScopeSlotCounts = [0, 0, 0, 0];
+    if (p.options.minifyIdentifiers) {
+      nestedScopeSlotCounts = assignNestedScopeSlots(p.moduleScope, p.symbols);
+    }
 
     let exportsKind = ExportsNone;
     const usesExportsRef = p.symbols[refInner(p.exportsRef)].useCountEstimate > 0;
@@ -1537,4 +1846,3 @@ Object.assign(
   coreMethods,
 );
 
-export { BAIL };

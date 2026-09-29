@@ -2142,7 +2142,7 @@ pub fn BrotliStoreMetaBlock<Alloc: BrotliAlloc, Cb>(
     ),
 {
     let (input0, input1) = InputPairFromMaskedInput(input, start_pos, length, mask);
-    if params.log_meta_block {
+    if params.fast_log_meta_block() {
         LogMetaBlock(
             alloc,
             commands.split_at(n_commands).0,
@@ -2459,7 +2459,7 @@ pub fn BrotliStoreMetaBlockTrivial<Alloc: BrotliAlloc, Cb>(
     ),
 {
     let (input0, input1) = InputPairFromMaskedInput(input, start_pos, length, mask);
-    if params.log_meta_block {
+    if params.fast_log_meta_block() {
         LogMetaBlock(
             alloc,
             commands.split_at(n_commands).0,
@@ -2688,7 +2688,7 @@ pub fn BrotliStoreMetaBlockFast<Cb, Alloc: BrotliAlloc>(
     ),
 {
     let (input0, input1) = InputPairFromMaskedInput(input, start_pos, length, mask);
-    if params.log_meta_block {
+    if params.fast_log_meta_block() {
         LogMetaBlock(
             m,
             commands.split_at(n_commands).0,
@@ -2891,7 +2891,7 @@ pub fn BrotliStoreUncompressedMetaBlock<Cb, Alloc: BrotliAlloc>(
     storage[dst_start1..(dst_start1 + input1.len())].clone_from_slice(input1);
     *storage_ix = storage_ix.wrapping_add(input1.len() << 3);
     BrotliWriteBitsPrepareStorage(*storage_ix, storage);
-    if params.log_meta_block && !suppress_meta_block_logging {
+    if params.fast_log_meta_block() && !suppress_meta_block_logging {
         let cmds = [Command {
             insert_len_: len as u32,
             copy_len_: 0,

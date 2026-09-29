@@ -10,14 +10,20 @@ pub const LENS: u8 = 1;
 pub const DISTS: u8 = 2;
 const MAXBITS: usize = 15;
 
+#[cfg(test)]
 static LBASE: [u16; 31] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258, 0, 0];
+#[cfg(test)]
 static LEXT: [u8; 31] = [16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19, 20, 20, 20, 20, 21, 21, 21, 21, 16, 72, 78];
+#[cfg(test)]
 static DBASE: [u16; 32] = [
     1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 0, 0,
 ];
+#[cfg(test)]
 static DEXT: [u8; 32] = [16, 16, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 23, 24, 24, 25, 25, 26, 26, 27, 27, 28, 28, 29, 29, 64, 64];
 
 /// Returns 0 on success (bits updated), -1 for an invalid set of lengths.
+/// (reference for the tests: the decoder builds code_table / fasttab tables)
+#[cfg(test)]
 pub fn inflate_table(ty: u8, lens: &[u16], codes: usize, table: &mut [u32], work: &mut [u16], bits: &mut u32) -> i32 {
     let mut count = [0u16; MAXBITS + 1];
     let mut offs = [0u16; MAXBITS + 1];
@@ -159,20 +165,60 @@ pub fn inflate_table(ty: u8, lens: &[u16], codes: usize, table: &mut [u32], work
 /// over-subscribed sets are rejected, incomplete sets only allowed for
 /// LENS/DISTS with a single 1-bit code (or no codes at all).
 pub fn code_ok(ty: u8, count: &[u16; 16]) -> bool {
-    let mut max = MAXBITS;
-    while max >= 1 && count[max] == 0 {
-        max -= 1;
-    }
-    if max == 0 {
-        return true;
-    }
+    let mut max = 0;
     let mut left: i32 = 1;
     for len in 1..=MAXBITS {
-        left <<= 1;
-        left -= count[len] as i32;
+        left = (left << 1) - count[len] as i32;
         if left < 0 {
             return false;
         }
+        if count[len] != 0 {
+            max = len;
+        }
     }
-    !(left > 0 && (ty == CODES || max != 1))
+    max == 0 || !(left > 0 && (ty == CODES || max != 1))
+}
+
+/// The table zlib's inflate_table(CODES, lens, 19, 7-bit root) builds for
+/// the code-length code (19 symbols, lengths 0..=7): root = the longest
+/// length, so there are no subtables, and every entry is len << 24 | sym.
+/// Returns the root bits, or None for a set zlib rejects.
+#[inline(never)]
+pub fn code_table(lens: &[u16], table: &mut [u32]) -> Option<u32> {
+    let count = crate::fasttab::count_lens(&lens[..19]);
+    if !code_ok(CODES, &count) {
+        return None;
+    }
+    let mut max = 0;
+    let mut next = [0u32; 8];
+    let mut code = 0u32;
+    for l in 1..8 {
+        code = (code + if l > 1 { count[l - 1] as u32 } else { 0 }) << 1;
+        next[l] = code;
+        if count[l] != 0 {
+            max = l;
+        }
+    }
+    if max == 0 {
+        // no codes: two invalid 1-bit entries (decoded as length 0 by
+        // CODELENS, like zlib)
+        table[0] = (1 << 24) | (64 << 16);
+        table[1] = (1 << 24) | (64 << 16);
+        return Some(1);
+    }
+    // canonical codes (in symbol order within each length)
+    let size = 1usize << max;
+    for sym in 0..19 {
+        let l = (lens[sym] & 7) as usize;
+        if l != 0 {
+            let c = next[l];
+            next[l] += 1;
+            let mut k = (c.reverse_bits() >> (32 - l)) as usize;
+            while k < size {
+                table[k & 127] = ((l as u32) << 24) | sym as u32;
+                k += 1 << l;
+            }
+        }
+    }
+    Some(max as u32)
 }

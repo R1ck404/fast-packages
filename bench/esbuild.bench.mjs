@@ -117,24 +117,31 @@ cases.push({ name: "vite tsx+sourcemap component x20", bytes: tsx.length, fn: ()
 // build: bundle zod through a plugin serving files (virtual POSIX paths, like
 // Nodepod's MemoryVolume-backed esbuild polyfill)
 import { posix } from "node:path";
-const zodRoot = join(nm, "zod");
 const vfs = new Map();
 const readV = (vp) => {
   let c = vfs.get(vp);
-  if (c === undefined) vfs.set(vp, (c = readFileSync(join(zodRoot, vp), "utf8")));
+  if (c === undefined) vfs.set(vp, (c = readFileSync(join(nm, vp), "utf8")));
   return c;
 };
+for (const [name, entry, options] of [
+  ["build bundle zod (plugin fs)", "/zod/v4/classic/index.js", {}],
+  ["build bundle zod minified + source map (plugin fs)", "/zod/v4/classic/index.js", { minify: true, sourcemap: "external", outdir: "/out" }],
+  ["build bundle lodash-es, 640 files (plugin fs)", "/lodash-es/lodash.js", {}],
+  ["build bundle three, 1.2MB (plugin fs)", "/three/build/three.module.js", {}],
+  ["build bundle react-dom client, 1MB cjs (plugin fs)", "/react-dom/cjs/react-dom-client.development.js", { format: "cjs" }],
+])
 cases.push({
-  name: "build bundle zod (plugin fs)",
+  name,
   bytes: 0,
   opts: { maxTimeMs: 3000 },
   fn: () =>
     esbuild.build({
-      entryPoints: ["/v4/classic/index.js"],
+      entryPoints: [entry],
       bundle: true,
       write: false,
       format: "esm",
       platform: "neutral",
+      ...options,
       plugins: [
         {
           name: "memfs",

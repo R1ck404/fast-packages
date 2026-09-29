@@ -9,7 +9,7 @@ exports.Maj = Maj;
  * @module
  */
 const utils_ts_1 = require("./utils.js");
-// fast-noble-hashes: registered classes run their blocks in wasm (_fast.js)
+// fast-noble-hashes: the registered classes run in wasm (_fast.js)
 const _fast_js_1 = require("./_fast.js");
 /** Polyfill for Safari 14. https://caniuse.com/mdn-javascript_builtins_dataview_setbiguint64 */
 function setBigUint64(view, byteOffset, value, isLE) {
@@ -52,8 +52,7 @@ class HashMD extends utils_ts_1.Hash {
     }
     update(data) {
         (0, utils_ts_1.aexists)(this);
-        const k = this[_fast_js_1.FAST];
-        if (k !== undefined && this.constructor === k.ctor && (0, _fast_js_1.fastUpdate)(this, data, k))
+        if ((0, _fast_js_1.fastMD)(this, data))
             return this;
         data = (0, utils_ts_1.toBytes)(data);
         (0, utils_ts_1.abytes)(data);
@@ -84,8 +83,7 @@ class HashMD extends utils_ts_1.Hash {
         (0, utils_ts_1.aexists)(this);
         (0, utils_ts_1.aoutput)(out, this);
         this.finished = true;
-        const k = this[_fast_js_1.FAST];
-        if (k !== undefined && this.constructor === k.ctor && (0, _fast_js_1.fastDigestInto)(this, out, k))
+        if ((0, _fast_js_1.fastMD)(this, out, 1))
             return;
         // Padding
         // We can avoid allocation of buffer for padding completely if it

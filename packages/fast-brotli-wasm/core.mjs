@@ -5,9 +5,10 @@
 // Behaviour follows brotli-wasm's wasm-bindgen glue exactly: inputs are copied
 // the way passArray8ToWasm0 copies them (so array-likes convert the same way),
 // compress/decompress failures throw strings, stream failures throw Errors,
-// compress options go through JSON.stringify + serde_json (bad options panic:
-// console.error + RuntimeError "unreachable", like console_error_panic_hook),
-// results are fresh Uint8Arrays, and wrapper objects only own a `ptr`.
+// compress options go through JSON.stringify and serde_json's parsing
+// (rust/options; bad options panic: console.error + RuntimeError
+// "unreachable", like console_error_panic_hook), results are fresh
+// Uint8Arrays, and wrapper objects only own a `ptr`.
 
 /** exports of rust/src (pointers and sizes are byte offsets / counts) */
                                     
@@ -17,6 +18,7 @@
                            
                                    
                   
+                                                                                                         
                                               
                                                           
                                            
@@ -94,14 +96,14 @@ export function bind(W                   ) {
     if (!(typeof raw_options === "object" && raw_options !== null)) throw "Options is not an object";
     const json = JSON.stringify(raw_options);
     json.length; // (a toJSON returning undefined fails here, as in wasm-bindgen)
-    const bytes = encoder.encode(json);
-    const p = W.alloc(bytes.length);
-    views();
-    U8.set(bytes, p);
-    const st = W.parse_options(p, bytes.length);
-    W.free(p, bytes.length);
-    if (st !== 0) panic(utf8.decode(take()));
-    views();
+    const [p, n] = pass(encoder.encode(json));
+    const st = W.parse_options(p, n);
+    W.free(p, n);
+    if (st) {
+      // (2: a float goes where the message has a NUL; wasm leaves its Display to JS)
+      const message = utf8.decode(take());
+      panic(st === 2 ? message.replace("\0", rustFloat(new Float64Array(U32.slice(H + 4, H + 6).buffer)[0])) : message);
+    }
     return U32[H + 2] | 0;
   }
 
@@ -243,5 +245,32 @@ export function bind(W                   ) {
   }
 
   return { compress, decompress, BrotliStreamResult, BrotliStreamResultCode, CompressStream, DecompressStream };
+}
+
+/** f64 as Rust's Display prints it: the shortest digits that round-trip, never an exponent */
+function rustFloat(x        )         {
+  const sign = x < 0 || Object.is(x, -0) ? "-" : "";
+  x = Math.abs(x);
+  const s = String(x), e = s.indexOf("e"), mant = e < 0 ? s : s.slice(0, e), dot = mant.indexOf(".");
+  // x ~ digits * 10^exp
+  let digits = mant.replace(".", "").replace(/^0+(?=.)/, "");
+  let exp = (e < 0 ? 0 : +s.slice(e + 1)) - (dot < 0 ? 0 : mant.length - dot - 1);
+  while (digits.length > 1 && digits.endsWith("0")) (digits = digits.slice(0, -1)), exp++;
+  // Of two shortest candidates equally close to x, JS takes the even one and
+  // Rust the larger one: x exactly halfway to the next candidate?
+  const bits = new BigUint64Array(new Float64Array([x]).buffer)[0];
+  const biased = Number(bits >> 52n), sig = bits & 0xfffffffffffffn;
+  const m = biased ? sig | (1n << 52n) : sig, q = biased ? biased - 1075 : -1074; // x = m * 2^q
+  let lhs = 2n * m, rhs = 2n * BigInt(digits) + 1n; // 2x = (2 * digits + 1) * 10^exp ?
+  if (q > 0) lhs <<= BigInt(q);
+  else rhs <<= BigInt(-q);
+  if (exp > 0) rhs *= 10n ** BigInt(exp);
+  else lhs *= 10n ** BigInt(-exp);
+  if (lhs === rhs) {
+    const up = String(BigInt(digits) + 1n);
+    if (+`${up}e${exp}` === x) digits = up;
+  }
+  const p = digits.length + exp; // position of the point
+  return sign + (p <= 0 ? "0." + "0".repeat(-p) + digits : p >= digits.length ? digits + "0".repeat(p - digits.length) : digits.slice(0, p) + "." + digits.slice(p));
 }
 // generated from core.mts by tools/ts-build.mjs; edit that file

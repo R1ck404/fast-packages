@@ -2,4 +2,4 @@
 target = "wasm32-unknown-unknown"
 
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+simd128,+bulk-memory,+sign-ext,+mutable-globals,+nontrapping-fptoint"]
+rustflags = ["-C", "target-feature=+simd128,+bulk-memory,+sign-ext,+mutable-globals,+nontrapping-fptoint", "-C", "no-vectorize-loops", "-C", "llvm-args=-unroll-max-count=1", "-C", "link-arg=--export=__stack_pointer"]

@@ -9,7 +9,7 @@
 // - Go runs AssignNamesByScope / AccumulateSymbolUseCounts in parallel; here
 //   everything is sequential. The results do not depend on the order (see the
 //   comments below).
-import { bail } from "./bail.mjs";
+import { GoPanic, goIndexOutOfRange } from "./gopanic.mjs";
 import {
   followSymbols,
   makeRef,
@@ -22,9 +22,10 @@ import {
   SlotDefault,
   SlotLabel,
   SlotPrivateName,
+  SlotMangledProp,
   SlotMustNotBeRenamed,
   newSlotCounts,
-  slotCountsUnionMax,
+  DefaultNameMinifierJS,
 } from "./ast.mjs";
 import { Keywords, StrictModeReservedWords } from "./js_lexer.mjs";
 import { isIdentifier, forceValidIdentifier } from "./js_ident.mjs";
@@ -197,7 +198,11 @@ export class MinifyRenamer {
       i = index;
     }
 
-    return this.slots[ns][i].name;
+    const slots = this.slots[ns];
+    if (i >= slots.length) {
+      goIndexOutOfRange(i, slots.length);
+    }
+    return slots[i].name;
   }
 
   accumulateSymbolUseCounts(topLevelSymbols, symbolUses, stableSourceIndices) {
@@ -228,7 +233,11 @@ export class MinifyRenamer {
     const i = symbol.nestedScopeSlot;
     if (i >= 0) {
       // If it is, accumulate the count (Go uses an atomic uint32 add)
-      const slot = this.slots[ns][i];
+      const slots = this.slots[ns];
+      if (i >= slots.length) {
+        goIndexOutOfRange(i, slots.length);
+      }
+      const slot = slots[i];
       slot.count = (slot.count + count) >>> 0;
       if ((symbol.flags & MustStartWithCapitalLetterForJSX) !== 0) {
         slot.needsCapitalForJSX = 1;
@@ -268,9 +277,7 @@ export class MinifyRenamer {
     }
   }
 
-  // "minifier" is an ast.NameMinifier with a numberToMinifiedName(i) method.
-  // (ast.NameMinifier is not ported since identifier minification is not
-  // supported by the fast path.)
+  // "minifier" is an ast.NameMinifier
   assignNamesByFrequency(minifier) {
     for (let ns = 0; ns < this.slots.length; ns++) {
       const slots = this.slots[ns];
@@ -423,9 +430,13 @@ export function assignNestedScopeSlots(moduleScope, symbols) {
   }
 
   // Assign nested scope slots independently for each nested scope
+  // (JS-only: the helper takes Go's "slot" array argument as four numbers
+  // and unions its result into "slotCounts" directly instead of returning
+  // it: the result is a component-wise maximum, so this is the same)
+  const sorted = [];
   for (let $i105 = 0, $a105 = moduleScope.children; $i105 < $a105.length; $i105++) {
     const child = $a105[$i105];
-    slotCountsUnionMax(slotCounts, assignNestedScopeSlotsHelper(child, symbols, newSlotCounts()));
+    assignNestedScopeSlotsHelper(child, symbols, 0, 0, 0, 0, slotCounts, sorted);
   }
 
   // Then set the nested scope slots of top-level symbols back to zero. Top-
@@ -469,52 +480,80 @@ function sortNumbers(a) {
   }
 }
 
-function assignNestedScopeSlotsHelper(scope, symbols, slot) {
-  // Go passes "slot" (an ast.SlotCounts array) by value
-  slot = slot.slice();
-
+// Go: func assignNestedScopeSlotsHelper(scope, symbols, slot ast.SlotCounts) ast.SlotCounts
+//
+// JS-only: Go's "slot" argument (passed by value) is the four numbers s0..s3
+// (one per slot namespace), and instead of returning the maximum of this
+// scope's slot counts and its children's results, that maximum is unioned
+// into "result" (see AssignNestedScopeSlots). "sorted" is a scratch array
+// shared by all calls (each call is done with it before recursing).
+function assignNestedScopeSlotsHelper(scope, symbols, s0, s1, s2, s3, result, sorted) {
   // Sort member map keys for determinism
-  const sortedMembers = [];
-  for (const member of scope.members.values()) {
-    sortedMembers.push(refInner(member.ref));
-  }
-  sortNumbers(sortedMembers);
+  if (scope.members.size > 0) {
+    sorted.length = 0;
+    for (const member of scope.members.values()) {
+      sorted.push(refInner(member.ref));
+    }
+    sortNumbers(sorted);
 
-  // Assign slots for this scope's symbols. Only do this if the slot is
-  // not already assigned. Nested scopes have copies of symbols from parent
-  // scopes and we want to use the slot from the parent scope, not child scopes.
-  for (const innerIndex of sortedMembers) {
-    const symbol = symbols[innerIndex];
-    const ns = symbol.slotNamespace();
-    if (ns !== SlotMustNotBeRenamed && !(symbol.nestedScopeSlot >= 0)) {
-      symbol.nestedScopeSlot = slot[ns];
-      slot[ns]++;
+    // Assign slots for this scope's symbols. Only do this if the slot is
+    // not already assigned. Nested scopes have copies of symbols from parent
+    // scopes and we want to use the slot from the parent scope, not child scopes.
+    for (let i = 0, n = sorted.length; i < n; i++) {
+      const symbol = symbols[sorted[i]];
+      if (!(symbol.nestedScopeSlot >= 0)) {
+        switch (symbol.slotNamespace()) {
+          case SlotDefault:
+            symbol.nestedScopeSlot = s0++;
+            break;
+          case SlotLabel:
+            symbol.nestedScopeSlot = s1++;
+            break;
+          case SlotPrivateName:
+            symbol.nestedScopeSlot = s2++;
+            break;
+          case SlotMangledProp:
+            symbol.nestedScopeSlot = s3++;
+            break;
+        }
+      }
     }
   }
   for (let $i107 = 0, $a107 = scope.generated; $i107 < $a107.length; $i107++) {
     const ref = $a107[$i107];
     const symbol = symbols[refInner(ref)];
-    const ns = symbol.slotNamespace();
-    if (ns !== SlotMustNotBeRenamed && !(symbol.nestedScopeSlot >= 0)) {
-      symbol.nestedScopeSlot = slot[ns];
-      slot[ns]++;
+    if (!(symbol.nestedScopeSlot >= 0)) {
+      switch (symbol.slotNamespace()) {
+        case SlotDefault:
+          symbol.nestedScopeSlot = s0++;
+          break;
+        case SlotLabel:
+          symbol.nestedScopeSlot = s1++;
+          break;
+        case SlotPrivateName:
+          symbol.nestedScopeSlot = s2++;
+          break;
+        case SlotMangledProp:
+          symbol.nestedScopeSlot = s3++;
+          break;
+      }
     }
   }
 
   // Labels are always declared in a nested scope, so we don't need to check.
   if (scope.label.ref !== InvalidRef) {
     const symbol = symbols[refInner(scope.label.ref)];
-    symbol.nestedScopeSlot = slot[SlotLabel];
-    slot[SlotLabel]++;
+    symbol.nestedScopeSlot = s1++;
   }
 
   // Assign slots for the symbols of child scopes
-  const slotCounts = slot.slice();
+  if (result[0] < s0) result[0] = s0;
+  if (result[1] < s1) result[1] = s1;
+  if (result[2] < s2) result[2] = s2;
+  if (result[3] < s3) result[3] = s3;
   for (let $i108 = 0, $a108 = scope.children; $i108 < $a108.length; $i108++) {
-    const child = $a108[$i108];
-    slotCountsUnionMax(slotCounts, assignNestedScopeSlotsHelper(child, symbols, slot));
+    assignNestedScopeSlotsHelper($a108[$i108], symbols, s0, s1, s2, s3, result, sorted);
   }
-  return slotCounts;
 }
 
 class slotAndCount {
@@ -581,7 +620,7 @@ export class NumberRenamer {
     let originalName = symbol.originalName;
     if ((symbol.flags & MustStartWithCapitalLetterForJSX) !== 0) {
       if (originalName.length === 0) {
-        bail(); // Go: index out of range panic
+        goIndexOutOfRange(0, 0);
       }
       const first = originalName.charCodeAt(0);
       if (first >= 97 /* 'a' */ && first <= 122 /* 'z' */) {
@@ -812,8 +851,8 @@ export class ExportRenamer {
   }
 
   nextMinifiedName() {
-    // Go: ast.DefaultNameMinifierJS.NumberToMinifiedName(r.count). The name
-    // minifier is not ported (minify only).
-    bail();
+    const name = DefaultNameMinifierJS.numberToMinifiedName(this.count);
+    this.count++;
+    return name;
   }
 }

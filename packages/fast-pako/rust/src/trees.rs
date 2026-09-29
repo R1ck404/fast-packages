@@ -22,7 +22,6 @@ const REPZ_11_138: usize = 18;
 const STORED_BLOCK: u32 = 0;
 const STATIC_TREES: u32 = 1;
 const DYN_TREES: u32 = 2;
-const Z_FIXED: i32 = 4;
 const Z_BINARY: i32 = 0;
 const Z_TEXT: i32 = 1;
 const Z_UNKNOWN: i32 = 2;
@@ -34,20 +33,6 @@ pub static EXTRA_DBITS: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6,
 static EXTRA_BLBITS: [u8; 19] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7];
 static BL_ORDER: [u8; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
-const fn bi_reverse(mut code: u32, mut len: u32) -> u32 {
-    let mut res = 0u32;
-    loop {
-        res |= code & 1;
-        code >>= 1;
-        res <<= 1;
-        len -= 1;
-        if len == 0 {
-            break;
-        }
-    }
-    res >> 1
-}
-
 pub struct Static {
     pub ltree: [u16; (L_CODES + 2) * 2],
     pub dtree: [u16; D_CODES * 2],
@@ -57,111 +42,82 @@ pub struct Static {
     pub base_dist: [u16; D_CODES],
 }
 
-const fn gen_codes_const(tree: &mut [u16; (L_CODES + 2) * 2], max_code: usize, bl_count: &[u16; MAX_BITS + 1]) {
-    let mut next_code = [0u16; MAX_BITS + 1];
-    let mut code: u32 = 0;
-    let mut bits = 1;
-    while bits <= MAX_BITS {
-        code = (code + bl_count[bits - 1] as u32) << 1;
-        next_code[bits] = code as u16;
-        bits += 1;
-    }
-    let mut n = 0;
-    while n <= max_code {
-        let len = tree[n * 2 + 1] as usize;
-        if len != 0 {
-            tree[n * 2] = bi_reverse(next_code[len] as u32, len as u32) as u16;
-            next_code[len] += 1;
-        }
-        n += 1;
-    }
-}
-
-const fn make_static() -> Static {
-    let mut s = Static {
-        ltree: [0; (L_CODES + 2) * 2],
-        dtree: [0; D_CODES * 2],
-        dist_code: [0; 512],
-        length_code: [0; 256],
-        base_length: [0; LENGTH_CODES],
-        base_dist: [0; D_CODES],
-    };
+/// fill the static trees and code tables (into zeroed memory; once)
+fn make_static(s: &mut Static) {
     let mut length = 0usize;
-    let mut code = 0usize;
-    while code < LENGTH_CODES - 1 {
+    for code in 0..crate::rolled(LENGTH_CODES - 1) {
         s.base_length[code] = length as u8;
-        let mut n = 0;
-        while n < (1 << EXTRA_LBITS[code]) {
-            s.length_code[length] = code as u8;
+        for _ in 0..1 << EXTRA_LBITS[code] {
+            s.length_code[length & 255] = code as u8;
             length += 1;
-            n += 1;
         }
-        code += 1;
     }
-    s.length_code[length - 1] = code as u8;
+    // length 258 (lc 255) has its own code
+    s.length_code[255] = (LENGTH_CODES - 1) as u8;
     let mut dist = 0usize;
-    code = 0;
-    while code < 16 {
+    for code in 0..crate::rolled(D_CODES) {
         s.base_dist[code] = dist as u16;
-        let mut n = 0;
-        while n < (1 << EXTRA_DBITS[code]) {
-            s.dist_code[dist] = code as u8;
-            dist += 1;
-            n += 1;
+        // dist_code: 256 entries for distances 0..255, then one per 128
+        let step = if code < 16 { 1 } else { 128 };
+        for _ in 0..(1 << EXTRA_DBITS[code]) / step {
+            let i = if code < 16 { dist } else { 256 + (dist >> 7) };
+            s.dist_code[i & 511] = code as u8;
+            dist += step;
         }
-        code += 1;
-    }
-    dist >>= 7;
-    while code < D_CODES {
-        s.base_dist[code] = (dist << 7) as u16;
-        let mut n = 0;
-        while n < (1 << (EXTRA_DBITS[code] - 7)) {
-            s.dist_code[256 + dist] = code as u8;
-            dist += 1;
-            n += 1;
-        }
-        code += 1;
     }
     let mut bl_count = [0u16; MAX_BITS + 1];
-    let mut n = 0;
-    while n <= 143 {
-        s.ltree[n * 2 + 1] = 8;
-        n += 1;
-        bl_count[8] += 1;
+    for n in 0..crate::rolled(L_CODES + 2) {
+        let len = if n < 144 { 8 } else if n < 256 { 9 } else if n < 280 { 7 } else { 8 };
+        s.ltree[n * 2 + 1] = len;
+        bl_count[len as usize] += 1;
     }
-    while n <= 255 {
-        s.ltree[n * 2 + 1] = 9;
-        n += 1;
-        bl_count[9] += 1;
-    }
-    while n <= 279 {
-        s.ltree[n * 2 + 1] = 7;
-        n += 1;
-        bl_count[7] += 1;
-    }
-    while n <= 287 {
-        s.ltree[n * 2 + 1] = 8;
-        n += 1;
-        bl_count[8] += 1;
-    }
-    gen_codes_const(&mut s.ltree, L_CODES + 1, &bl_count);
-    let mut n = 0;
-    while n < D_CODES {
+    gen_codes(&mut s.ltree, L_CODES + 1, &bl_count);
+    let mut bl_count = [0u16; MAX_BITS + 1];
+    bl_count[5] = D_CODES as u16;
+    for n in 0..crate::rolled(D_CODES) {
         s.dtree[n * 2 + 1] = 5;
-        s.dtree[n * 2] = bi_reverse(n as u32, 5) as u16;
-        n += 1;
     }
-    s
+    gen_codes(&mut s.dtree, D_CODES - 1, &bl_count);
 }
 
-pub static ST: Static = make_static();
+// The static trees and the fixed-block emission table are built when the
+// first deflate state is created (smaller than storing 3.7 KB of tables).
+static mut ST_DATA: Static = Static {
+    ltree: [0; (L_CODES + 2) * 2],
+    dtree: [0; D_CODES * 2],
+    dist_code: [0; 512],
+    length_code: [0; 256],
+    base_length: [0; LENGTH_CODES],
+    base_dist: [0; D_CODES],
+};
+static mut FIXED_CTAB: [u32; CT_SIZE] = [0; CT_SIZE];
+static mut TABLES_READY: bool = false;
+
+/// the static tables (valid once a Deflate exists: see init_tables)
+#[inline(always)]
+pub fn st() -> &'static Static {
+    unsafe { &*core::ptr::addr_of!(ST_DATA) }
+}
+
+#[cold]
+#[inline(never)]
+pub fn init_tables() {
+    unsafe {
+        if !TABLES_READY {
+            let s = &mut *core::ptr::addr_of_mut!(ST_DATA);
+            make_static(s);
+            ctab_fill(&s.ltree, &s.dtree, &mut *core::ptr::addr_of_mut!(FIXED_CTAB));
+            TABLES_READY = true;
+        }
+    }
+}
 
 #[inline(always)]
 pub fn d_code(dist: usize) -> usize {
     if dist < 256 {
-        ST.dist_code[dist] as usize
+        st().dist_code[dist] as usize
     } else {
-        ST.dist_code[256 + (dist >> 7)] as usize
+        st().dist_code[256 + (dist >> 7)] as usize
     }
 }
 
@@ -243,8 +199,8 @@ impl Deflate {
             TreeKind::Bl => self.bl_max_code,
         } as usize;
         let (stree, has_stree, extra, base, max_length): (&[u16], bool, &[u8], usize, usize) = match k {
-            TreeKind::L => (&ST.ltree[..], true, &EXTRA_LBITS[..], LITERALS + 1, MAX_BITS),
-            TreeKind::D => (&ST.dtree[..], true, &EXTRA_DBITS[..], 0, MAX_BITS),
+            TreeKind::L => (&st().ltree[..], true, &EXTRA_LBITS[..], LITERALS + 1, MAX_BITS),
+            TreeKind::D => (&st().dtree[..], true, &EXTRA_DBITS[..], 0, MAX_BITS),
             TreeKind::Bl => (&[][..], false, &EXTRA_BLBITS[..], 0, MAX_BL_BITS),
         };
         for b in 0..=MAX_BITS {
@@ -332,8 +288,8 @@ impl Deflate {
             TreeKind::Bl => (false, BL_CODES),
         };
         let stree: *const u16 = match k {
-            TreeKind::L => ST.ltree.as_ptr(),
-            TreeKind::D => ST.dtree.as_ptr(),
+            TreeKind::L => st().ltree.as_ptr(),
+            TreeKind::D => st().dtree.as_ptr(),
             TreeKind::Bl => core::ptr::null(),
         };
         let tree: *mut u16 = match k {
@@ -621,8 +577,8 @@ impl Deflate {
 
     pub fn tr_align(&mut self) {
         self.send_bits(STATIC_TREES << 1, 3);
-        let code = ST.ltree[END_BLOCK * 2] as u32;
-        let len = ST.ltree[END_BLOCK * 2 + 1] as u32;
+        let code = st().ltree[END_BLOCK * 2] as u32;
+        let len = st().ltree[END_BLOCK * 2 + 1] as u32;
         self.send_bits(code, len);
         self.bi_flush();
     }
@@ -632,7 +588,7 @@ impl Deflate {
         let mut opt_lenb: i64;
         let static_lenb: i64;
         let mut max_blindex = 0usize;
-        if self.level > 0 {
+        if self.flags & crate::deflate::F_GT0 != 0 {
             if self.data_type == Z_UNKNOWN {
                 self.data_type = self.detect_data_type();
             }
@@ -650,7 +606,7 @@ impl Deflate {
         }
         if (stored_len as i64 + 4 <= opt_lenb) && buf != -1 {
             self.tr_stored_block(buf as usize, stored_len, last);
-        } else if self.strategy == Z_FIXED || static_lenb == opt_lenb {
+        } else if self.flags & crate::deflate::F_FIXED != 0 || static_lenb == opt_lenb {
             self.send_bits((STATIC_TREES << 1) + last as u32, 3);
             self.compress_block(true);
         } else {
@@ -676,11 +632,13 @@ impl Deflate {
     /// 16-bit units from `pending`, so bi_valid = ((B - 1) mod 16) + 1 for B
     /// bits sent since then (bi_valid is in 1..=16 after the END_BLOCK code).
     fn compress_block(&mut self, fixed: bool) {
-        if fixed {
-            unsafe { self.compress_block_with(|lc| FIXED_CTAB[CT_LIT + lc], |lc| FIXED_CTAB[CT_LEN + lc], |c| FIXED_CTAB[CT_DIST + c], FIXED_CTAB[CT_EOB]) }
-        } else if self.sym_next >= 3 * CT_MIN_SYMS {
-            build_ctab(&self.dyn_ltree, &self.dyn_dtree, &mut self.ctab);
-            let t = self.ctab.as_ptr();
+        if fixed || self.sym_next >= 3 * CT_MIN_SYMS {
+            let t = if fixed {
+                core::ptr::addr_of!(FIXED_CTAB) as *const u32
+            } else {
+                build_ctab(&self.dyn_ltree, &self.dyn_dtree, &mut self.ctab);
+                self.ctab.as_ptr()
+            };
             unsafe { self.compress_block_with(|lc| *t.add(CT_LIT + lc), |lc| *t.add(CT_LEN + lc), |c| *t.add(CT_DIST + c), *t.add(CT_EOB)) }
         } else {
             // small block: look entries up directly instead of building tables
@@ -734,7 +692,7 @@ impl Deflate {
                     let d = (dist - 1) as usize;
                     let c = d_code(d);
                     let t = dcode(c);
-                    let v = (t & 0xffff) as u64 | (((d - ST.base_dist[c] as usize) as u64) << ((t >> 16) & 0xff));
+                    let v = (t & 0xffff) as u64 | (((d - st().base_dist[c] as usize) as u64) << ((t >> 16) & 0xff));
                     bb |= v << nb;
                     nb += (t >> 24) as u64;
                 }
@@ -774,7 +732,7 @@ impl Deflate {
             self.matches += 1;
             let d = dist - 1;
             unsafe {
-                let f = self.dyn_ltree.get_unchecked_mut((ST.length_code[lc] as usize + LITERALS + 1) * 2);
+                let f = self.dyn_ltree.get_unchecked_mut((st().length_code[lc] as usize + LITERALS + 1) * 2);
                 *f = f.wrapping_add(1);
                 let g = self.dyn_dtree.get_unchecked_mut(d_code(d) * 2);
                 *g = g.wrapping_add(1);
@@ -856,7 +814,7 @@ pub const CT_DIST: usize = 512;
 pub const CT_EOB: usize = 543;
 pub const CT_SIZE: usize = 544;
 
-const fn ctab_fill(lt: &[u16], dt: &[u16], t: &mut [u32; CT_SIZE]) {
+fn ctab_fill(lt: &[u16], dt: &[u16], t: &mut [u32; CT_SIZE]) {
     let mut i = 0;
     while i < 256 {
         t[CT_LIT + i] = ((lt[i * 2 + 1] as u32) << 24) | lt[i * 2] as u32;
@@ -864,11 +822,11 @@ const fn ctab_fill(lt: &[u16], dt: &[u16], t: &mut [u32; CT_SIZE]) {
     }
     let mut lc = 0;
     while lc < 256 {
-        let code = ST.length_code[lc] as usize;
+        let code = st().length_code[lc] as usize;
         let c = lt[(code + LITERALS + 1) * 2] as u32;
         let clen = lt[(code + LITERALS + 1) * 2 + 1] as u32;
         let extra = EXTRA_LBITS[code] as u32;
-        let v = if extra != 0 { c | ((lc as u32 - ST.base_length[code] as u32) << clen) } else { c };
+        let v = if extra != 0 { c | ((lc as u32 - st().base_length[code] as u32) << clen) } else { c };
         t[CT_LEN + lc] = ((clen + extra) << 24) | v;
         lc += 1;
     }
@@ -885,14 +843,6 @@ fn build_ctab(lt: &[u16], dt: &[u16], t: &mut [u32; CT_SIZE]) {
     ctab_fill(lt, dt, t);
 }
 
-const fn make_fixed_ctab() -> [u32; CT_SIZE] {
-    let mut t = [0u32; CT_SIZE];
-    let s = make_static();
-    ctab_fill(&s.ltree, &s.dtree, &mut t);
-    t
-}
-
-static FIXED_CTAB: [u32; CT_SIZE] = make_fixed_ctab();
 
 /// below this many symbols a dynamic block is emitted without building tables
 const CT_MIN_SYMS: usize = 600;
@@ -900,10 +850,10 @@ const CT_MIN_SYMS: usize = 600;
 /// emission entry for match length lc + 3 read straight from a tree
 #[inline(always)]
 unsafe fn len_entry(lt: *const u16, lc: usize) -> u32 {
-    let code = ST.length_code[lc] as usize;
+    let code = st().length_code[lc] as usize;
     let c = *lt.add((code + LITERALS + 1) * 2) as u32;
     let clen = *lt.add((code + LITERALS + 1) * 2 + 1) as u32;
     let extra = EXTRA_LBITS[code] as u32;
-    let v = if extra != 0 { c | ((lc as u32 - ST.base_length[code] as u32) << clen) } else { c };
+    let v = if extra != 0 { c | ((lc as u32 - st().base_length[code] as u32) << clen) } else { c };
     ((clen + extra) << 24) | v
 }

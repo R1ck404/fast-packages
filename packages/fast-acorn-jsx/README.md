@@ -3,7 +3,7 @@
 [`acorn-jsx@5.3.2`](https://www.npmjs.com/package/acorn-jsx), unchanged
 except for one thing: every parser class it creates is handed to the Parser's
 registration hook, if the Parser has one. [`@r1ck404/fast-acorn`](../fast-acorn)'s Parser
-does, and then parses those classes with its native JSX mode (2.4-2.6x
+does, and then parses those classes with its native JSX mode (2.3-2.5x
 faster, identical ASTs and errors). With any other acorn, including the real
 one, it behaves exactly like acorn-jsx.
 

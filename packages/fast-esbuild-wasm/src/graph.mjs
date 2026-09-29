@@ -1,6 +1,4 @@
-// Port of internal/graph/{graph.go,input.go,meta.go} (the parts the transform
-// linker needs). CSS reprs only exist as inert classes; anything CSS-specific
-// bails. See CONVENTIONS.md.
+// Port of internal/graph/{graph.go,input.go,meta.go}.
 //
 // JS-only addition: InputFile.astIsShared. Go's CloneLinkerGraph always clones
 // what the linker mutates because the input ASTs may be cached and shared
@@ -9,10 +7,11 @@
 // clone (their AST was produced for this one link and is never read again),
 // and shared ASTs are cloned partly copy-on-write (see "Shared (cached) ASTs"
 // below).
-import { bail } from "./bail.mjs";
+import { compareWTF8At } from "./helpers.mjs";
 import { LineColumnTracker } from "./logger.mjs";
 import { InvalidRef, Symbol, newSymbolMap, makeRef, refSource, refInner, followAllSymbols, ImportDynamic } from "./ast.mjs";
 import { Part, Scope, AST, SymbolUse, Dependency } from "./js_ast.mjs";
+import { AST as CSSAST } from "./css_ast.mjs";
 import { registerSharedModuleScopeMembers } from "./renamer.mjs";
 
 const RUNTIME_SOURCE_INDEX = 0; // runtime.SourceIndex
@@ -29,13 +28,9 @@ export function compareStringsUTF8(a, b) {
     const cb = b.charCodeAt(i);
     if (ca !== cb) {
       // Surrogates (U+D800-DFFF) encode code points above U+FFFF, which sort
-      // after U+E000-U+FFFF in UTF-8 but before them in UTF-16.
-      const sa = ca >= 0xd800 && ca <= 0xdfff;
-      const sb = cb >= 0xd800 && cb <= 0xdfff;
-      if (sa !== sb) {
-        if (sa && cb >= 0xe000) return 1;
-        if (sb && ca >= 0xe000) return -1;
-      }
+      // after U+E000-U+FFFF in UTF-8 but before them in UTF-16 (and a lone
+      // surrogate is its own code point in Go's WTF-8)
+      if ((ca >= 0xd800 && ca <= 0xdfff) || (cb >= 0xd800 && cb <= 0xdfff)) return compareWTF8At(a, b, i);
       return ca < cb ? -1 : 1;
     }
   }
@@ -354,7 +349,7 @@ export class CSSRepr {
     this.jsSourceIndex = jsSourceIndex;
   }
   importRecords() {
-    bail();
+    return this.ast.importRecords;
   }
 }
 
@@ -679,7 +674,10 @@ export class LinkerGraph {
   }
 }
 
-export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints, codeSplitting) {
+// JS-only: "deepClone" copies everything Go copies for non-shared files too
+// (the build API links the same files once per entry point without code
+// splitting)
+export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints, codeSplitting, deepClone = false) {
   const entryPoints = originalEntryPoints.map((ep) => ep.clone());
   const symbols = newSymbolMap(inputFiles.length);
   const files = new Array(inputFiles.length);
@@ -718,6 +716,8 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
       // copied on write, see markASTShared)
       if (shared) {
         symbols.symbolsForSource[sourceIndex] = ast.symbols.slice();
+      } else if (deepClone) {
+        symbols.symbolsForSource[sourceIndex] = ast.symbols.map((symbol) => symbol.clone());
       } else {
         symbols.symbolsForSource[sourceIndex] = ast.symbols;
       }
@@ -729,7 +729,12 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
         const parts = new Array(original.length);
         for (let i = 0; i < original.length; i++) {
           const part = original[i];
-          parts[i] = shared ? clonePartForLinker(part) : part;
+          if (shared) parts[i] = clonePartForLinker(part);
+          else if (deepClone) {
+            const clone = clonePartForLinker(part);
+            clone.symbolUses = new Map(part.symbolUses);
+            parts[i] = clone;
+          } else parts[i] = part;
         }
         ast.parts = parts;
       }
@@ -737,7 +742,7 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
       // Clone the import records
       {
         const original = ast.importRecords;
-        if (shared) {
+        if (shared || deepClone) {
           const records = new Array(original.length);
           for (let i = 0; i < original.length; i++) records[i] = original[i].clone();
           ast.importRecords = records;
@@ -751,7 +756,19 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
         for (let $i2 = 0, $a2 = ast.importRecords; $i2 < $a2.length; $i2++) {
           const record = $a2[$i2];
           if (record.sourceIndex >= 0 && record.kind === ImportDynamic) {
-            bail(); // (code splitting only)
+            dynamicImportEntryPoints.push(record.sourceIndex);
+
+            // Remove import assertions for dynamic imports of additional
+            // entry points so that they don't mess with the run-time behavior.
+            // For example, "import('./foo.json', { assert: { type: 'json' } })"
+            // will likely be converted into an import of a JavaScript file and
+            // leaving the import assertion there will prevent it from working.
+            // (the record is a copy unless the AST is used only once)
+            if (record.assertOrWith !== null) {
+              const clone = record.clone();
+              clone.assertOrWith = null;
+              $a2[$i2] = clone;
+            }
           }
         }
       }
@@ -781,7 +798,7 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
       }
 
       // Clone the top-level scope so we can generate more variables
-      if (shared) {
+      if (shared || deepClone) {
         const clone = cloneScope(ast.moduleScope);
         clone.generated = ast.moduleScope.generated.slice();
         ast.moduleScope = clone;
@@ -792,7 +809,35 @@ export function cloneLinkerGraph(inputFiles, reachableFiles, originalEntryPoints
       repr.meta.isProbablyTypeScriptType = new Map();
       repr.meta.importsToBind = new Map();
     } else if (repr instanceof CSSRepr) {
-      bail(); // (CSS only)
+      // Clone the representation (Go copies the struct, the AST included)
+      {
+        const a = repr.ast;
+        const ast = new CSSAST(
+          a.symbols,
+          a.charFreq,
+          a.importRecords,
+          a.rules,
+          a.sourceMapComment,
+          a.approximateLineCount,
+          a.localSymbols,
+          a.localScope,
+          a.globalScope,
+          a.composes,
+          a.layersPreImport,
+          a.layersPostImport,
+        );
+        repr = new CSSRepr(ast, repr.jsSourceIndex);
+        file.inputFile.repr = repr;
+      }
+
+      // Clone the symbol map (Go copies the symbols by value)
+      const fileSymbols = repr.ast.symbols.map((symbol) => symbol.clone());
+      symbols.symbolsForSource[sourceIndex] = fileSymbols;
+      repr.ast.symbols = null;
+
+      // Clone the import records (Go copies them by value; the linker mutates
+      // them)
+      repr.ast.importRecords = repr.ast.importRecords.map((record) => record.clone());
     }
 
     // All files start off as far as possible from an entry point

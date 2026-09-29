@@ -22,13 +22,45 @@
 // * The exprIn objects created here may be shared frozen instances (Go passes
 //   exprIn by value and no Go code mutates a received exprIn).
 //
-// Options that are always off in the fast path (CONVENTIONS section 5) have
-// their branches dropped with a short note: minifySyntax, keepNames,
-// mangleProps/mangleQuoted, lowering (UnsupportedJSFeatures == 0), ModeBundle,
-// Yarn PnP. Messages of kind Error/Warning throw BAIL through the Log.
+// All branches are ported.
 // ---------------------------------------------------------------------------
 
-import { bail } from "./bail.mjs";
+import { SourceIndex as RuntimeSourceIndex } from "./runtime.mjs";
+import { goQuote } from "./gostd.mjs";
+import { GoPanic, goTypeName } from "./gopanic.mjs";
+import { parseJSON, JSONOptions, isValidJSON } from "./json_parser.mjs";
+import { Source, generateStringInJSTable, remapStringInJSLoc, newStringInJSLog, type StringInJSTable } from "./logger.mjs";
+
+// ParseJSON's result, Go's zero Expr (a nil Data) when it failed
+function parseJSONOrZero(log, source) {
+  const r = parseJSON(log, source, new JSONOptions());
+  return r[0] !== null ? r[0] : new Expr(null, 0);
+}
+import {
+  jsFeatureHas,
+  Arrow,
+  AsyncAwait,
+  AsyncGenerator,
+  Bigint,
+  Destructuring,
+  DynamicImport,
+  ExponentOperator,
+  ImportAssertions,
+  ImportAttributes,
+  ImportMeta,
+  InlineScript,
+  NullishCoalescing,
+  OptionalChain,
+  RegexpDotAllFlag,
+  RegexpLookbehindAssertions,
+  RegexpMatchIndices,
+  RegexpNamedCaptureGroups,
+  RegexpSetNotation,
+  RegexpStickyAndUnicodeFlags,
+  RegexpUnicodePropertyEscapes,
+  TemplateLiteral,
+  TopLevelAwait,
+} from "./compat.mjs";
 import {
   Warning,
   Debug,
@@ -46,8 +78,25 @@ import {
   MsgID_JS_SuspiciousLogicalOperator,
   MsgID_JS_SuspiciousNullishCoalescing,
   MsgID_JS_UnsupportedRequireCall,
+  MsgID_JS_UnsupportedDynamicImport,
+  MsgID_JS_IndirectRequire,
+  MsgID_JS_DirectEval,
+  MsgData,
+  Msg,
+  MsgID_JS_UnsupportedRegExp,
+  LineColumnTracker,
+  ByteRange,
+  Error as LogError,
+  MsgID_JS_ThisIsUndefinedInESM,
 } from "./logger.mjs";
-import { codePointAt } from "./helpers.mjs";
+import {
+  codePointAt,
+  GlobPart,
+  GlobNone,
+  GlobAllExceptSlash,
+  GlobAllIncludingSlash,
+  utf8Len,
+} from "./helpers.mjs";
 import {
   InvalidRef,
   refInner,
@@ -83,8 +132,14 @@ import {
 } from "./ast.mjs";
 import {
   Expr,
+  Stmt,
+  Fn,
+  FnBody,
+  SBlock,
+  SReturn,
   Property,
   PropertyField,
+  PropertyMethod,
   PropertySpread,
   PropertyIsComputed,
   PropertyWasShorthand,
@@ -187,11 +242,15 @@ import {
   E_YIELD,
   E_IF,
   E_IMPORT_CALL,
+  E_INLINED_ENUM,
   EArray,
+  EUnary,
   EBinary,
   EBoolean,
   ECall,
   EDot,
+  EFunction,
+  ENameOfSymbol,
   EIdentifier,
   EImportIdentifier,
   ENumber,
@@ -214,6 +273,7 @@ import {
   TS_NAMESPACE_MEMBER_NAMESPACE,
   TS_NAMESPACE_MEMBER_ENUM_NUMBER,
   TS_NAMESPACE_MEMBER_ENUM_STRING,
+  constValueToExpr,
 } from "./js_ast.mjs";
 import {
   isPropertyAccess,
@@ -229,7 +289,9 @@ import {
   PrimitiveBoolean,
   PrimitiveNumber,
   PrimitiveString,
+  PrimitiveBigInt,
   NoSideEffects,
+  CouldHaveSideEffects,
   toNullOrUndefinedWithSideEffects,
   checkEqualityIfNoSideEffects,
   LooseEquality,
@@ -239,7 +301,25 @@ import {
   foldStringAddition,
   StringAdditionNormal,
   StringAdditionWithNestedLeft,
+  shouldFoldBinaryOperatorWhenMinifying,
+  maybeSimplifyEqualityComparison,
+  maybeSimplifyNot,
+  not,
+  assign,
+  canChangeStrictToLoose,
+  joinWithComma,
+  joinWithLeftAssociativeOp,
+  isBinaryNullAndUndefined,
+  stringToEquivalentNumberValue,
+  inlineSpreadsOfArrayLiterals,
+  mangleObjectSpread,
+  tryToStringOnNumberSafely,
 } from "./js_ast_helpers.mjs";
+import {
+  isIdentifierUTF16,
+  isIdentifierContinue,
+  isIdentifier,
+} from "./js_ident.mjs";
 import { rangeOfIdentifier, StrictModeReservedWords } from "./js_lexer.mjs";
 import {
   ModePassThrough,
@@ -251,6 +331,8 @@ import {
   CallCanBeUnwrappedIfUnused as DefineFlagCallCanBeUnwrappedIfUnused,
   MethodCallsMustBeReplacedWithUndefined,
   IsSymbolInstance,
+  prettyPrintTargetEnvironment,
+  formatString,
 } from "./config.mjs";
 import {
   exprIn,
@@ -260,6 +342,8 @@ import {
   binaryExprVisitor,
   identifierOpts,
   visitFnOpts,
+  globPart,
+  globPatternImport,
   visitArgsOpts,
   prependTempRefsOpts,
   stmtsFnBody,
@@ -283,6 +367,9 @@ import {
   objRestMustReturnInitExpr,
   objRestReturnValueIsUnused,
   valueCouldBeMutated,
+  wasOriginallyIndex,
+  tempRefNeedsDeclareMayBeCapturedInsideLoop,
+  whyESMTypeModulePackageJSON,
 } from "./js_parser_types.mjs";
 import { defineValueCanBeUsedInAssignTarget } from "./js_parser_parse.mjs";
 import { isUnsightlyPrimitive } from "./js_parser_visit_stmt2.mjs";
@@ -347,16 +434,9 @@ function mkOut(
 
 const OUT_METHOD_CALL_MUST_BE_REPLACED_WITH_UNDEFINED = Object.freeze(new exprOut(null, null, false, false, true));
 
-// "p.options.unsupportedJSFeatures.Has(compat.InlineScript)". compat is not
-// ported; compat.InlineScript is bit 36 of compat.JSFeature (a uint64).
-// NOTE: esbuild's bundler.applyOptionDefaults sets this bit whenever the
-// platform is not "browser" (unless overridden); the API layer is expected to
-// pass a matching unsupportedJSFeatures value (0 means "supported").
+// "p.options.unsupportedJSFeatures.Has(compat.InlineScript)"
 function unsupportedJSFeaturesHasInlineScript(p) {
-  const f = p.options.unsupportedJSFeatures;
-  if (typeof f === "bigint") return ((f >> 36n) & 1n) === 1n;
-  if (!f) return false;
-  return Math.floor(f / 68719476736) % 2 === 1;
+  return jsFeatureHas(p.options.unsupportedJSFeatures, InlineScript);
 }
 
 function visitExprImpl(p, expr) {
@@ -407,10 +487,23 @@ function equalFoldASCII6(text, start, lower) {
   return true;
 }
 
-// Go: func remapExprLocsInJSON(expr *js_ast.Expr, table []logger.StringInJSTableEntry)
-// This is only used by the Yarn PnP manifest hack (never in the fast path).
-export function remapExprLocsInJSON(expr, table) {
-  bail();
+// (only used by the Yarn PnP manifest hack)
+export function remapExprLocsInJSON(expr, table: StringInJSTable) {
+  expr.loc = remapStringInJSLoc(table, expr.loc);
+
+  const e = expr.data;
+  if (e instanceof EArray) {
+    e.closeBracketLoc = remapStringInJSLoc(table, e.closeBracketLoc);
+    for (let i = 0; i < e.items.length; i++) {
+      remapExprLocsInJSON(e.items[i], table);
+    }
+  } else if (e instanceof EObject) {
+    e.closeBraceLoc = remapStringInJSLoc(table, e.closeBraceLoc);
+    for (let i = 0; i < e.properties.length; i++) {
+      remapExprLocsInJSON(e.properties[i].key, table);
+      remapExprLocsInJSON(e.properties[i].valueOrNil, table);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +534,11 @@ function valueForThisImpl(p, loc, shouldLog, assignTarget, isCallTarget, isDelet
       // Warn about "this" becoming undefined, but only once per file
       if (shouldLog && !p.messageAboutThisIsUndefined && !p.fnOnlyDataVisit.silenceMessageAboutThisBeingUndefined) {
         p.messageAboutThisIsUndefined = true;
-        // (The message itself has kind logger.Debug and is dropped)
+        const kind = Debug;
+        const data = p.tracker.msgData(rangeOfIdentifier(p.source, loc), 'Top-level "this" will be replaced with undefined since this file is an ECMAScript module');
+        data.location.suggestion = "undefined";
+        const notes = p.whyESModule()[1];
+        p.log.addMsgID(MsgID_JS_ThisIsUndefinedInESM, new Msg(notes, "", data, kind));
       }
 
       // In an ES6 module, "this" is supposed to be undefined. Instead of
@@ -462,8 +559,10 @@ function valueForThisImpl(p, loc, shouldLog, assignTarget, isCallTarget, isDelet
 
 // Returns the substituted value or null (Go's "ok == false")
 function valueForImportMetaImpl(p, loc) {
-  // (compat.ImportMeta is always supported in the fast path)
-  if (p.options.mode !== ModePassThrough && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+  if (
+    jsFeatureHas(p.options.unsupportedJSFeatures, ImportMeta) ||
+    (p.options.mode !== ModePassThrough && !formatKeepESMImportExportSyntax(p.options.outputFormat))
+  ) {
     // Generate the variable if it doesn't exist yet
     if (p.importMetaRef === InvalidRef) {
       p.importMetaRef = p.newSymbol(SymbolOther, "import_meta");
@@ -483,14 +582,17 @@ function valueForImportMetaImpl(p, loc) {
 
 // Returns [pattern, flags, isUnsupported]. The scan is ASCII-driven, so
 // scanning UTF-16 code units gives the same result as Go's byte scan (the
-// computed ranges are only used for log messages).
+// ranges are UTF-16 ones, which the tracker converts to bytes).
 function isUnsupportedRegularExpressionImpl(p, loc, value) {
   let isUnsupported = false;
+  let what = "";
+  let r = RANGE_ZERO;
+  const unsupported = p.options.unsupportedJSFeatures;
 
   const end = value.lastIndexOf("/");
   const pattern = value.slice(1, end);
   const flags = value.slice(end + 1);
-  // (isUnicode is only needed for the compat.RegexpUnicodePropertyEscapes check)
+  const isUnicode = flags.indexOf("u") >= 0;
   let parenDepth = 0;
   let i = 0;
 
@@ -499,7 +601,7 @@ function isUnsupportedRegularExpressionImpl(p, loc, value) {
   // because regular expression grammar is complicated. If it contains a syntax
   // error that we don't catch, then we will just generate output code with a
   // syntax error. Garbage in, garbage out.
-  while (i < pattern.length) {
+  patternLoop: while (i < pattern.length) {
     const c = pattern.charCodeAt(i);
     i++;
 
@@ -521,28 +623,58 @@ function isUnsupportedRegularExpressionImpl(p, loc, value) {
         break;
 
       case 40 /* ( */:
-        // (Lookbehind assertions and named capture groups: compat.RegexpLookbehindAssertions
-        // and compat.RegexpNamedCaptureGroups are always supported in the fast path)
+        // "tail := pattern[i:]"
+        if (pattern.startsWith("?<=", i) || pattern.startsWith("?<!", i)) {
+          if (jsFeatureHas(unsupported, RegexpLookbehindAssertions)) {
+            what = "Lookbehind assertions in regular expressions are not available";
+            r = mkRange(loc + i + 1, 3);
+            isUnsupported = true;
+            break patternLoop;
+          }
+        } else if (pattern.startsWith("?<", i)) {
+          if (jsFeatureHas(unsupported, RegexpNamedCaptureGroups)) {
+            const end = pattern.indexOf(">", i);
+            if (end >= 0) {
+              what = "Named capture groups in regular expressions are not available";
+              r = mkRange(loc + i + 1, end - i + 1);
+              isUnsupported = true;
+              break patternLoop;
+            }
+          }
+        }
+
         parenDepth++;
         break;
 
       case 41 /* ) */:
         if (parenDepth === 0) {
-          p.log.addError(); // Unexpected ")" in regular expression
+          const r = mkRange(loc + i, 1);
+          p.log.addError(p.tracker, r, 'Unexpected ")" in regular expression');
           return [pattern, flags, isUnsupported];
         }
         parenDepth--;
         break;
 
       case 92 /* \ */:
-        // (Unicode property escapes: compat.RegexpUnicodePropertyEscapes is
-        // always supported in the fast path)
+        if (isUnicode && (pattern.startsWith("p{", i) || pattern.startsWith("P{", i))) {
+          if (jsFeatureHas(unsupported, RegexpUnicodePropertyEscapes)) {
+            const end = pattern.indexOf("}", i);
+            if (end >= 0) {
+              what = "Unicode property escapes in regular expressions are not available";
+              r = mkRange(loc + i, end - i + 2);
+              isUnsupported = true;
+              break patternLoop;
+            }
+          }
+        }
+
         i++; // Skip the escaped character
         break;
     }
   }
 
   if (!isUnsupported) {
+    // (Regular expression flags are ASCII letters: see the lexer)
     for (let j = 0; j < flags.length; j++) {
       const c = flags.charCodeAt(j);
       switch (c) {
@@ -552,29 +684,52 @@ function isUnsupportedRegularExpressionImpl(p, loc, value) {
           continue; // These are part of ES5 and are always supported
 
         case 115 /* s */:
-          continue; // This is part of ES2018 (compat.RegexpDotAllFlag is supported)
+          if (!jsFeatureHas(unsupported, RegexpDotAllFlag)) {
+            continue; // This is part of ES2018
+          }
+          break;
 
         case 121 /* y */:
         case 117 /* u */:
-          continue; // These are part of ES2018 (compat.RegexpStickyAndUnicodeFlags is supported)
+          if (!jsFeatureHas(unsupported, RegexpStickyAndUnicodeFlags)) {
+            continue; // These are part of ES2018
+          }
+          break;
 
         case 100 /* d */:
-          continue; // This is part of ES2022 (compat.RegexpMatchIndices is supported)
+          if (!jsFeatureHas(unsupported, RegexpMatchIndices)) {
+            continue; // This is part of ES2022
+          }
+          break;
 
         case 118 /* v */:
-          continue; // compat.RegexpSetNotation is supported
+          if (!jsFeatureHas(unsupported, RegexpSetNotation)) {
+            continue; // This is from a proposal: https://github.com/tc39/proposal-regexp-v-flag
+          }
+          break;
 
         default:
         // Unknown flags are never supported
       }
 
+      r = mkRange(loc + end + 1 + j, 1);
+      what = 'The regular expression flag "' + String.fromCharCode(c) + '" is not available';
       isUnsupported = true;
       break;
     }
   }
 
   if (isUnsupported) {
-    // (The message has kind logger.Debug and is dropped)
+    const where = prettyPrintTargetEnvironment(p.options.originalTargetEnv, p.options.unsupportedJSFeatureOverridesMask);
+    p.log.addIDWithNotes(MsgID_JS_UnsupportedRegExp, Debug, p.tracker, r, what + " in " + where, [
+      new MsgData(
+        null,
+        null,
+        'This regular expression literal has been converted to a "new RegExp()" constructor ' +
+          "to avoid generating code with a syntax error. However, you will need to include a " +
+          'polyfill for "RegExp" for your code to have the correct behavior at run-time.',
+      ),
+    ]);
   }
 
   return [pattern, flags, isUnsupported];
@@ -588,7 +743,7 @@ function isUnsupportedRegularExpressionImpl(p, loc, value) {
 // Returns the Expr; the exprOut is stored in "lastOut".
 function visitExprInOutImpl(p, expr, in_) {
   if (in_.assignTarget !== AssignTargetNone && !p.isValidAssignmentTarget(expr)) {
-    p.log.addError(); // Invalid assignment target
+    p.log.addError(p.tracker, mkRange(expr.loc, 0), "Invalid assignment target");
   }
 
   // Note: Anything added before or after this switch statement will be bypassed
@@ -606,7 +761,15 @@ function visitExprInOutImpl(p, expr, in_) {
       break;
 
     case E_BIG_INT:
-      // (compat.Bigint is always supported in the fast path)
+      if (jsFeatureHas(p.options.unsupportedJSFeatures, Bigint)) {
+        // For ease of implementation, the actual reference of the "BigInt"
+        // symbol is deferred to print time. That means we don't have to
+        // special-case the "BigInt" constructor in side-effect computations
+        // and future big integer constant folding (of which there isn't any
+        // at the moment).
+        p.markSyntaxFeature(Bigint, p.source.rangeOfNumber(expr.loc));
+        p.recordUsage(p.makeBigIntRef());
+      }
       break;
 
     case E_NAME_OF_SYMBOL:
@@ -636,20 +799,26 @@ function visitExprInOutImpl(p, expr, in_) {
 
     case E_NEW_TARGET:
       if (!p.fnOnlyDataVisit.isNewTargetAllowed) {
-        p.log.addError(); // Cannot use "new.target" here:
+        p.log.addError(p.tracker, e.range, 'Cannot use "new.target" here:');
       }
       break;
 
     case E_STRING:
       if (e.legacyOctalLoc > 0) {
         if (e.preferTemplate) {
-          p.log.addError(); // Legacy octal escape sequences cannot be used in template literals
+          p.log.addError(p.tracker, p.source.rangeOfLegacyOctalEscape(e.legacyOctalLoc), "Legacy octal escape sequences cannot be used in template literals");
         } else if (p.isStrictMode()) {
           p.markStrictModeFeature(legacyOctalEscape, p.source.rangeOfLegacyOctalEscape(e.legacyOctalLoc), "");
         }
       }
 
-      // (mangleQuoted only: strings as mangled property names)
+      if (in_.shouldMangleStringsAsProps && p.options.mangleQuoted && !e.preferTemplate) {
+        const name = e.value;
+        if (p.isMangledProp(name)) {
+          lastOut = EXPR_OUT_DEFAULT;
+          return new Expr(new ENameOfSymbol(p.symbolForMangledProp(name), e.hasPropertyKeyComment), expr.loc);
+        }
+      }
       break;
 
     case E_NUMBER:
@@ -674,7 +843,12 @@ function visitExprInOutImpl(p, expr, in_) {
         return value;
       }
 
-      // (compat.Arrow is always supported: "this" is never captured here)
+      // Capture "this" inside arrow functions that will be lowered into normal
+      // function expressions for older language environments
+      if (p.fnOrArrowDataVisit.isArrow && jsFeatureHas(p.options.unsupportedJSFeatures, Arrow) && p.fnOnlyDataVisit.isThisNested) {
+        lastOut = EXPR_OUT_DEFAULT;
+        return new Expr(new EIdentifier(p.captureThis()), expr.loc);
+      }
       break;
     }
 
@@ -711,7 +885,7 @@ function visitExprInOutImpl(p, expr, in_) {
       return visitEUnary(p, expr, e, in_);
 
     case E_IF:
-      visitEIf(p, e, in_);
+      expr = visitEIf(p, expr, e, in_);
       break;
 
     case E_AWAIT:
@@ -722,11 +896,14 @@ function visitExprInOutImpl(p, expr, in_) {
         e.valueOrNil = visitExprImpl(p, e.valueOrNil);
       }
 
-      // (compat.AsyncGenerator is always supported: no "__yieldStar")
+      // "yield* x" turns into "yield* __yieldStar(x)" when lowering async generator functions
+      if (e.isStar && jsFeatureHas(p.options.unsupportedJSFeatures, AsyncGenerator) && p.fnOrArrowDataVisit.isGenerator) {
+        e.valueOrNil = p.callRuntime(expr.loc, "__yieldStar", [e.valueOrNil]);
+      }
       break;
 
     case E_ARRAY:
-      visitEArray(p, e, in_);
+      visitEArray(p, expr, e, in_);
       break;
 
     case E_OBJECT:
@@ -741,31 +918,63 @@ function visitExprInOutImpl(p, expr, in_) {
       return visitECall(p, expr, e, in_);
 
     case E_NEW: {
+      let hasSpread = false;
+
       e.target = visitExprImpl(p, e.target);
       p.warnAboutImportNamespaceCall(e.target, exprKindNew);
 
       const args = e.args;
       for (let i = 0; i < args.length; i++) {
-        args[i] = visitExprImpl(p, args[i]);
+        const arg = visitExprImpl(p, args[i]);
+        if (arg.data.k === E_SPREAD) {
+          hasSpread = true;
+        }
+        args[i] = arg;
       }
 
-      // (minifySyntax only: "new foo(1, ...[2, 3], 4)" => "new foo(1, 2, 3, 4)")
+      // "new foo(1, ...[2, 3], 4)" => "new foo(1, 2, 3, 4)"
+      if (p.options.minifySyntax && hasSpread) {
+        e.args = inlineSpreadsOfArrayLiterals(e.args);
+      }
 
       p.maybeMarkKnownGlobalConstructorAsPure(e);
       break;
     }
 
     case E_ARROW:
-      visitEArrow(p, expr, e);
+      expr = visitEArrow(p, expr, e);
       break;
 
-    case E_FUNCTION:
-      // (The propagated name to keep is only used by keepNames)
+    case E_FUNCTION: {
+      // Check for a propagated name to keep from the parent context
+      let nameToKeep = "";
+      if (p.nameToKeepIsFor === e) {
+        nameToKeep = p.nameToKeep;
+      }
+
       p.visitFn(e.fn, expr.loc, new visitFnOpts(in_.isMethod, e === p.propDerivedCtorValue, in_.isLoweredPrivateMethod));
+      const name = e.fn.name;
 
-      // (minifySyntax only: remove unused function names)
-      // (keepNames only: preserve the name)
+      // Remove unused function names when minifying
+      if (
+        p.options.minifySyntax &&
+        !p.currentScope.containsDirectEval &&
+        name !== null &&
+        p.symbols[refInner(name.ref)].useCountEstimate === 0
+      ) {
+        e.fn.name = null;
+      }
+
+      // Optionally preserve the name for functions, but not for methods
+      if (p.options.keepNames && (!in_.isMethod || in_.isLoweredPrivateMethod)) {
+        if (name !== null) {
+          expr = p.keepExprSymbolName(expr, p.symbols[refInner(name.ref)].originalName);
+        } else if (nameToKeep !== "") {
+          expr = p.keepExprSymbolName(expr, nameToKeep);
+        }
+      }
       break;
+    }
 
     case E_CLASS: {
       // Check for a propagated name to keep from the parent context
@@ -792,7 +1001,7 @@ function visitExprInOutImpl(p, expr, in_) {
     default:
       // Note: EPrivateIdentifier should have already been handled
       // (Go panics: "Unexpected expression of type %T")
-      bail();
+      throw new GoPanic("Unexpected expression of type " + goTypeName("js_ast", expr.data));
   }
 
   lastOut = EXPR_OUT_DEFAULT;
@@ -836,13 +1045,23 @@ function visitEImportMeta(p, expr, e, in_) {
   }
 
   // Warn about "import.meta" if it's not replaced by a define
-  // (compat.ImportMeta is always supported in the fast path)
-  if (p.options.mode !== ModePassThrough && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+  if (jsFeatureHas(p.options.unsupportedJSFeatures, ImportMeta)) {
+    const r = mkRange(expr.loc, e.rangeLen);
+    p.markSyntaxFeature(ImportMeta, r);
+  } else if (p.options.mode !== ModePassThrough && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+    const r = mkRange(expr.loc, e.rangeLen);
     let kind = Warning;
     if (p.suppressWarningsAboutWeirdCode || p.fnOrArrowDataVisit.tryBodyCount > 0) {
       kind = Debug;
     }
-    p.log.addIDWithNotes(MsgID_JS_EmptyImportMeta, kind);
+    p.log.addIDWithNotes(
+      MsgID_JS_EmptyImportMeta,
+      kind,
+      p.tracker,
+      r,
+      '"import.meta" is not available with the ' + goQuote(formatString(p.options.outputFormat)) + " output format and will be empty",
+      [new MsgData(null, null, 'You need to set the output format to "esm" for "import.meta" to work correctly.')],
+    );
   }
 
   // Convert "import.meta" to a variable if it's not supported in the output format
@@ -866,6 +1085,7 @@ function visitEIdentifier(p, expr, e, in_) {
   // (findSymbol reuses its result object: copy the fields)
   const resultRef = found.ref;
   const resultIsInsideWithScope = found.isInsideWithScope;
+  const resultDeclareLoc = found.declareLoc;
   e.mustKeepDueToWithStmt = resultIsInsideWithScope;
   e.ref = resultRef;
 
@@ -878,7 +1098,7 @@ function visitEIdentifier(p, expr, e, in_) {
   //   }
   //
   if (p.symbols[refInner(resultRef)].kind === SymbolClassInComputedPropertyKey) {
-    p.log.addID(MsgID_JS_ClassNameWillThrow, Warning);
+    p.log.addID(MsgID_JS_ClassNameWillThrow, Warning, p.tracker, rangeOfIdentifier(p.source, expr.loc), "Accessing class " + goQuote(name) + " before initialization will throw");
     const value = p.callRuntime(expr.loc, "__earlyAccess", [new Expr(new EString(name), expr.loc)]);
     lastOut = EXPR_OUT_DEFAULT;
     return value;
@@ -887,7 +1107,10 @@ function visitEIdentifier(p, expr, e, in_) {
   // Handle assigning to a constant
   if (in_.assignTarget !== AssignTargetNone) {
     switch (p.symbols[refInner(resultRef)].kind) {
-      case SymbolConst:
+      case SymbolConst: {
+        const r = rangeOfIdentifier(p.source, expr.loc);
+        const notes = [p.tracker.msgData(rangeOfIdentifier(p.source, resultDeclareLoc), "The symbol " + goQuote(name) + " was declared a constant here:")];
+
         // Make this an error when bundling because we may need to convert this
         // "const" into a "var" during bundling. Also make this an error when
         // the constant is inlined because we will otherwise generate code with
@@ -897,17 +1120,27 @@ function visitEIdentifier(p, expr, e, in_) {
           p.options.mode === ModeBundle ||
           (p.currentScope.parent === null && p.willWrapModuleInTryCatchForUsing)
         ) {
-          p.log.addErrorWithNotes(); // Cannot assign to %q because it is a constant
+          p.log.addErrorWithNotes(p.tracker, r, "Cannot assign to " + goQuote(name) + " because it is a constant", notes);
         } else {
-          p.log.addIDWithNotes(MsgID_JS_AssignToConstant, Warning);
+          p.log.addIDWithNotes(MsgID_JS_AssignToConstant, Warning, p.tracker, r, "This assignment will throw because " + goQuote(name) + " is a constant", notes);
         }
         break;
+      }
 
-      case SymbolInjected:
-        if (p.injectedSymbolSources != null && p.injectedSymbolSources.has(resultRef)) {
-          p.log.addErrorWithNotes(); // Cannot assign to %q because it's an import from an injected file
+      case SymbolInjected: {
+        const where = p.injectedSymbolSources != null ? p.injectedSymbolSources.get(resultRef) : undefined;
+        if (where !== undefined) {
+          const r = rangeOfIdentifier(p.source, expr.loc);
+          const tracker = new LineColumnTracker(where.source);
+          p.log.addErrorWithNotes(p.tracker, r, "Cannot assign to " + goQuote(name) + " because it's an import from an injected file", [
+            tracker.msgData(
+              rangeOfIdentifier(where.source, where.loc),
+              "The symbol " + goQuote(name) + " was exported from " + goQuote(where.source.prettyPaths.select(p.options.logPathStyle)) + " here:",
+            ),
+          ]);
         }
         break;
+      }
     }
   }
 
@@ -1011,10 +1244,11 @@ function visitEJSXElement(p, expr, e) {
   }
 
   // Visit properties
+  let hasSpread = false;
   for (let $i47 = 0, $a47 = e.properties; $i47 < $a47.length; $i47++) {
     const property = $a47[$i47];
     if (property.kind === PropertySpread) {
-      // (hasSpread is only used when minifying)
+      hasSpread = true;
     } else {
       const mangled = property.key.data;
       if (mangled.k === E_NAME_OF_SYMBOL) {
@@ -1031,7 +1265,10 @@ function visitEJSXElement(p, expr, e) {
     }
   }
 
-  // (minifySyntax only: "{a, ...{b, c}, d}" => "{a, b, c, d}")
+  // "{a, ...{b, c}, d}" => "{a, b, c, d}"
+  if (p.options.minifySyntax && hasSpread) {
+    e.properties = mangleObjectSpread(e.properties);
+  }
 
   // Visit children
   const nullableChildren = e.nullableChildren === null ? [] : e.nullableChildren;
@@ -1175,7 +1412,15 @@ function visitEJSXElement(p, expr, e) {
           case "key": {
             const boolean = property.valueOrNil !== null ? property.valueOrNil.data : null;
             if (boolean !== null && boolean.k === E_BOOLEAN && boolean.value && (property.flags & PropertyWasShorthand) !== 0) {
-              p.log.addError(); // Please provide an explicit value for "key":
+              const r = rangeOfIdentifier(p.source, property.loc);
+              const msg = new Msg(
+                [new MsgData(null, null, 'Using "key" as a shorthand for "key={true}" is not allowed when using React' + "'" + 's "automatic" JSX transform.')],
+                "",
+                p.tracker.msgData(r, 'Please provide an explicit value for "key":'),
+                LogError,
+              );
+              msg.data.location.suggestion = "key={true}";
+              p.log.addMsg(msg);
             } else {
               keyProperty = property.valueOrNil;
               hasKey = true;
@@ -1185,7 +1430,15 @@ function visitEJSXElement(p, expr, e) {
 
           case "__source":
           case "__self":
-            p.log.addErrorWithNotes(); // Duplicate "%s" prop found:
+            const r = rangeOfIdentifier(p.source, property.loc);
+            p.log.addErrorWithNotes(p.tracker, r, 'Duplicate "' + propName + '" prop found:', [
+              new MsgData(
+                null,
+                null,
+                'Both "__source" and "__self" are set automatically by esbuild when using React' + "'" + 's "automatic" JSX transform. ' +
+                  "This duplicate prop may have come from a plugin.",
+              ),
+            ]);
             continue;
         }
       }
@@ -1322,7 +1575,7 @@ function visitEJSXElement(p, expr, e) {
 
 function visitETemplate(p, expr, e) {
   if (e.legacyOctalLoc > 0) {
-    p.log.addError(); // Legacy octal escape sequences cannot be used in template literals
+    p.log.addError(p.tracker, p.source.rangeOfLegacyOctalEscape(e.legacyOctalLoc), "Legacy octal escape sequences cannot be used in template literals");
   }
 
   let tagThisFunc = null;
@@ -1331,8 +1584,18 @@ function visitETemplate(p, expr, e) {
   if (e.tagOrNil !== null) {
     // Capture the value for "this" if the tag is a lowered optional chain.
     // We'll need to manually apply this value later to preserve semantics.
-    // (compat.OptionalChain is always supported in the fast path)
-    const tagIsLoweredOptionalChain = false;
+    let tagIsLoweredOptionalChain = false;
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, OptionalChain)) {
+      const target = e.tagOrNil.data;
+      switch (target.k) {
+        case E_DOT:
+          tagIsLoweredOptionalChain = target.optionalChain !== OptionalChainNone;
+          break;
+        case E_INDEX:
+          tagIsLoweredOptionalChain = target.optionalChain !== OptionalChainNone;
+          break;
+      }
+    }
 
     p.templateTag = e.tagOrNil.data;
     const tag = visitExprInOutImpl(p, e.tagOrNil, inForChain(false, tagIsLoweredOptionalChain));
@@ -1382,12 +1645,11 @@ function visitETemplate(p, expr, e) {
   // When mangling, inline string values into the template literal. Note that
   // it may no longer be a template literal after this point (it may turn into
   // a plain string literal instead).
-  if (p.shouldFoldTypeScriptConstantExpressions /* || minifySyntax */) {
+  if (p.shouldFoldTypeScriptConstantExpressions || p.options.minifySyntax) {
     expr = inlinePrimitivesIntoTemplate(expr.loc, e);
   }
 
-  // (compat.TemplateLiteral is always supported in the fast path)
-  let shouldLowerTemplateLiteral = false;
+  let shouldLowerTemplateLiteral = jsFeatureHas(p.options.unsupportedJSFeatures, TemplateLiteral);
 
   // If the tag was originally an optional chaining property access, then
   // we'll need to lower this template literal as well to preserve the value
@@ -1624,8 +1886,9 @@ function visitEDot(p, expr, e, in_) {
   if (out.callMustBeReplacedWithUndefined) {
     if (e.name === "call" || e.name === "apply") {
       methodCallMustBeReplacedWithUndefined = true;
+    } else if (jsFeatureHas(p.options.unsupportedJSFeatures, Arrow)) {
+      e.target = new Expr(new EFunction(), e.target.loc);
     } else {
-      // (compat.Arrow is always supported in the fast path)
       e.target = new Expr(new EArrow(), e.target.loc);
     }
   }
@@ -1709,7 +1972,23 @@ function visitEIndex(p, expr, e, in_) {
     }
   }
 
-  // (minifySyntax only: "a['b']" => "a.b")
+  // "a['b']" => "a.b"
+  if (p.options.minifySyntax) {
+    const str = e.index.data;
+    if (str.k === E_STRING && isIdentifierUTF16(str.value)) {
+      const dot = p.dotOrMangledPropParse(e.target, str.value, e.index.loc, e.optionalChain, wasOriginallyIndex);
+      if (isCallTarget) {
+        p.callTarget = dot;
+      }
+      if (isTemplateTag) {
+        p.templateTag = dot;
+      }
+      if (isDeleteTarget) {
+        p.deleteTarget = dot;
+      }
+      return visitExprInOutImpl(p, new Expr(dot, expr.loc), in_);
+    }
+  }
 
   p.dotOrIndexTarget = e.target.data;
   const target = visitExprInOutImpl(p, e.target, inForChain(e.optionalChain === OptionalChainContinue, false));
@@ -1726,22 +2005,27 @@ function visitEIndex(p, expr, e, in_) {
     // Unlike regular identifiers, there are no unbound private identifiers
     const kind = p.symbols[refInner(result.ref)].kind;
     if (!symbolKindIsPrivate(kind)) {
-      p.log.addError(); // Private name %q must be declared in an enclosing class
+      const r = new ByteRange(e.index.loc, utf8Len(name));
+      p.log.addError(p.tracker, r, "Private name " + goQuote(name) + " must be declared in an enclosing class");
     } else {
+      let r = RANGE_ZERO;
       let text = "";
       if (in_.assignTarget !== AssignTargetNone && (kind === SymbolPrivateMethod || kind === SymbolPrivateStaticMethod)) {
-        text = "Writing to read-only method will throw";
+        r = new ByteRange(e.index.loc, utf8Len(name));
+        text = "Writing to read-only method " + goQuote(name) + " will throw";
       } else if (in_.assignTarget !== AssignTargetNone && (kind === SymbolPrivateGet || kind === SymbolPrivateStaticGet)) {
-        text = "Writing to getter-only property will throw";
+        r = new ByteRange(e.index.loc, utf8Len(name));
+        text = "Writing to getter-only property " + goQuote(name) + " will throw";
       } else if (in_.assignTarget !== AssignTargetReplace && (kind === SymbolPrivateSet || kind === SymbolPrivateStaticSet)) {
-        text = "Reading from setter-only property will throw";
+        r = new ByteRange(e.index.loc, utf8Len(name));
+        text = "Reading from setter-only property " + goQuote(name) + " will throw";
       }
       if (text !== "") {
         let kind2 = Warning;
         if (p.suppressWarningsAboutWeirdCode) {
           kind2 = Debug;
         }
-        p.log.addID(MsgID_JS_PrivateNameWillThrow, kind2);
+        p.log.addID(MsgID_JS_PrivateNameWillThrow, kind2, p.tracker, r, text);
       }
     }
 
@@ -1810,7 +2094,7 @@ function visitEIndex(p, expr, e, in_) {
   {
     const str = e.index.data;
     if (str.k === E_STRING && e.optionalChain === OptionalChainNone) {
-      const preferQuotedKey = true; // !p.options.minifySyntax
+      const preferQuotedKey = !p.options.minifySyntax;
       const rewritten = p.maybeRewritePropertyAccess(
         expr.loc,
         in_.assignTarget,
@@ -1829,8 +2113,62 @@ function visitEIndex(p, expr, e, in_) {
     }
   }
 
-  // (ModeBundle only: error for assigning to a property of an import namespace)
-  // (minifySyntax only: "a['x' + 'y']" => "a.xy", "a['123']" => "a[123]", "'abc'[1]" => "'b'")
+  // Create an error for assigning to an import namespace when bundling. Even
+  // though this is a run-time error, we make it a compile-time error when
+  // bundling because scope hoisting means these will no longer be run-time
+  // errors.
+  if (p.options.mode === ModeBundle && (in_.assignTarget !== AssignTargetNone || isDeleteTarget)) {
+    const id = e.target.data;
+    if (id.k === E_IDENTIFIER && p.symbols[refInner(id.ref)].kind === SymbolImport) {
+      const r = rangeOfIdentifier(p.source, e.target.loc);
+      p.log.addErrorWithNotes(p.tracker, r, "Cannot assign to property on import " + goQuote(p.symbols[refInner(id.ref)].originalName), [
+        new MsgData(
+          null,
+          null,
+          "Imports are immutable in JavaScript. " +
+            "To modify the value of this import, you must export a setter function in the " +
+            "imported file and then import and call that function here instead.",
+        ),
+      ]);
+    }
+  }
+
+  if (p.options.minifySyntax) {
+    const index = e.index.data;
+    switch (index.k) {
+      case E_STRING:
+        // "a['x' + 'y']" => "a.xy" (this is done late to allow for constant folding)
+        if (isIdentifierUTF16(index.value)) {
+          lastOut = newOut;
+          return new Expr(
+            new EDot(e.target, index.value, e.index.loc, e.optionalChain, e.canBeRemovedIfUnused, e.callCanBeUnwrappedIfUnused),
+            expr.loc,
+          );
+        }
+
+        // "a['123']" => "a[123]" (this is done late to allow "'123'" to be mangled)
+        {
+          const $d = stringToEquivalentNumberValue(index.value);
+          if ($d[1]) {
+            e.index = new Expr(new ENumber($d[0]), e.index.loc);
+          }
+        }
+        break;
+
+      case E_NUMBER: {
+        // "'abc'[1]" => "'b'"
+        const target = e.target.data;
+        if (target.k === E_STRING) {
+          const intValue = Math.floor(index.value);
+          if (index.value === intValue && intValue >= 0 && intValue < target.value.length) {
+            lastOut = newOut;
+            return new Expr(new EString(target.value[intValue]), expr.loc);
+          }
+        }
+        break;
+      }
+    }
+  }
 
   lastOut = newOut;
   return expr;
@@ -1876,7 +2214,9 @@ function visitEUnary(p, expr, e, in_) {
         if (p.suppressWarningsAboutWeirdCode) {
           kind = Debug;
         }
-        p.log.addID(MsgID_JS_DeleteSuperProperty, kind);
+        const r = rangeOfIdentifier(p.source, superPropLoc);
+        const text = 'Attempting to delete a property of "super" will throw a ReferenceError';
+        p.log.addID(MsgID_JS_DeleteSuperProperty, kind, p.tracker, r, text);
       }
 
       p.deleteTarget = e.value.data;
@@ -1901,7 +2241,9 @@ function visitEUnary(p, expr, e, in_) {
       // Post-process the unary expression
       switch (e.op) {
         case UnOpNot: {
-          // (minifySyntax only: SimplifyBooleanExpr)
+          if (p.options.minifySyntax) {
+            e.value = p.astHelpers.simplifyBooleanExpr(e.value);
+          }
 
           const $d135 = toBooleanWithSideEffects(e.value.data);
           const boolean = $d135[0], sideEffects = $d135[1], ok = $d135[2];
@@ -1910,26 +2252,35 @@ function visitEUnary(p, expr, e, in_) {
             return new Expr(new EBoolean(!boolean), expr.loc);
           }
 
-          // (minifySyntax only: MaybeSimplifyNot)
+          if (p.options.minifySyntax) {
+            const $d = maybeSimplifyNot(e.value);
+            if ($d[1]) {
+              lastOut = EXPR_OUT_DEFAULT;
+              return $d[0];
+            }
+          }
           break;
         }
 
         case UnOpVoid: {
-          // (minifySyntax uses ExprCanBeRemovedIfUnused instead)
-          //
-          // This special case was added for a very obscure reason. There's a
-          // custom dialect of JavaScript called Svelte that uses JavaScript
-          // syntax with different semantics. Specifically variable accesses
-          // have side effects (!). And someone wants to use "void x" instead
-          // of just "x" to trigger the side effect for some reason.
-          //
-          // Arguably this should not be supported, because you shouldn't be
-          // running esbuild on weird kinda-JavaScript-but-not languages and
-          // expecting it to work correctly. But this one special case seems
-          // harmless enough. This is definitely not fully supported though.
-          //
-          // More info: https://github.com/evanw/esbuild/issues/4041
-          const shouldRemove = isUnsightlyPrimitive(e.value.data);
+          let shouldRemove;
+          if (p.options.minifySyntax) {
+            shouldRemove = p.astHelpers.exprCanBeRemovedIfUnused(e.value);
+          } else {
+            // This special case was added for a very obscure reason. There's a
+            // custom dialect of JavaScript called Svelte that uses JavaScript
+            // syntax with different semantics. Specifically variable accesses
+            // have side effects (!). And someone wants to use "void x" instead
+            // of just "x" to trigger the side effect for some reason.
+            //
+            // Arguably this should not be supported, because you shouldn't be
+            // running esbuild on weird kinda-JavaScript-but-not languages and
+            // expecting it to work correctly. But this one special case seems
+            // harmless enough. This is definitely not fully supported though.
+            //
+            // More info: https://github.com/evanw/esbuild/issues/4041
+            shouldRemove = isUnsightlyPrimitive(e.value.data);
+          }
           if (shouldRemove) {
             lastOut = EXPR_OUT_DEFAULT;
             return new Expr(EUndefinedShared, expr.loc);
@@ -1958,7 +2309,7 @@ function visitEUnary(p, expr, e, in_) {
         }
 
         case UnOpCpl:
-          if (p.shouldFoldTypeScriptConstantExpressions /* || minifySyntax */) {
+          if (p.shouldFoldTypeScriptConstantExpressions || p.options.minifySyntax) {
             // Minification folds complement operations since they are unlikely to result in larger output
             const $d138 = toNumberWithoutSideEffects(e.value.data);
             const number = $d138[0], ok = $d138[1];
@@ -1994,23 +2345,32 @@ function visitEUnary(p, expr, e, in_) {
     }
   }
 
-  // (minifySyntax only: "-(a, b)" => "a, -b")
+  // "-(a, b)" => "a, -b"
+  if (p.options.minifySyntax && e.op !== UnOpDelete && e.op !== UnOpTypeof) {
+    const comma = e.value.data;
+    if (comma.k === E_BINARY && comma.op === BinOpComma) {
+      lastOut = EXPR_OUT_DEFAULT;
+      return joinWithComma(comma.left, new Expr(new EUnary(comma.right, e.op), comma.right.loc));
+    }
+  }
 
   lastOut = EXPR_OUT_DEFAULT;
   return expr;
 }
 
-function visitEIf(p, e, in_) {
+function visitEIf(p, expr, e, in_) {
   e.test = visitExprImpl(p, e.test);
 
-  // (minifySyntax only: SimplifyBooleanExpr)
+  if (p.options.minifySyntax) {
+    e.test = p.astHelpers.simplifyBooleanExpr(e.test);
+  }
 
   // Propagate these flags into the branches
   const childIn = inForMangleStrings(in_.shouldMangleStringsAsProps);
 
   // Fold constants
   const $d140 = toBooleanWithSideEffects(e.test.data);
-  const boolean = $d140[0], ok = $d140[2];
+  const boolean = $d140[0], sideEffects = $d140[1], ok = $d140[2];
   if (!ok) {
     e.yes = visitExprInOutImpl(p, e.yes, childIn);
     e.no = visitExprInOutImpl(p, e.no, childIn);
@@ -2024,7 +2384,14 @@ function visitEIf(p, e, in_) {
       e.no = visitExprInOutImpl(p, e.no, childIn);
       p.isControlFlowDead = old;
 
-      // (minifySyntax only: "(a, true) ? b : c" => "a, b")
+      if (p.options.minifySyntax) {
+        // "(a, true) ? b : c" => "a, b"
+        if (sideEffects === CouldHaveSideEffects) {
+          return joinWithComma(p.astHelpers.simplifyUnusedExpr(e.test, p.options.unsupportedJSFeatures), e.yes);
+        }
+
+        return e.yes;
+      }
     } else {
       // "false ? dead : live"
       const old = p.isControlFlowDead;
@@ -2033,25 +2400,37 @@ function visitEIf(p, e, in_) {
       p.isControlFlowDead = old;
       e.no = visitExprInOutImpl(p, e.no, childIn);
 
-      // (minifySyntax only: "(a, false) ? b : c" => "a, c")
+      if (p.options.minifySyntax) {
+        // "(a, false) ? b : c" => "a, c"
+        if (sideEffects === CouldHaveSideEffects) {
+          return joinWithComma(p.astHelpers.simplifyUnusedExpr(e.test, p.options.unsupportedJSFeatures), e.no);
+        }
+
+        return e.no;
+      }
     }
   }
 
-  // (minifySyntax only: MangleIfExpr)
+  if (p.options.minifySyntax) {
+    return p.astHelpers.mangleIfExpr(expr.loc, e, p.options.unsupportedJSFeatures);
+  }
+
+  return expr;
 }
 
 // Sets lastOut
 function visitEAwait(p, expr, e, in_) {
   // Silently remove unsupported top-level "await" in dead code branches
   if (p.fnOrArrowDataVisit.isOutsideFnOrArrow) {
-    // (compat.TopLevelAwait is always supported in the fast path)
-    if (p.isControlFlowDead && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+    if (
+      p.isControlFlowDead &&
+      (jsFeatureHas(p.options.unsupportedJSFeatures, TopLevelAwait) || !formatKeepESMImportExportSyntax(p.options.outputFormat))
+    ) {
       return visitExprInOutImpl(p, e.value, in_);
     } else {
       const r = mkRange(expr.loc, 5);
       p.liveTopLevelAwaitKeyword = r;
-      // compat is not ported: js_parser_lower.mjs accepts the Go feature name
-      p.markSyntaxFeature("TopLevelAwait", r);
+      p.markSyntaxFeature(TopLevelAwait, r);
     }
   }
 
@@ -2064,13 +2443,14 @@ function visitEAwait(p, expr, e, in_) {
   return value;
 }
 
-function visitEArray(p, e, in_) {
+function visitEArray(p, expr, e, in_) {
   if (in_.assignTarget !== AssignTargetNone) {
     if (e.commaAfterSpread !== 0) {
-      p.log.addError(); // Unexpected "," after rest pattern
+      p.log.addError(p.tracker, mkRange(e.commaAfterSpread, 1), 'Unexpected "," after rest pattern');
     }
-    // (p.markSyntaxFeature(compat.Destructuring): no-op in the fast path)
+    p.markSyntaxFeature(Destructuring, mkRange(expr.loc, 1));
   }
+  let hasSpread = false;
   const itemIn = inForAssignTarget(in_.assignTarget);
   const items = e.items;
   for (let i = 0; i < items.length; i++) {
@@ -2081,7 +2461,7 @@ function visitEArray(p, e, in_) {
         break;
       case E_SPREAD:
         e2.value = visitExprInOutImpl(p, e2.value, itemIn);
-        // (hasSpread is only used when minifying)
+        hasSpread = true;
         break;
       case E_BINARY:
         if (in_.assignTarget !== AssignTargetNone && e2.op === BinOpAssign) {
@@ -2105,20 +2485,24 @@ function visitEArray(p, e, in_) {
     items[i] = item;
   }
 
-  // (minifySyntax only: "[1, ...[2, 3], 4]" => "[1, 2, 3, 4]")
+  // "[1, ...[2, 3], 4]" => "[1, 2, 3, 4]"
+  if (p.options.minifySyntax && hasSpread && in_.assignTarget === AssignTargetNone) {
+    e.items = inlineSpreadsOfArrayLiterals(e.items);
+  }
 }
 
 function visitEObject(p, expr, e, in_) {
   if (in_.assignTarget !== AssignTargetNone) {
     if (e.commaAfterSpread !== 0) {
-      p.log.addError(); // Unexpected "," after rest pattern
+      p.log.addError(p.tracker, mkRange(e.commaAfterSpread, 1), 'Unexpected "," after rest pattern');
     }
-    // (p.markSyntaxFeature(compat.Destructuring): no-op in the fast path)
+    p.markSyntaxFeature(Destructuring, mkRange(expr.loc, 1));
   }
 
+  let hasSpread = false;
   let protoRange = RANGE_ZERO;
-  // (innerClassNameRef is only generated when lowering async methods, which
-  // never happens in the fast path, so it always stays ast.InvalidRef)
+  let innerClassNameRef = InvalidRef;
+  const minifySyntax = p.options.minifySyntax;
 
   for (let $i51 = 0, $a51 = e.properties; $i51 < $a51.length; $i51++) {
     const property = $a51[$i51];
@@ -2143,16 +2527,43 @@ function visitEObject(p, expr, e, in_) {
         if (str.k === E_STRING && str.value === "__proto__") {
           const r = rangeOfIdentifier(p.source, key.loc);
           if (protoRange.len > 0) {
-            p.log.addErrorWithNotes(); // Cannot specify the "__proto__" property more than once per object
+            p.log.addErrorWithNotes(p.tracker, r, 'Cannot specify the "__proto__" property more than once per object', [
+              p.tracker.msgData(protoRange, 'The earlier "__proto__" property is here:'),
+            ]);
           } else {
             protoRange = r;
           }
         }
       }
 
-      // (minifySyntax only: "{['x']: y}" => "{x: y}")
+      // "{['x']: y}" => "{x: y}"
+      if (minifySyntax && (property.flags & PropertyIsComputed) !== 0) {
+        const inlined = key.data;
+        if (inlined.k === E_INLINED_ENUM) {
+          switch (inlined.value.data.k) {
+            case E_STRING:
+            case E_NUMBER:
+              // ("key" and "property.Key" have the same loc here)
+              key = new Expr(inlined.value.data, key.loc);
+              property.key = key;
+              break;
+          }
+        }
+        const k = key.data;
+        switch (k.k) {
+          case E_NUMBER:
+          case E_NAME_OF_SYMBOL:
+            property.flags &= ~PropertyIsComputed;
+            break;
+          case E_STRING:
+            if (k.value !== "__proto__") {
+              property.flags &= ~PropertyIsComputed;
+            }
+            break;
+        }
+      }
     } else {
-      // (hasSpread is only used when minifying)
+      hasSpread = true;
     }
 
     // Extract the initializer for expressions like "({ a: b = c } = d)"
@@ -2168,8 +2579,21 @@ function visitEObject(p, expr, e, in_) {
       const oldIsInStaticClassContext = p.fnOnlyDataVisit.isInStaticClassContext;
       const oldInnerClassNameRef = p.fnOnlyDataVisit.innerClassNameRef;
 
-      // (compat.AsyncAwait is always supported: async methods are not lowered,
-      // so no temporary for a lowered "super" reference is needed)
+      // If this is an async method and async methods are unsupported,
+      // generate a temporary variable in case this async method contains a
+      // "super" property reference. If that happens, the "super" expression
+      // must be lowered which will need a reference to this object literal.
+      if (property.kind === PropertyMethod && jsFeatureHas(p.options.unsupportedJSFeatures, AsyncAwait)) {
+        const fn = property.valueOrNil.data;
+        if (fn.k === E_FUNCTION && fn.fn.isAsync) {
+          if (innerClassNameRef === InvalidRef) {
+            innerClassNameRef = p.generateTempRef(tempRefNeedsDeclareMayBeCapturedInsideLoop, "");
+          }
+          p.fnOnlyDataVisit.isInStaticClassContext = true;
+          // (Go stores "&innerClassNameRef"; the local is not changed afterwards)
+          p.fnOnlyDataVisit.innerClassNameRef = innerClassNameRef;
+        }
+      }
 
       // Propagate the name to keep from the property into the value
       if (property.key !== null) {
@@ -2205,7 +2629,16 @@ function visitEObject(p, expr, e, in_) {
       property.initializerOrNil = visitExprImpl(p, property.initializerOrNil);
     }
 
-    // (minifySyntax only: "{ '123': 4 }" => "{ 123: 4 }")
+    // "{ '123': 4 }" => "{ 123: 4 }" (this is done late to allow "'123'" to be mangled)
+    if (minifySyntax) {
+      const str = property.key !== null ? property.key.data : null;
+      if (str !== null && str.k === E_STRING) {
+        const $d = stringToEquivalentNumberValue(str.value);
+        if ($d[1] && $d[0] >= 0) {
+          property.key = new Expr(new ENumber($d[0]), property.key.loc);
+        }
+      }
+    }
   }
 
   // Check for and warn about duplicate keys in object literals
@@ -2214,14 +2647,22 @@ function visitEObject(p, expr, e, in_) {
   }
 
   if (in_.assignTarget === AssignTargetNone) {
-    // (minifySyntax only: "{a, ...{b, c}, d}" => "{a, b, c, d}")
+    // "{a, ...{b, c}, d}" => "{a, b, c, d}"
+    if (minifySyntax && hasSpread) {
+      e.properties = mangleObjectSpread(e.properties);
+    }
 
     // Object expressions represent both object literals and binding patterns.
     // Only lower object spread if we're an object literal, not a binding pattern.
-    const value = p.lowerObjectSpread(expr.loc, e);
+    let value = p.lowerObjectSpread(expr.loc, e);
 
-    // (A lowered "super" reference inside a lowered "async" method would
-    // initialize the temporary here; never happens in the fast path)
+    // If we generated and used the temporary variable for a lowered "super"
+    // property reference inside a lowered "async" method, then initialize
+    // the temporary with this object literal.
+    if (innerClassNameRef !== InvalidRef && p.symbols[refInner(innerClassNameRef)].useCountEstimate > 0) {
+      p.recordUsage(innerClassNameRef);
+      value = assign(new Expr(new EIdentifier(innerClassNameRef), expr.loc), value);
+    }
 
     return value;
   }
@@ -2244,8 +2685,8 @@ function visitEImportCall(p, expr, e) {
     // reused in different places in the AST (e.g. function scopes must be
     // unique). Also the additional argument may have side effects and we
     // don't currently account for that.
-    // ("whyLoc" is only used by the ModeBundle-only warning and is omitted)
     let why = "the second argument was not an object literal";
+    let whyLoc = e.optionsOrNil.loc;
 
     // However, make a special case for an additional argument that contains
     // only an "assert" or a "with" clause. In that case we can split this
@@ -2279,13 +2720,16 @@ function visitEImportCall(p, expr, e) {
                       }
                       continue;
                     } else {
-                      why = "the value for the property was not a string literal";
+                      why = "the value for the property " + goQuote(key.value) + " was not a string literal";
+                      whyLoc = p2.valueOrNil.loc;
                     }
                   } else {
                     why = "this property was not a string literal";
+                    whyLoc = p2.key.loc;
                   }
                 } else {
                   why = "this property was invalid";
+                  whyLoc = p2.key.loc;
                 }
                 entries = null;
                 break;
@@ -2307,24 +2751,50 @@ function visitEImportCall(p, expr, e) {
               }
             } else {
               why = 'the value for "assert" was not an object literal';
+              whyLoc = prop.valueOrNil.loc;
             }
           } else {
             why = 'this property was not called "assert" or "with"';
+            whyLoc = prop.key.loc;
           }
         } else {
           why = "this property was invalid";
+          whyLoc = prop.key.loc;
         }
       } else {
         why = 'the second argument was not an object literal with a single property called "assert" or "with"';
+        whyLoc = e.optionsOrNil.loc;
       }
     }
 
     // Handle the case that isn't just an import assertion or attribute clause
     if (why !== "") {
-      // (Only warn when bundling: ModeBundle only)
+      // Only warn when bundling
+      if (p.options.mode === ModeBundle) {
+        const text = 'This "import()" was not recognized because ' + why;
+        let kind = Warning;
+        if (p.suppressWarningsAboutWeirdCode) {
+          kind = Debug;
+        }
+        p.log.addID(MsgID_JS_UnsupportedDynamicImport, kind, p.tracker, mkRange(whyLoc, 0), text);
+      }
 
-      // (compat.ImportAssertions and compat.ImportAttributes are always
-      // supported in the fast path, so the second argument is kept)
+      // If import assertions and/attributes are both not supported in the
+      // target platform, then "import()" cannot accept a second argument
+      // and keeping them would be a syntax error, so we need to get rid of
+      // them. We can't just not print them because they may have important
+      // side effects. Attempt to discard them without changing side effects
+      // and generate an error if that isn't possible.
+      if (
+        jsFeatureHas(p.options.unsupportedJSFeatures, ImportAssertions) &&
+        jsFeatureHas(p.options.unsupportedJSFeatures, ImportAttributes)
+      ) {
+        if (p.astHelpers.exprCanBeRemovedIfUnused(e.optionsOrNil)) {
+          e.optionsOrNil = null;
+        } else {
+          p.markSyntaxFeature(ImportAttributes, mkRange(e.optionsOrNil.loc, 0));
+        }
+      }
 
       // Stop now so we don't try to split "?:" expressions below and
       // potentially end up with an AST node reused multiple times
@@ -2357,12 +2827,73 @@ function visitEImportCall(p, expr, e) {
       return new Expr(new EImportString(importRecordIndex, e.closeParenLoc), expr.loc);
     }
 
-    // (Handle glob patterns: ModeBundle only)
+    // Handle glob patterns
+    if (p.options.mode === ModeBundle) {
+      const value = p.handleGlobPattern(arg, ImportDynamic, e.phase, "globImport", assertOrWith);
+      if (value !== null) {
+        return value;
+      }
+    }
 
-    // (Use a debug log so people can see this if they want to: kind
-    // logger.Debug, dropped)
+    // Use a debug log so people can see this if they want to
+    {
+      const r = rangeOfIdentifier(p.source, expr.loc);
+      p.log.addID(MsgID_JS_UnsupportedDynamicImport, Debug, p.tracker, r, 'This "import" expression will not be bundled because the argument is not a string literal');
+    }
 
-    // (compat.DynamicImport is always supported: no "require()" conversion)
+    // We need to convert this into a call to "require()" if ES6 syntax is
+    // not supported in the current output format. The full conversion:
+    //
+    //   Before:
+    //     import(foo)
+    //
+    //   After:
+    //     Promise.resolve().then(() => __toESM(require(foo)))
+    //
+    // This is normally done by the printer since we don't know during the
+    // parsing stage whether this module is external or not. However, it's
+    // guaranteed to be external if the argument isn't a string. We handle
+    // this case here instead of in the printer because both the printer
+    // and the linker currently need an import record to handle this case
+    // correctly, and you need a string literal to get an import record.
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, DynamicImport)) {
+      let then;
+      const value = p.callRuntime(arg.loc, "__toESM", [
+        new Expr(new ECall(p.valueToSubstituteForRequire(expr.loc), [arg], e.closeParenLoc), expr.loc),
+      ]);
+      const body = new FnBody(new SBlock([new Stmt(new SReturn(value), expr.loc)]), expr.loc);
+      if (jsFeatureHas(p.options.unsupportedJSFeatures, Arrow)) {
+        then = new Expr(new EFunction(new Fn(null, [], body)), expr.loc);
+      } else {
+        then = new Expr(new EArrow([], body, false, false, true /* preferExpr */), expr.loc);
+      }
+      return new Expr(
+        new ECall(
+          new Expr(
+            new EDot(
+              new Expr(
+                new ECall(
+                  new Expr(new EDot(new Expr(new EIdentifier(p.makePromiseRef()), expr.loc), "resolve", expr.loc), expr.loc),
+                  [],
+                  0,
+                  OptionalChainNone,
+                  TargetWasOriginallyPropertyAccess,
+                ),
+                expr.loc,
+              ),
+              "then",
+              expr.loc,
+            ),
+            expr.loc,
+          ),
+          [then],
+          0,
+          OptionalChainNone,
+          TargetWasOriginallyPropertyAccess,
+        ),
+        expr.loc,
+      );
+    }
 
     // Note: Go does not copy "Phase" here
     return new Expr(new EImportCall(arg, e.optionsOrNil, e.closeParenLoc), expr.loc);
@@ -2462,7 +2993,62 @@ function visitECall(p, expr, e, in_) {
     }
   }
 
-  // (Yarn PnP only: the "hydrateRuntimeState" hack)
+  // Our hack for reading Yarn PnP files is implemented here:
+  if (p.options.decodeHydrateRuntimeStateYarnPnP) {
+    const id = e.target.data;
+    if (id.k === E_IDENTIFIER && p.symbols[refInner(id.ref)].originalName === "hydrateRuntimeState" && e.args.length >= 1) {
+      const arg = e.args[0].data;
+      switch (arg.k) {
+        case E_OBJECT:
+          // "hydrateRuntimeState(<object literal>)"
+          if (isValidJSON(e.args[0])) {
+            p.manifestForYarnPnP = e.args[0];
+          }
+          break;
+
+        case E_CALL:
+          // "hydrateRuntimeState(JSON.parse(<something>))"
+          if (arg.args.length === 1) {
+            const dot = arg.target.data;
+            if (dot.k === E_DOT && dot.name === "parse") {
+              const id2 = dot.target.data;
+              if (id2.k === E_IDENTIFIER) {
+                const symbol = p.symbols[refInner(id2.ref)];
+                if (symbol.kind === SymbolUnbound && symbol.originalName === "JSON") {
+                  const arg2 = arg.args[0];
+                  const a = arg2.data;
+                  switch (a.k) {
+                    case E_STRING: {
+                      // "hydrateRuntimeState(JSON.parse(<string literal>))"
+                      const source = new Source(undefined, "", a.value, p.source.keyPath);
+                      const stringInJSTable = generateStringInJSTable(p.source.contents, arg2.loc, source.contents);
+                      const log = newStringInJSLog(p.log, p.tracker, stringInJSTable);
+                      p.manifestForYarnPnP = parseJSONOrZero(log, source);
+                      remapExprLocsInJSON(p.manifestForYarnPnP, stringInJSTable);
+                      break;
+                    }
+
+                    case E_IDENTIFIER: {
+                      // "hydrateRuntimeState(JSON.parse(<identifier>))"
+                      const data = p.stringLocalsForYarnPnP.get(a.ref);
+                      if (data !== undefined) {
+                        const source = new Source(undefined, "", data.value, p.source.keyPath);
+                        const stringInJSTable = generateStringInJSTable(p.source.contents, data.loc, source.contents);
+                        const log = newStringInJSLog(p.log, p.tracker, stringInJSTable);
+                        p.manifestForYarnPnP = parseJSONOrZero(log, source);
+                        remapExprLocsInJSON(p.manifestForYarnPnP, stringInJSTable);
+                      }
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          break;
+      }
+    }
+  }
 
   // Stop now if this call must be removed
   if (callMustBeReplacedWithUndefined) {
@@ -2471,13 +3057,28 @@ function visitECall(p, expr, e, in_) {
     return new Expr(EUndefinedShared, expr.loc);
   }
 
-  // (minifySyntax only: inline spreads of array literals, inline IIFEs)
+  if (p.options.minifySyntax) {
+    // "foo(1, ...[2, 3], 4)" => "foo(1, 2, 3, 4)"
+    if (hasSpread) {
+      e.args = inlineSpreadsOfArrayLiterals(e.args);
+    }
+
+    // "(() => x)()" => "x"
+    const $d = p.maybeInlineIIFE(expr.loc, e);
+    if ($d[1]) {
+      lastOut = EXPR_OUT_DEFAULT;
+      return $d[0];
+    }
+  }
 
   {
     const t = target.data;
     switch (t.k) {
       case E_IMPORT_IDENTIFIER:
-        // (minifySyntax only: convertSymbolUseToCall)
+        // If this function is inlined, allow it to be tree-shaken
+        if (p.options.minifySyntax && !p.isControlFlowDead) {
+          p.convertSymbolUseToCall(t.ref, e.args.length === 1 && !hasSpread);
+        }
         break;
 
       case E_IDENTIFIER: {
@@ -2494,7 +3095,13 @@ function visitECall(p, expr, e, in_) {
           if (wasIdentifierBeforeVisit && symbol.originalName === "eval") {
             e.kind = DirectEval;
 
-            // (ModeBundle only: record uses of "module" and "exports")
+            // Pessimistically assume that if this looks like a CommonJS module
+            // (e.g. no "export" keywords), a direct call to "eval" means that
+            // code could potentially access "module" or "exports".
+            if (p.options.mode === ModeBundle && !p.isFileConsideredToHaveESMExports) {
+              p.recordUsage(p.moduleRef);
+              p.recordUsage(p.exportsRef);
+            }
 
             // Mark this scope and all parent scopes as containing a direct eval.
             // This will prevent us from renaming any symbols.
@@ -2507,7 +3114,16 @@ function visitECall(p, expr, e, in_) {
             // and exported symbols due to scope hoisting. Except don't warn when
             // this code is in a 3rd-party library because there's nothing people
             // will be able to do about the warning.
-            // (The message is logger.Debug unless bundling: dropped)
+            {
+              const text = "Using direct eval with a bundler is not recommended and may cause problems";
+              let kind = Debug;
+              if (p.options.mode === ModeBundle && p.isFileConsideredESM && !p.suppressWarningsAboutWeirdCode) {
+                kind = Warning;
+              }
+              p.log.addIDWithNotes(MsgID_JS_DirectEval, kind, p.tracker, rangeOfIdentifier(p.source, e.target.loc), text, [
+                new MsgData(null, null, "You can read more about direct eval and bundling here: https://esbuild.github.io/link/direct-eval"),
+              ]);
+            }
           } else if ((symbol.flags & SymbolFlagCallCanBeUnwrappedIfUnused) !== 0) {
             // Automatically add a "/* @__PURE__ */" comment to file-local calls
             // of functions declared with a "/* @__NO_SIDE_EFFECTS__ */" comment
@@ -2528,7 +3144,79 @@ function visitECall(p, expr, e, in_) {
                 break;
             }
 
-            // (minifySyntax only: optimize references to global constructors)
+            // Optimize references to global constructors
+            if (p.options.minifySyntax && t.canBeRemovedIfUnused) {
+              // Note: We construct expressions by assigning to "expr.Data" so
+              // that the source map position for the constructor is preserved
+              switch (symbol.originalName) {
+                case "Boolean":
+                  if (e.args.length === 0) {
+                    lastOut = EXPR_OUT_DEFAULT;
+                    return new Expr(new EBoolean(false), expr.loc);
+                  } else {
+                    expr = new Expr(new EUnary(p.astHelpers.simplifyBooleanExpr(e.args[0]), UnOpNot), expr.loc);
+                    lastOut = EXPR_OUT_DEFAULT;
+                    return not(expr);
+                  }
+
+                case "Number":
+                  if (e.args.length === 0) {
+                    lastOut = EXPR_OUT_DEFAULT;
+                    return new Expr(new ENumber(0), expr.loc);
+                  } else {
+                    const arg = e.args[0];
+
+                    switch (knownPrimitiveType(arg.data)) {
+                      case PrimitiveNumber:
+                        lastOut = EXPR_OUT_DEFAULT;
+                        return arg;
+
+                      case PrimitiveUndefined: // NaN
+                      case PrimitiveNull: // 0
+                      case PrimitiveBoolean: // 0 or 1
+                      case PrimitiveString: {
+                        // StringToNumber
+                        const $d = toNumberWithoutSideEffects(arg.data);
+                        if ($d[1]) {
+                          expr = new Expr(new ENumber($d[0]), expr.loc);
+                        } else {
+                          expr = new Expr(new EUnary(arg, UnOpPos), expr.loc);
+                        }
+                        lastOut = EXPR_OUT_DEFAULT;
+                        return expr;
+                      }
+                    }
+                  }
+                  break;
+
+                case "String":
+                  if (e.args.length === 0) {
+                    lastOut = EXPR_OUT_DEFAULT;
+                    return new Expr(new EString(""), expr.loc);
+                  } else {
+                    const arg = e.args[0];
+
+                    switch (knownPrimitiveType(arg.data)) {
+                      case PrimitiveString:
+                        lastOut = EXPR_OUT_DEFAULT;
+                        return arg;
+                    }
+                  }
+                  break;
+
+                case "BigInt":
+                  if (e.args.length === 1) {
+                    const arg = e.args[0];
+
+                    switch (knownPrimitiveType(arg.data)) {
+                      case PrimitiveBigInt:
+                        lastOut = EXPR_OUT_DEFAULT;
+                        return arg;
+                    }
+                  }
+                  break;
+              }
+            }
           }
         }
 
@@ -2537,7 +3225,10 @@ function visitECall(p, expr, e, in_) {
           e.canBeUnwrappedIfUnused = true;
         }
 
-        // (minifySyntax only: convertSymbolUseToCall)
+        // If this function is inlined, allow it to be tree-shaken
+        if (p.options.minifySyntax && !p.isControlFlowDead) {
+          p.convertSymbolUseToCall(t.ref, e.args.length === 1 && !hasSpread);
+        }
         break;
       }
 
@@ -2647,7 +3338,13 @@ function visitECall(p, expr, e, in_) {
           }
         }
 
-        // (minifySyntax only: "charCodeAt", "fromCharCode", "toString" folding)
+        if (p.options.minifySyntax) {
+          const value = foldKnownMethodCall(p, expr, e, t);
+          if (value !== null) {
+            lastOut = EXPR_OUT_DEFAULT;
+            return value;
+          }
+        }
 
         // Copy the call side effect flag over if this is a known target
         if (t.callCanBeUnwrappedIfUnused) {
@@ -2753,17 +3450,27 @@ function visitECall(p, expr, e, in_) {
 
               // Currently "require" is not converted into "import" for ESM
               if (p.options.mode !== ModeBundle && p.options.outputFormat === FormatESModule && !omitWarnings) {
-                p.log.addID(MsgID_JS_UnsupportedRequireCall, Warning); // Converting "require" to "esm" is currently not supported
+                const r = rangeOfIdentifier(p.source, e.target.loc);
+                p.log.addID(MsgID_JS_UnsupportedRequireCall, Warning, p.tracker, r, 'Converting "require" to "esm" is currently not supported');
               }
 
               // Create a new expression to represent the operation
               return new Expr(new ERequireString(importRecordIndex, e.closeParenLoc), expr.loc);
             }
 
-            // (Handle glob patterns: ModeBundle only)
+            // Handle glob patterns
+            if (p.options.mode === ModeBundle) {
+              const value = p.handleGlobPattern(arg, ImportRequire, EvaluationPhase, "globRequire", null);
+              if (value !== null) {
+                return value;
+              }
+            }
 
-            // (Use a debug log so people can see this if they want to: kind
-            // logger.Debug, dropped)
+            // Use a debug log so people can see this if they want to
+            {
+              const r = rangeOfIdentifier(p.source, e.target.loc);
+              p.log.addID(MsgID_JS_UnsupportedRequireCall, Debug, p.tracker, r, 'This call to "require" will not be bundled because the argument is not a string literal');
+            }
 
             // Otherwise just return a clone of the "require()" call
             return new Expr(new ECall(p.valueToSubstituteForRequire(e.target.loc), [arg], e.closeParenLoc), expr.loc);
@@ -2771,8 +3478,16 @@ function visitECall(p, expr, e, in_) {
           lastOut = EXPR_OUT_DEFAULT;
           return value;
         } else {
-          // (Use a debug log so people can see this if they want to: kind
-          // logger.Debug, dropped)
+          // Use a debug log so people can see this if they want to
+          const r = rangeOfIdentifier(p.source, e.target.loc);
+          p.log.addIDWithNotes(
+            MsgID_JS_UnsupportedRequireCall,
+            Debug,
+            p.tracker,
+            r,
+            'This call to "require" will not be bundled because it has ' + e.args.length + " arguments",
+            [new MsgData(null, null, 'To be bundled by esbuild, a "require" call must have exactly 1 argument.')],
+          );
         }
 
         const value = new Expr(new ECall(p.valueToSubstituteForRequire(e.target.loc), e.args, e.closeParenLoc), expr.loc);
@@ -2792,8 +3507,116 @@ function visitECall(p, expr, e, in_) {
   return expr;
 }
 
+// The "if p.options.minifySyntax { switch t.Name { ... } }" block of the
+// ECall case for an EDot target "t". Returns the folded Expr or null.
+function foldKnownMethodCall(p, expr, e, t) {
+  switch (t.name) {
+    case "charCodeAt": {
+      // Recognize "'string'.charCodeAt()" calls
+      const str = t.target.data;
+      if (str.k === E_STRING && e.args.length <= 1) {
+        let index = 0;
+        let hasIndex = false;
+        if (e.args.length === 0) {
+          hasIndex = true;
+        } else {
+          const num = e.args[0].data;
+          if (num.k === E_NUMBER && num.value === Math.trunc(num.value) && Math.abs(num.value) <= 0x7fffffff) {
+            index = num.value | 0;
+            hasIndex = true;
+          }
+        }
+        if (hasIndex) {
+          if (index >= 0 && index < str.value.length) {
+            return new Expr(new ENumber(str.value.charCodeAt(index)), expr.loc);
+          } else {
+            return new Expr(new ENumber(NaN), expr.loc);
+          }
+        }
+      }
+      break;
+    }
+
+    case "fromCharCode": {
+      // Recognize "String.fromCharCode()" calls
+      const id = t.target.data;
+      if (id.k === E_IDENTIFIER) {
+        const symbol = p.symbols[refInner(id.ref)];
+        if (symbol.kind === SymbolUnbound && symbol.originalName === "String") {
+          const args = e.args;
+          let charCodes = "";
+          let i = 0;
+          for (; i < args.length; i++) {
+            const $d = toNumberWithoutSideEffects(args[i].data);
+            if (!$d[1]) {
+              break;
+            }
+            charCodes += String.fromCharCode(toInt32($d[0]) & 0xffff);
+          }
+          if (i === args.length) {
+            return new Expr(new EString(charCodes), expr.loc);
+          }
+        }
+      }
+      break;
+    }
+
+    case "toString": {
+      const target = t.target.data;
+      switch (target.k) {
+        case E_NUMBER: {
+          let radix = 0;
+          if (e.args.length === 0) {
+            radix = 10;
+          } else if (e.args.length === 1) {
+            const num = e.args[0].data;
+            if (num.k === E_NUMBER && num.value === Math.trunc(num.value) && num.value >= 2 && num.value <= 36) {
+              radix = num.value;
+            }
+          }
+          if (radix !== 0) {
+            const $d = tryToStringOnNumberSafely(target.value, radix);
+            if ($d[1]) {
+              return new Expr(new EString($d[0]), expr.loc);
+            }
+          }
+          break;
+        }
+
+        case E_REG_EXP:
+          if (e.args.length === 0) {
+            return new Expr(new EString(target.value), expr.loc);
+          }
+          break;
+
+        case E_BOOLEAN:
+          if (e.args.length === 0) {
+            if (target.value) {
+              return new Expr(new EString("true"), expr.loc);
+            } else {
+              return new Expr(new EString("false"), expr.loc);
+            }
+          }
+          break;
+
+        case E_STRING:
+          if (e.args.length === 0) {
+            return t.target;
+          }
+          break;
+      }
+      break;
+    }
+  }
+  return null;
+}
+
 function visitEArrow(p, expr, e) {
-  // (The propagated name to keep is only used by keepNames)
+  // Check for a propagated name to keep from the parent context
+  let nameToKeep = "";
+  if (p.nameToKeepIsFor === e) {
+    nameToKeep = p.nameToKeep;
+  }
 
   // Prepare for suspicious logical operator checking
   if (e.preferExpr && e.args.length === 1 && e.args[0].defaultOrNil === null && e.body.block.stmts.length === 1) {
@@ -2808,7 +3631,7 @@ function visitEArrow(p, expr, e) {
     }
   }
 
-  // (compat.AsyncAwait is always supported: asyncArrowNeedsToBeLowered is false)
+  const asyncArrowNeedsToBeLowered = e.isAsync && jsFeatureHas(p.options.unsupportedJSFeatures, AsyncAwait);
   const oldFnOrArrowData = p.fnOrArrowDataVisit;
   p.fnOrArrowDataVisit = new fnOrArrowDataVisit(
     0, // tryBodyCount
@@ -2820,7 +3643,7 @@ function visitEArrow(p, expr, e) {
     false, // isInsideSwitch
     false, // isDerivedClassCtor
     false, // isOutsideFnOrArrow
-    oldFnOrArrowData.shouldLowerSuperPropertyAccess, // shouldLowerSuperPropertyAccess
+    oldFnOrArrowData.shouldLowerSuperPropertyAccess || asyncArrowNeedsToBeLowered, // shouldLowerSuperPropertyAccess
   );
 
   // Mark if we're inside an async arrow function. This value should be true
@@ -2837,16 +3660,35 @@ function visitEArrow(p, expr, e) {
   p.pushScopeForVisitPass(ScopeFunctionBody, e.body.loc);
   e.body.block.stmts = p.visitStmtsAndPrependTempRefs(e.body.block.stmts, new prependTempRefsOpts(null, stmtsFnBody));
   p.popScope();
-  // (p.lowerFunction(...): its body only runs when lowering, never in the fast path)
+  // Go: p.lowerFunction(&e.IsAsync, nil, &e.Args, e.Body.Loc, &e.Body.Block, &e.PreferExpr, &e.HasRestArg, true)
+  p.lowerFunction(e, e.body.loc, e.body.block, true /* isArrow */);
   p.popScope();
 
-  // (minifySyntax only: "() => { return x }" => "() => x")
+  if (p.options.minifySyntax && e.body.block.stmts.length === 1) {
+    const s = e.body.block.stmts[0].data;
+    if (s.k === S_RETURN && s.valueOrNil !== null) {
+      // "() => { return x }" => "() => x"
+      e.preferExpr = true;
+    }
+  }
 
   p.fnOnlyDataVisit.isInsideAsyncArrowFn = oldInsideAsyncArrowFn;
   p.fnOrArrowDataVisit = oldFnOrArrowData;
 
-  // (compat.Arrow is always supported: arrows are not converted to functions)
-  // (keepNames only: preserve the name)
+  // Convert arrow functions to function expressions when lowering
+  if (jsFeatureHas(p.options.unsupportedJSFeatures, Arrow)) {
+    expr = new Expr(
+      new EFunction(new Fn(null, e.args, e.body, InvalidRef, 0, e.isAsync, false, e.hasRestArg)),
+      expr.loc,
+    );
+  }
+
+  // Optionally preserve the name
+  if (p.options.keepNames && nameToKeep !== "") {
+    expr = p.keepExprSymbolName(expr, nameToKeep);
+  }
+
+  return expr;
 }
 
 // ---------------------------------------------------------------------------
@@ -2894,7 +3736,8 @@ Object.assign(binaryExprVisitor.prototype, {
       // Unlike regular identifiers, there are no unbound private identifiers
       const symbol = p.symbols[refInner(result.ref)];
       if (!symbolKindIsPrivate(symbol.kind)) {
-        p.log.addError(); // Private name %q must be declared in an enclosing class
+        const r = new ByteRange(e.left.loc, utf8Len(name));
+        p.log.addError(p.tracker, r, "Private name " + goQuote(name) + " must be declared in an enclosing class");
       }
 
       e.right = visitExprImpl(p, e.right);
@@ -2991,9 +3834,35 @@ Object.assign(binaryExprVisitor.prototype, {
     }
     p.fnOnlyDataVisit.silenceMessageAboutThisBeingUndefined = v.oldSilenceWarningAboutThisBeingUndefined;
 
-    // (minifySyntax only: "1 === x" => "x === 1")
+    const minifySyntax = p.options.minifySyntax;
 
-    if (p.shouldFoldTypeScriptConstantExpressions /* || (minifySyntax && ShouldFoldBinaryOperatorWhenMinifying(e)) */) {
+    // Always put constants consistently on the same side for equality
+    // comparisons to help improve compression. In theory, dictionary-based
+    // compression methods may already have a dictionary entry for code that
+    // is similar to previous code. Note that we can only reorder expressions
+    // that do not have any side effects.
+    //
+    // Constants are currently ordered on the right instead of the left because
+    // it results in slightly smalller gzip size on our primary benchmark
+    // (although slightly larger uncompressed size). The size difference is
+    // less than 0.1% so it really isn't that important an optimization.
+    if (minifySyntax) {
+      switch (e.op) {
+        case BinOpLooseEq:
+        case BinOpLooseNe:
+        case BinOpStrictEq:
+        case BinOpStrictNe:
+          // "1 === x" => "x === 1"
+          if (isPrimitiveLiteral(e.left.data) && !isPrimitiveLiteral(e.right.data)) {
+            const tmp = e.left;
+            e.left = e.right;
+            e.right = tmp;
+          }
+          break;
+      }
+    }
+
+    if (p.shouldFoldTypeScriptConstantExpressions || (minifySyntax && shouldFoldBinaryOperatorWhenMinifying(e))) {
       const result = foldBinaryOperator(v.loc, e);
       if (result != null) {
         return result;
@@ -3005,7 +3874,12 @@ Object.assign(binaryExprVisitor.prototype, {
       case BinOpComma:
         // "(1, 2)" => "2"
         // "(sideEffects(), 2)" => "(sideEffects(), 2)"
-        // (minifySyntax only)
+        if (minifySyntax) {
+          e.left = p.astHelpers.simplifyUnusedExpr(e.left, p.options.unsupportedJSFeatures);
+          if (e.left === null) {
+            return e.right;
+          }
+        }
         break;
 
       case BinOpLooseEq: {
@@ -3020,7 +3894,19 @@ Object.assign(binaryExprVisitor.prototype, {
         }
         p.warnAboutTypeofAndString(e.left, e.right, checkBothOrders);
 
-        // (minifySyntax only: "x == void 0" => "x == null", MaybeSimplifyEqualityComparison)
+        if (minifySyntax) {
+          // "x == void 0" => "x == null"
+          if (e.left.data.k === E_UNDEFINED) {
+            e.left = new Expr(ENullShared, e.left.loc);
+          } else if (e.right.data.k === E_UNDEFINED) {
+            e.right = new Expr(ENullShared, e.right.loc);
+          }
+
+          const $d = maybeSimplifyEqualityComparison(v.loc, e, p.options.unsupportedJSFeatures);
+          if ($d[1]) {
+            return $d[0];
+          }
+        }
         break;
       }
 
@@ -3036,7 +3922,17 @@ Object.assign(binaryExprVisitor.prototype, {
         }
         p.warnAboutTypeofAndString(e.left, e.right, checkBothOrders);
 
-        // (minifySyntax only: CanChangeStrictToLoose, MaybeSimplifyEqualityComparison)
+        if (minifySyntax) {
+          // "typeof x === 'undefined'" => "typeof x == 'undefined'"
+          if (canChangeStrictToLoose(e.left, e.right)) {
+            e.op = BinOpLooseEq;
+          }
+
+          const $d = maybeSimplifyEqualityComparison(v.loc, e, p.options.unsupportedJSFeatures);
+          if ($d[1]) {
+            return $d[0];
+          }
+        }
         break;
       }
 
@@ -3052,7 +3948,19 @@ Object.assign(binaryExprVisitor.prototype, {
         }
         p.warnAboutTypeofAndString(e.left, e.right, checkBothOrders);
 
-        // (minifySyntax only: "x != void 0" => "x != null", MaybeSimplifyEqualityComparison)
+        if (minifySyntax) {
+          // "x != void 0" => "x != null"
+          if (e.left.data.k === E_UNDEFINED) {
+            e.left = new Expr(ENullShared, e.left.loc);
+          } else if (e.right.data.k === E_UNDEFINED) {
+            e.right = new Expr(ENullShared, e.right.loc);
+          }
+
+          const $d = maybeSimplifyEqualityComparison(v.loc, e, p.options.unsupportedJSFeatures);
+          if ($d[1]) {
+            return $d[0];
+          }
+        }
         break;
       }
 
@@ -3068,7 +3976,17 @@ Object.assign(binaryExprVisitor.prototype, {
         }
         p.warnAboutTypeofAndString(e.left, e.right, checkBothOrders);
 
-        // (minifySyntax only: CanChangeStrictToLoose, MaybeSimplifyEqualityComparison)
+        if (minifySyntax) {
+          // "typeof x !== 'undefined'" => "typeof x != 'undefined'"
+          if (canChangeStrictToLoose(e.left, e.right)) {
+            e.op = BinOpLooseNe;
+          }
+
+          const $d = maybeSimplifyEqualityComparison(v.loc, e, p.options.unsupportedJSFeatures);
+          if ($d[1]) {
+            return $d[0];
+          }
+        }
         break;
       }
 
@@ -3079,11 +3997,34 @@ Object.assign(binaryExprVisitor.prototype, {
           // Warn about potential bugs
           if (!isPrimitiveLiteral(e.left.data)) {
             // "return props.flag === flag ?? true" is "return (props.flag === flag) ?? true" not "return props.flag === (flag ?? true)"
+            let which;
+            let leftIsNullOrUndefined;
+            let leftIsReturned;
+            if (!isNullOrUndefined) {
+              which = "left";
+              leftIsNullOrUndefined = "never";
+              leftIsReturned = "always";
+            } else {
+              which = "right";
+              leftIsNullOrUndefined = "always";
+              leftIsReturned = "never";
+            }
             let kind = Warning;
             if (p.suppressWarningsAboutWeirdCode) {
               kind = Debug;
             }
-            p.log.addIDWithNotes(MsgID_JS_SuspiciousNullishCoalescing, kind);
+            const rOp = p.source.rangeOfOperatorBefore(e.right.loc, "??");
+            const rLeft = mkRange(e.left.loc, p.source.locBeforeWhitespace(rOp.loc) - e.left.loc);
+            p.log.addIDWithNotes(MsgID_JS_SuspiciousNullishCoalescing, kind, p.tracker, rOp, 'The "??" operator here will always return the ' + which + " operand", [
+              p.tracker.msgData(
+                rLeft,
+                'The left operand of the "??" operator here will ' +
+                  leftIsNullOrUndefined +
+                  " be null or undefined, so it will " +
+                  leftIsReturned +
+                  " be returned. This usually indicates a bug in your code:",
+              ),
+            ]);
           }
 
           if (!isNullOrUndefined) {
@@ -3093,8 +4034,18 @@ Object.assign(binaryExprVisitor.prototype, {
           }
         }
 
-        // (minifySyntax only: "a ?? (b ?? c)" => "a ?? b ?? c")
-        // (compat.NullishCoalescing is always supported: no lowering)
+        if (minifySyntax) {
+          // "a ?? (b ?? c)" => "a ?? b ?? c"
+          const right = e.right.data;
+          if (right.k === E_BINARY && right.op === BinOpNullishCoalescing) {
+            e.left = joinWithLeftAssociativeOp(BinOpNullishCoalescing, e.left, right.left);
+            e.right = right.right;
+          }
+        }
+
+        if (jsFeatureHas(p.options.unsupportedJSFeatures, NullishCoalescing)) {
+          return p.lowerNullishCoalescing(v.loc, e.left, e.right);
+        }
         break;
       }
 
@@ -3107,11 +4058,20 @@ Object.assign(binaryExprVisitor.prototype, {
             const arrowLoc = p.source.rangeOfOperatorBefore(v.loc, "=>");
             if (arrowLoc.loc + 2 === p.source.locBeforeWhitespace(v.loc)) {
               // "return foo => 1 || foo <= 0"
+              let which;
+              if (boolean) {
+                which = "left";
+              } else {
+                which = "right";
+              }
               let kind = Warning;
               if (p.suppressWarningsAboutWeirdCode) {
                 kind = Debug;
               }
-              p.log.addIDWithNotes(MsgID_JS_SuspiciousLogicalOperator, kind);
+              const note = p.tracker.msgData(arrowLoc, "The \"=>\" symbol creates an arrow function expression in JavaScript. Did you mean to use the greater-than-or-equal-to operator \">=\" here instead?");
+              note.location.suggestion = ">=";
+              const rOp = p.source.rangeOfOperatorBefore(e.right.loc, "||");
+              p.log.addIDWithNotes(MsgID_JS_SuspiciousLogicalOperator, kind, p.tracker, rOp, 'The "||" operator here will always return the ' + which + " operand", [note]);
             }
           }
 
@@ -3122,7 +4082,22 @@ Object.assign(binaryExprVisitor.prototype, {
           }
         }
 
-        // (minifySyntax only: "a || (b || c)" => "a || b || c", "a === null || a === undefined" => "a == null")
+        if (minifySyntax) {
+          // "a || (b || c)" => "a || b || c"
+          const right = e.right.data;
+          if (right.k === E_BINARY && right.op === BinOpLogicalOr) {
+            e.left = joinWithLeftAssociativeOp(BinOpLogicalOr, e.left, right.left);
+            e.right = right.right;
+          }
+
+          // "a === null || a === undefined" => "a == null"
+          const $d = isBinaryNullAndUndefined(e.left, e.right, BinOpStrictEq);
+          if ($d[2]) {
+            e.op = BinOpLooseEq;
+            e.left = $d[0];
+            e.right = $d[1];
+          }
+        }
         break;
       }
 
@@ -3135,11 +4110,20 @@ Object.assign(binaryExprVisitor.prototype, {
             const arrowLoc = p.source.rangeOfOperatorBefore(v.loc, "=>");
             if (arrowLoc.loc + 2 === p.source.locBeforeWhitespace(v.loc)) {
               // "return foo => 0 && foo <= 1"
+              let which;
+              if (!boolean) {
+                which = "left";
+              } else {
+                which = "right";
+              }
               let kind = Warning;
               if (p.suppressWarningsAboutWeirdCode) {
                 kind = Debug;
               }
-              p.log.addIDWithNotes(MsgID_JS_SuspiciousLogicalOperator, kind);
+              const note = p.tracker.msgData(arrowLoc, "The \"=>\" symbol creates an arrow function expression in JavaScript. Did you mean to use the greater-than-or-equal-to operator \">=\" here instead?");
+              note.location.suggestion = ">=";
+              const rOp = p.source.rangeOfOperatorBefore(e.right.loc, "&&");
+              p.log.addIDWithNotes(MsgID_JS_SuspiciousLogicalOperator, kind, p.tracker, rOp, 'The "&&" operator here will always return the ' + which + " operand", [note]);
             }
           }
 
@@ -3150,7 +4134,22 @@ Object.assign(binaryExprVisitor.prototype, {
           }
         }
 
-        // (minifySyntax only: "a && (b && c)" => "a && b && c", "a !== null && a !== undefined" => "a != null")
+        if (minifySyntax) {
+          // "a && (b && c)" => "a && b && c"
+          const right = e.right.data;
+          if (right.k === E_BINARY && right.op === BinOpLogicalAnd) {
+            e.left = joinWithLeftAssociativeOp(BinOpLogicalAnd, e.left, right.left);
+            e.right = right.right;
+          }
+
+          // "a !== null && a !== undefined" => "a != null"
+          const $d = isBinaryNullAndUndefined(e.left, e.right, BinOpStrictNe);
+          if ($d[2]) {
+            e.op = BinOpLooseNe;
+            e.left = $d[0];
+            e.right = $d[1];
+          }
+        }
         break;
       }
 
@@ -3173,7 +4172,10 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpPow:
-        // (compat.ExponentOperator is always supported: no "__pow" lowering)
+        // Lower the exponentiation operator for browsers that don't support it
+        if (jsFeatureHas(p.options.unsupportedJSFeatures, ExponentOperator)) {
+          return p.callRuntime(v.loc, "__pow", [e.left, e.right]);
+        }
         break;
 
       ////////////////////////////////////////////////////////////////////////////////
@@ -3221,6 +4223,7 @@ Object.assign(binaryExprVisitor.prototype, {
             const dot = e.left.data;
             if (dot.k === E_DOT) {
               let name = "";
+              let loc = 0;
 
               const target2 = dot.target.data;
               switch (target2.k) {
@@ -3234,6 +4237,7 @@ Object.assign(binaryExprVisitor.prototype, {
                     // "module.exports = ..."
                     // "exports.something = ..."
                     name = symbol.originalName;
+                    loc = dot.target.loc;
                     symbol.flags |= DidWarnAboutCommonJSInESM;
                   }
                   break;
@@ -3247,6 +4251,7 @@ Object.assign(binaryExprVisitor.prototype, {
                       if (symbol.kind === SymbolUnbound && symbol.originalName === "module" && (symbol.flags & DidWarnAboutCommonJSInESM) === 0) {
                         // "module.exports.foo = ..."
                         name = symbol.originalName;
+                        loc = target2.target.loc;
                         symbol.flags |= DidWarnAboutCommonJSInESM;
                       }
                     }
@@ -3259,8 +4264,24 @@ Object.assign(binaryExprVisitor.prototype, {
                 if (p.suppressWarningsAboutWeirdCode) {
                   kind = Debug;
                 }
-                // (whyESModule() and the notes only affect the message text)
-                p.log.addIDWithNotes(MsgID_JS_CommonJSVariableInESM, kind);
+                const $w = p.whyESModule();
+                const why = $w[0];
+                let notes = $w[1];
+                if (why === whyESMTypeModulePackageJSON) {
+                  let text = 'Node' + "'" + 's package format requires that CommonJS files in a "type": "module" package use the ".cjs" file extension.';
+                  if (p.options.ts.parse) {
+                    text += ' If you are using TypeScript, you can use the ".cts" file extension with esbuild instead.';
+                  }
+                  notes = notes === null ? [new MsgData(null, null, text)] : [...notes, new MsgData(null, null, text)];
+                }
+                p.log.addIDWithNotes(
+                  MsgID_JS_CommonJSVariableInESM,
+                  kind,
+                  p.tracker,
+                  rangeOfIdentifier(p.source, loc),
+                  "The CommonJS " + goQuote(name) + " variable is treated as a global variable in an ECMAScript module and may not work as expected",
+                  notes,
+                );
               }
             }
           }
@@ -3309,7 +4330,10 @@ Object.assign(binaryExprVisitor.prototype, {
       }
 
       case BinOpPowAssign: {
-        // (compat.ExponentOperator is always supported: no lowering)
+        // Lower the exponentiation operator for browsers that don't support it
+        if (jsFeatureHas(p.options.unsupportedJSFeatures, ExponentOperator)) {
+          return p.lowerExponentiationAssignmentOperator(v.loc, e);
+        }
 
         const result = p.maybeLowerSetBinOp(e.left, BinOpPow, e.right);
         if (result != null) {
@@ -3394,7 +4418,13 @@ Object.assign(binaryExprVisitor.prototype, {
       }
     }
 
-    // (minifySyntax only: "(a, b) + c" => "a, b + c")
+    // "(a, b) + c" => "a, b + c"
+    if (minifySyntax && e.op !== BinOpComma) {
+      const comma = e.left.data;
+      if (comma.k === E_BINARY && comma.op === BinOpComma) {
+        return joinWithComma(comma.left, new Expr(new EBinary(comma.right, e.right, e.op), comma.right.loc));
+      }
+    }
 
     return v.expr !== null && v.expr.data === e && v.expr.loc === v.loc ? v.expr : new Expr(e, v.loc);
   },
@@ -3476,28 +4506,246 @@ export const visitExprMethods = {
     return [result, lastOut];
   },
 
-  // Glob-style imports are only generated when bundling (both call sites are
-  // guarded by "p.options.mode == config.ModeBundle"), so these never run in
-  // the fast path.
+  // Returns an Expr or null (Go: js_ast.Expr{})
   handleGlobPattern(expr, kind, phase, prefix, assertOrWith) {
-    bail();
+    const p = this;
+    const $g = p.globPatternFromExpr(expr);
+    const pattern = $g[0], approximateRange = $g[1];
+    if (pattern === null) {
+      return null;
+    }
+
+    let last = new GlobPart();
+    const parts = [];
+
+    for (let i = 0; i < pattern.length; i++) {
+      const part = pattern[i];
+      if (part.isWildcard) {
+        if (last.wildcard === GlobNone) {
+          if (!last.prefix.endsWith("/")) {
+            // "`a${b}c`" => "a*c"
+            last.wildcard = GlobAllExceptSlash;
+          } else {
+            // "`a/${b}c`" => "a/**/*c"
+            last.wildcard = GlobAllIncludingSlash;
+            parts.push(last);
+            last = new GlobPart("/", GlobAllExceptSlash);
+          }
+        }
+      } else if (part.text !== "") {
+        if (last.wildcard !== GlobNone) {
+          parts.push(last);
+          last = new GlobPart();
+        }
+        last.prefix += part.text;
+      }
+    }
+
+    parts.push(last);
+
+    // Don't handle this if it's a string constant
+    if (parts.length === 1 && parts[0].wildcard === GlobNone) {
+      return null;
+    }
+
+    // We currently only support relative globs
+    {
+      const prefix = parts[0].prefix;
+      if (!prefix.startsWith("./") && !prefix.startsWith("../")) {
+        return null;
+      }
+    }
+
+    let ref = InvalidRef;
+
+    // Don't generate duplicate glob imports
+    outer: for (let j = 0; j < p.globPatternImports.length; j++) {
+      const globPattern = p.globPatternImports[j];
+
+      // Check the kind and phase
+      if (globPattern.kind !== kind || globPattern.phase !== phase) {
+        continue;
+      }
+
+      // Check the parts
+      if (globPattern.parts.length !== parts.length) {
+        continue;
+      }
+      for (let i = 0; i < parts.length; i++) {
+        if (globPattern.parts[i].prefix !== parts[i].prefix || globPattern.parts[i].wildcard !== parts[i].wildcard) {
+          continue outer;
+        }
+      }
+
+      // Check the import assertions/attributes
+      if (assertOrWith === null) {
+        if (globPattern.assertOrWith !== null) {
+          continue;
+        }
+      } else {
+        if (globPattern.assertOrWith === null) {
+          continue;
+        }
+        if (assertOrWith.keyword !== globPattern.assertOrWith.keyword) {
+          continue;
+        }
+        const a = assertOrWith.entries;
+        const b = globPattern.assertOrWith.entries;
+        if (a.length !== b.length) {
+          continue;
+        }
+        for (let i = 0; i < a.length; i++) {
+          const ai = a[i];
+          const bi = b[i];
+          if (ai.key !== bi.key || ai.value !== bi.value) {
+            continue outer;
+          }
+        }
+      }
+
+      // If we get here, then these are the same glob pattern
+      ref = globPattern.ref;
+      break;
+    }
+
+    // If there's no duplicate glob import, then generate a new glob import
+    if (ref === InvalidRef && prefix !== "") {
+      let sb = prefix;
+
+      for (let j = 0; j < parts.length; j++) {
+        const text = parts[j].prefix;
+        let gap = true;
+        for (let i = 0; i < text.length; ) {
+          const c = codePointAt(text, i);
+          i += c > 0xffff ? 2 : 1;
+          if (!isIdentifierContinue(c)) {
+            gap = true;
+          } else {
+            if (gap) {
+              sb += "_";
+              gap = false;
+            }
+            sb += String.fromCodePoint(c);
+          }
+        }
+      }
+
+      const name = sb;
+      ref = p.newSymbol(SymbolOther, name);
+      p.moduleScope.generated.push(ref);
+
+      p.globPatternImports.push(new globPatternImport(assertOrWith, parts, name, approximateRange, ref, kind, phase));
+    }
+
+    p.recordUsage(ref);
+    return new Expr(new ECall(new Expr(new EIdentifier(ref), expr.loc), [expr]), expr.loc);
   },
 
+  // Returns [[]globPart | null, Range]
   globPatternFromExpr(expr) {
-    bail();
+    const p = this;
+    const e = expr.data;
+    switch (e.k) {
+      case E_STRING:
+        return [[new globPart(e.value)], p.source.rangeOfString(expr.loc)];
+
+      case E_TEMPLATE: {
+        if (e.tagOrNil !== null) {
+          break;
+        }
+
+        const pattern = [];
+        pattern.push(new globPart(e.headCooked));
+
+        for (let i = 0; i < e.parts.length; i++) {
+          const part = e.parts[i];
+          const partPattern = p.globPatternFromExpr(part.value)[0];
+          if (partPattern !== null) {
+            for (let j = 0; j < partPattern.length; j++) pattern.push(partPattern[j]);
+          } else {
+            pattern.push(new globPart("", true));
+          }
+          pattern.push(new globPart(part.tailCooked));
+        }
+
+        if (e.parts.length === 0) {
+          return [pattern, p.source.rangeOfString(expr.loc)];
+        }
+
+        const text = p.source.contents;
+        let templateRange = mkRange(e.headLoc, 0);
+
+        for (let i = e.parts[e.parts.length - 1].tailLoc; i < text.length; i++) {
+          const c = text.charCodeAt(i);
+          if (c === 0x60 /* '`' */) {
+            templateRange = mkRange(templateRange.loc, i + 1 - templateRange.loc);
+            break;
+          } else if (c === 0x5c /* '\\' */) {
+            i += 1;
+          }
+        }
+
+        return [pattern, templateRange];
+      }
+
+      case E_BINARY: {
+        if (e.op !== BinOpAdd) {
+          break;
+        }
+
+        const $l = p.globPatternFromExpr(e.left);
+        const pattern = $l[0];
+        let leftRange = $l[1];
+        if (pattern === null) {
+          break;
+        }
+
+        const $r = p.globPatternFromExpr(e.right);
+        const rightPattern = $r[0], rightRange = $r[1];
+        if (rightPattern !== null) {
+          for (let j = 0; j < rightPattern.length; j++) pattern.push(rightPattern[j]);
+          leftRange = mkRange(leftRange.loc, rangeEnd(rightRange) - leftRange.loc);
+          return [pattern, leftRange];
+        }
+
+        pattern.push(new globPart("", true));
+
+        // Try to extend the left range by the right operand in some common cases
+        const right = e.right.data;
+        switch (right.k) {
+          case E_IDENTIFIER:
+            leftRange = mkRange(leftRange.loc, rangeEnd(rangeOfIdentifier(p.source, e.right.loc)) - leftRange.loc);
+            break;
+
+          case E_CALL:
+            if (right.closeParenLoc > 0) {
+              leftRange = mkRange(leftRange.loc, right.closeParenLoc + 1 - leftRange.loc);
+            }
+            break;
+        }
+
+        return [pattern, leftRange];
+      }
+    }
+
+    return GLOB_PATTERN_NONE;
   },
 
   convertSymbolUseToCall(ref, isSingleNonSpreadArgCall) {
     const p = this;
 
     // Remove the normal symbol use
+    // (JS-only: the map values are updated in place like recordUsage does;
+    // no other holder shares them while parsing)
     const symbolUses = p.currentPart.symbolUses;
     const use = symbolUses.get(ref);
     const countEstimate = ((use === undefined ? 0 : use.countEstimate) - 1) >>> 0; // uint32
     if (countEstimate === 0) {
       symbolUses.delete(ref);
-    } else {
+    } else if (use === undefined) {
       symbolUses.set(ref, new SymbolUse(countEstimate));
+    } else {
+      use.countEstimate = countEstimate;
     }
 
     // Add a special symbol use instead
@@ -3507,13 +4755,14 @@ export const visitExprMethods = {
       p.currentPart.symbolCallUses = symbolCallUses;
     }
     const callUse = symbolCallUses.get(ref);
-    let callCountEstimate = callUse === undefined ? 0 : callUse.callCountEstimate;
-    let singleArgNonSpreadCallCountEstimate = callUse === undefined ? 0 : callUse.singleArgNonSpreadCallCountEstimate;
-    callCountEstimate++;
-    if (isSingleNonSpreadArgCall) {
-      singleArgNonSpreadCallCountEstimate++;
+    if (callUse === undefined) {
+      symbolCallUses.set(ref, new SymbolCallUse(1, isSingleNonSpreadArgCall ? 1 : 0));
+    } else {
+      callUse.callCountEstimate = (callUse.callCountEstimate + 1) >>> 0; // uint32
+      if (isSingleNonSpreadArgCall) {
+        callUse.singleArgNonSpreadCallCountEstimate = (callUse.singleArgNonSpreadCallCountEstimate + 1) >>> 0; // uint32
+      }
     }
-    symbolCallUses.set(ref, new SymbolCallUse(callCountEstimate, singleArgNonSpreadCallCountEstimate));
   },
 
   warnAboutImportNamespaceCall(target, kind) {
@@ -3537,9 +4786,67 @@ export const visitExprMethods = {
           }
 
           p.importNamespaceCCMap.set(key, true);
+          const r = rangeOfIdentifier(p.source, target.loc);
 
-          // (The notes, verb, noun, etc. only affect the message text)
-          p.log.addIDWithNotes(MsgID_JS_CallImportNamespace, Warning);
+          const notes = [];
+          const name = p.symbols[refInner(id.ref)].originalName;
+          const member = p.moduleScope.members.get(name);
+          if (member !== undefined && member.ref === id.ref) {
+            const star = p.source.rangeOfOperatorBefore(member.loc, "*");
+            if (star.len > 0) {
+              const as = p.source.rangeOfOperatorBefore(member.loc, "as");
+              if (as.len > 0 && as.loc > star.loc) {
+                const note = p.tracker.msgData(
+                  mkRange(star.loc, rangeEnd(rangeOfIdentifier(p.source, member.loc)) - star.loc),
+                  "Consider changing " + goQuote(name) + " to a default import instead:",
+                );
+                note.location.suggestion = name;
+                notes.push(note);
+              }
+            }
+          }
+
+          if (p.options.ts.parse) {
+            notes.push(
+              new MsgData(
+                null,
+                null,
+                'Make sure to enable TypeScript' + "'" + 's "esModuleInterop" setting so that TypeScript' + "'" + "s type checker generates an error when you try to do this. " +
+                  "You can read more about this setting here: https://www.typescriptlang.org/tsconfig#esModuleInterop",
+              ),
+            );
+          }
+
+          let verb = "";
+          let where = "";
+          let noun = "";
+
+          switch (kind) {
+            case exprKindCall:
+              verb = "Calling";
+              noun = "function";
+              break;
+
+            case exprKindNew:
+              verb = "Constructing";
+              noun = "constructor";
+              break;
+
+            case exprKindJSXTag:
+              verb = "Using";
+              where = " in a JSX expression";
+              noun = "component";
+              break;
+          }
+
+          p.log.addIDWithNotes(
+            MsgID_JS_CallImportNamespace,
+            Warning,
+            p.tracker,
+            r,
+            verb + " " + goQuote(p.symbols[refInner(id.ref)].originalName) + where + " will crash at run-time because it" + "'" + "s an import namespace object, not a " + noun,
+            notes.length > 0 ? notes : null,
+          );
         }
       }
     }
@@ -3701,10 +5008,25 @@ export const visitExprMethods = {
     const p = this;
     const ref = e.ref;
 
-    // (minifySyntax only: substitute inlined constants)
+    // Substitute inlined constants
+    if (p.options.minifySyntax && !p.currentScope.containsDirectEval && p.constValues !== null && p.constValues.size !== 0) {
+      const value = p.constValues.get(ref);
+      if (value !== undefined) {
+        p.ignoreUsage(ref);
+        return constValueToExpr(loc, value);
+      }
+    }
 
-    // (Capturing "arguments" only happens when lowering arrow functions or
-    // async arrow functions, never in the fast path)
+    // Capture the "arguments" variable if necessary
+    // (Go stores "&fn.ArgumentsRef" in argumentsRef; here it is the Ref itself)
+    if (p.fnOnlyDataVisit.argumentsRef !== null && ref === p.fnOnlyDataVisit.argumentsRef) {
+      const isInsideUnsupportedArrow = p.fnOrArrowDataVisit.isArrow && jsFeatureHas(p.options.unsupportedJSFeatures, Arrow);
+      const isInsideUnsupportedAsyncArrow =
+        p.fnOnlyDataVisit.isInsideAsyncArrowFn && jsFeatureHas(p.options.unsupportedJSFeatures, AsyncAwait);
+      if (isInsideUnsupportedArrow || isInsideUnsupportedAsyncArrow) {
+        return new Expr(new EIdentifier(p.captureArguments()), loc);
+      }
+    }
 
     // Create an error for assigning to an import namespace
     if (
@@ -3712,15 +5034,39 @@ export const visitExprMethods = {
         (opts.isDeleteTarget && p.symbols[refInner(ref)].importItemStatus === ImportItemGenerated)) &&
       p.symbols[refInner(ref)].kind === SymbolImport
     ) {
-      // (The setter hint and notes only affect the message text)
+      const r = rangeOfIdentifier(p.source, loc);
+
+      // Try to come up with a setter name to try to make this message more understandable
+      let setterHint = "";
+      const originalName = p.symbols[refInner(ref)].originalName;
+      if (isIdentifier(originalName) && originalName !== "_") {
+        if (originalName.length === 1 || originalName.charCodeAt(0) < 0x80) {
+          setterHint = ' (e.g. "set' + originalName.slice(0, 1).toUpperCase() + originalName.slice(1) + '")';
+        } else {
+          setterHint = ' (e.g. "set_' + originalName + '")';
+        }
+      }
+
+      const notes = [
+        new MsgData(
+          null,
+          null,
+          "Imports are immutable in JavaScript. " +
+            "To modify the value of this import, you must export a setter function in the " +
+            "imported file" +
+            setterHint +
+            " and then import and call that function here instead.",
+        ),
+      ];
+
       if (p.options.mode === ModeBundle) {
-        p.log.addErrorWithNotes(); // Cannot assign to import %q
+        p.log.addErrorWithNotes(p.tracker, r, "Cannot assign to import " + goQuote(originalName), notes);
       } else {
         let kind = Warning;
         if (p.suppressWarningsAboutWeirdCode) {
           kind = Debug;
         }
-        p.log.addIDWithNotes(MsgID_JS_AssignToImport, kind);
+        p.log.addIDWithNotes(MsgID_JS_AssignToImport, kind, p.tracker, r, "This assignment will throw because " + goQuote(originalName) + " is an import", notes);
       }
     }
 
@@ -3799,7 +5145,9 @@ export const visitExprMethods = {
 
     // Swap references to the global "require" function with our "__require" stub
     if (ref === p.requireRef && !opts.isCallTarget) {
-      // (ModeBundle only: debug log about indirect calls to "require")
+      if (p.options.mode === ModeBundle && p.source.index !== RuntimeSourceIndex && e !== p.dotOrIndexTarget) {
+        p.log.addID(MsgID_JS_IndirectRequire, Debug, p.tracker, rangeOfIdentifier(p.source, loc), 'Indirect calls to "require" will not be bundled');
+      }
 
       return p.valueToSubstituteForRequire(loc);
     }
@@ -3831,8 +5179,7 @@ export const visitExprMethods = {
       false, // isInsideSwitch
       opts.isDerivedClassCtor, // isDerivedClassCtor
       false, // isOutsideFnOrArrow
-      // (fn.IsAsync && compat.AsyncAwait unsupported) is always false here
-      opts.isLoweredPrivateMethod, // shouldLowerSuperPropertyAccess
+      (fn.isAsync && jsFeatureHas(p.options.unsupportedJSFeatures, AsyncAwait)) || opts.isLoweredPrivateMethod, // shouldLowerSuperPropertyAccess
     );
     p.fnOnlyDataVisit = new fnOnlyDataVisit(
       fn.argumentsRef, // argumentsRef (Go: &fn.ArgumentsRef, only ever read)
@@ -3864,10 +5211,14 @@ export const visitExprMethods = {
     }
     fn.body.block.stmts = p.visitStmtsAndPrependTempRefs(fn.body.block.stmts, new prependTempRefsOpts(fn.body.loc, stmtsFnBody));
     p.popScope();
-    // (p.lowerFunction(...): its body only runs when lowering, never in the fast path)
+    // Go: p.lowerFunction(&fn.IsAsync, &fn.IsGenerator, &fn.Args, fn.Body.Loc, &fn.Body.Block, nil, &fn.HasRestArg, false)
+    p.lowerFunction(fn, fn.body.loc, fn.body.block, false /* isArrow */);
     p.popScope();
 
     p.fnOrArrowDataVisit = oldFnOrArrowData;
     p.fnOnlyDataVisit = oldFnOnlyData;
   },
 };
+
+// globPatternFromExpr's "nil, logger.Range{}" result
+const GLOB_PATTERN_NONE = Object.freeze([null, RANGE_ZERO]);

@@ -19,17 +19,48 @@
 //   (narrowed in place, units above 0xff become 0xff), parse_utf8 UTF-8
 //   (squashed in place, non-ASCII becomes 0x80 or 0xa0).
 //
-// Reads the original performs outside the source buffer (before the start or
-// past the NUL terminator, where it reads stale memory), overflow of its fixed
-// token stacks, reads of token-stack slots never written in this parse, and
-// analysis-memory growth that could trap in the original all set `oob`; the
-// JS side then runs the original lexer, so its answer is by definition the
-// same.
+// Malformed code can make the original read memory outside its source:
+// before it (its bracket stack), past the NUL terminator (its records), a
+// bracket-stack slot never written in this parse, or a NULL pointer. Its
+// answer then depends on what earlier parses left there. This port answers
+// as a fresh instance of the original does (its first parse): `outside`
+// computes what that instance's memory holds at the address (zero, or what
+// this parse wrote there: bracket-stack entries, records), and traps where
+// that instance traps (reads past its memory, a record that does not fit in
+// it). The one exception: the original's stacks have room for 1024 open
+// brackets and 512 open import( calls, and deeper nesting overwrites its own
+// copy of the source; here they have room for 16384 and 4096, and deeper
+// nesting is a parse error.
+//
+// no_std and no allocator (the code size of the wasm is part of what the
+// package costs): the source buffer and the records live in linear memory
+// after the statics, grown with memory.grow; a panic cannot happen (no
+// indexing that is not provably in bounds) and would trap.
+
+#![no_std]
 
 use core::arch::wasm32::*;
 
-const EMPTY: i32 = -0x4000_0000; // lastTokenPos == EMPTY_CHAR
-const NULL: i32 = -1; // NULL pointer fields
+#[panic_handler]
+fn on_panic(_: &core::panic::PanicInfo) -> ! {
+    unreachable()
+}
+
+// es-module-lexer 1.7.0's wasm: the source (UTF-16) at __heap_base, its
+// records right after the NUL terminator, the bracket stack (1024 slots of
+// token + position) right below the source; 64 KB of memory, grown by its
+// JS glue to at least __heap_base + 4 * (len + 1) bytes. Index i of the
+// source is address O_SRC + 2 * i.
+const O_SRC: u32 = 14656;
+const O_STACK: u32 = O_SRC - 8 * 1024;
+#[inline(always)]
+fn oaddr(i: i32) -> u32 {
+    O_SRC.wrapping_add((i as u32).wrapping_mul(2))
+}
+
+const EMPTY: i32 = (1024 - O_SRC as i32) / 2; // lastTokenPos == EMPTY_CHAR (address 1024)
+const NULLP: i32 = -(O_SRC as i32) / 2; // a NULL position (address 0)
+const NULL: i32 = -1; // NULL pointer fields of records
 
 // OpenTokenState
 const ANY_PAREN: u8 = 1;
@@ -43,52 +74,64 @@ const CLASS_BRACE: u8 = 6;
 const D_STANDARD: i32 = -1;
 const D_META: i32 = -2;
 
-const OT_MAX: i32 = 1024;
-const UNSET: u8 = 0xff; // token stack slot not written in this parse
-const DYN_MAX: i32 = 512;
+// stack sizes (see above; static memory, which costs nothing in the module)
+const OT_MAX: i32 = 16384;
+const UNSET: u8 = 0; // token stack slot not written in this parse
+const DYN_MAX: i32 = 4096;
 
-// original wasm layout (es-module-lexer 1.7.0)
-const ORIG_HEAP_BASE: i64 = 14656;
-const ORIG_INITIAL_MEMORY: i64 = 65536;
-const ORIG_IMPORT_SIZE: i64 = 36;
-const ORIG_EXPORT_SIZE: i64 = 20;
+// Records, in the order they are made, in one stream of i32 words (read by
+// the JS side as it is): an import is 9 words, an export 5, the first word
+// says which (a dropped import keeps its place). (The original's records
+// have the same sizes, 36 and 20 bytes, in the same order: see `outside`.)
+const K_IMPORT: i32 = 1;
+const K_EXPORT: i32 = 2;
+const K_DROPPED: i32 = 3;
 
-#[derive(Clone, Copy)]
+#[repr(C)]
 struct Imp {
+    kind: i32,
     start: i32,
     end: i32,
     ss: i32,
     se: i32,
-    ai: i32,
     dynamic: i32,
-    safe: i32,
+    ai: i32,
     ty: i32,
-    next: i32,
+    /// safe (the name is the literal) while parsing; then how the JS side
+    /// gets the name: 0 none, 1 the literal's body verbatim (no escapes: then
+    /// eval of the literal is its body), 3 eval the literal
+    name: i32,
 }
 
-#[derive(Clone, Copy)]
+#[repr(C)]
 struct Exp {
+    kind: i32,
     start: i32,
     end: i32,
     ls: i32,
     le: i32,
 }
 
-const fn c(x: u8) -> u16 {
-    x as u16
+const fn c(x: u8) -> u32 {
+    x as u32
 }
 
 #[inline(always)]
-fn is_ws_not_br(ch: u16) -> bool {
+const fn is_ws_not_br(ch: u32) -> bool {
     ch == 9 || ch == 11 || ch == 12 || ch == 32 || ch == 160
 }
 #[inline(always)]
-fn is_br_or_ws(ch: u16) -> bool {
+const fn is_br_or_ws(ch: u32) -> bool {
     ch > 8 && ch < 14 || ch == 32 || ch == 160
 }
-#[inline(always)]
-fn is_punctuator(ch: u16) -> bool {
-    ch == c(b'!')
+// char classes of the chars below 128 (and U+00A0), one bit each
+const F_PUNCT: u32 = 1; // is_punctuator
+const F_PND: u32 = 2; // is_br_or_ws_or_punctuator_not_dot
+const F_EXPR: u32 = 4; // is_expression_punctuator
+const F_BWP: u32 = 8; // is_br_or_ws || is_punctuator
+const fn class_of(ch: u32) -> u32 {
+    let brws = ch > 8 && ch < 14 || ch == 32 || ch == 160;
+    let punct = ch == c(b'!')
         || ch == c(b'%')
         || ch == c(b'&')
         || ch > 39 && ch < 48
@@ -96,25 +139,58 @@ fn is_punctuator(ch: u16) -> bool {
         || ch == c(b'[')
         || ch == c(b']')
         || ch == c(b'^')
-        || ch > 122 && ch < 127
-}
-#[inline(always)]
-fn is_br_or_ws_or_punctuator_not_dot(ch: u16) -> bool {
-    ch > 8 && ch < 14 || ch == 32 || ch == 160 || is_punctuator(ch) && ch != c(b'.')
-}
-#[inline(always)]
-fn is_expression_punctuator(ch: u16) -> bool {
-    ch == c(b'!')
+        || ch > 122 && ch < 127;
+    let expr = ch == c(b'!')
         || ch == c(b'%')
         || ch == c(b'&')
         || ch > 39 && ch < 47 && ch != 41
         || ch > 57 && ch < 64
         || ch == c(b'[')
         || ch == c(b'^')
-        || ch > 122 && ch < 127 && ch != c(b'}')
+        || ch > 122 && ch < 127 && ch != c(b'}');
+    (punct as u32) * F_PUNCT
+        | ((brws || punct && ch != c(b'.')) as u32) * F_PND
+        | (expr as u32) * F_EXPR
+        | ((brws || punct) as u32) * F_BWP
 }
 #[inline(always)]
-fn is_quote(ch: u16) -> bool {
+fn cls(ch: u32) -> u32 {
+    const fn table() -> [u8; 128] {
+        let mut t = [0u8; 128];
+        let mut ch = 0;
+        while ch < 128 {
+            t[ch as usize] = class_of(ch) as u8;
+            ch += 1;
+        }
+        t
+    }
+    static T: [u8; 128] = table();
+    if ch < 128 {
+        T[ch as usize] as u32
+    } else if ch == 160 {
+        const { class_of(160) }
+    } else {
+        0
+    }
+}
+#[inline(always)]
+fn is_punctuator(ch: u32) -> bool {
+    cls(ch) & F_PUNCT != 0
+}
+#[inline(always)]
+fn is_br_or_ws_or_punctuator_not_dot(ch: u32) -> bool {
+    cls(ch) & F_PND != 0
+}
+#[inline(always)]
+fn is_expression_punctuator(ch: u32) -> bool {
+    cls(ch) & F_EXPR != 0
+}
+#[inline(always)]
+fn is_br_or_ws_or_punctuator(ch: u32) -> bool {
+    cls(ch) & F_BWP != 0
+}
+#[inline(always)]
+fn is_quote(ch: u32) -> bool {
     ch == c(b'\'') || ch == c(b'"')
 }
 
@@ -212,6 +288,8 @@ struct Hot {
     p: i32,
     m: u64,
     nonws: u64,
+    /// chars of the next block to leave out (the main loop restarts inside it)
+    skip: i32,
     /// next_brace_is_class
     nbic: i32,
     /// end of the current last import (a `{` right after it needs a check)
@@ -276,8 +354,12 @@ unsafe fn hot(h: &mut Hot, src: *const u8, len: i32) -> bool {
             let (s, w) = block_masks(&k, src, b);
             core::ptr::write_volatile(blk, s);
             core::ptr::write_volatile(blk.add(1), w);
-            m = s;
-            nonws = w;
+            // (the first block after a restart: only from the restart on;
+            // volatile, else LLVM makes a copy of the loop for it)
+            let keep = !0u64 << core::ptr::read_volatile(&h.skip);
+            core::ptr::write_volatile(&mut h.skip, 0);
+            m = s & keep;
+            nonws = w & keep;
         }
         // (no stop at or past len: the padding after the source is NUL)
         let q = b + m.trailing_zeros() as i32;
@@ -366,106 +448,206 @@ struct Lx {
     next_brace_is_class: bool,
     has_error: bool,
     parse_error: i32,
-    oob: bool,
     depth: i32,
     dyn_depth: i32,
-    first_import: i32,
-    import_head: i32,
-    import_head_last: i32,
-    ot_tok: *mut u8,
-    ot_pos: *mut i32,
-    dyn_stack: *mut i32,
-    imps: *mut Vec<Imp>,
-    exps: *mut Vec<Exp>,
+    /// the last import record in the list and the one before it (0: none)
+    import_head: usize,
+    import_head_last: usize,
+    /// the last export record (0: none)
+    last_export: usize,
+    /// start and end of the record stream, end of memory
+    base: usize,
+    top: usize,
+    limit: usize,
+    /// memory size of a fresh original instance parsing this source, and
+    /// where our records reach the end of it
+    omem: u64,
+    rlimit: usize,
+}
+
+/// The RuntimeError a wasm memory access out of bounds throws (the
+/// original's trap, in the engine's words).
+#[cold]
+fn trap() -> ! {
+    unsafe { core::ptr::read_volatile(usize::MAX as *const u8) };
+    unreachable()
+}
+
+const fn pack(s: &[u8]) -> u64 {
+    let mut w = 0u64;
+    let mut k = 0;
+    while k < s.len() {
+        w |= (s[k] as u64) << (8 * k);
+        k += 1;
+    }
+    w
+}
+/// `s` at p (memcmp): kw!(self, p, b"...")
+macro_rules! kw {
+    ($l:expr, $p:expr, $s:expr) => {
+        $l.memeq($p, const { pack($s) }, $s.len() as u32)
+    };
+}
+macro_rules! rpkn {
+    ($l:expr, $p:expr, $s:expr) => {
+        $l.rpkn($p, const { pack($s) }, $s.len() as u32)
+    };
 }
 
 impl Lx {
     #[inline(always)]
-    fn raw(&self, i: i32) -> u16 {
-        unsafe { *self.src.add(i as usize) as u16 }
+    fn raw(&self, i: i32) -> u32 {
+        unsafe { *self.src.add(i as usize) as u32 }
     }
 
     /// `*p` of the original: in range [0, len] (len is the NUL terminator).
+    /// (Out of line: it is used in many places, none of them hot.)
+    #[inline(never)]
+    fn at(&mut self, i: i32) -> u32 {
+        self.at_i(i)
+    }
+    /// at(i), inlined (the loops that walk the source char by char)
     #[inline(always)]
-    fn at(&mut self, i: i32) -> u16 {
+    fn at_i(&mut self, i: i32) -> u32 {
         if (i as u32) <= (self.len as u32) {
             self.raw(i)
         } else {
-            if i != EMPTY {
-                self.oob = true;
-            }
-            0
+            self.outside(i)
         }
     }
 
-    #[inline(always)]
-    fn imps(&mut self) -> &mut Vec<Imp> {
-        unsafe { &mut *self.imps }
-    }
-    #[inline(always)]
-    fn exps(&mut self) -> &mut Vec<Exp> {
-        unsafe { &mut *self.exps }
+    /// `*p` for p outside the source: the char at address oaddr(p) of a fresh
+    /// instance of the original, or its trap. Below the source is its
+    /// bracket stack (slots written in this parse, zero elsewhere), past the
+    /// NUL terminator its records (as they are now) and then zeros.
+    #[cold]
+    #[inline(never)]
+    fn outside(&mut self, i: i32) -> u32 {
+        unsafe { HDR[7] += 1 };
+        let a = oaddr(i);
+        if a as u64 + 2 > self.omem {
+            trap();
+        }
+        // (o: the offset in the stack or the records, which start at the
+        // address after the NUL terminator: 2-byte aligned only)
+        let o = if a < O_SRC { a.wrapping_sub(O_STACK) } else { a - oaddr(self.len + 1) };
+        let v = if a < O_SRC {
+            let s = (o >> 3) as i32;
+            if a < O_STACK || self.tok_at(s) == UNSET {
+                0
+            } else if o & 4 == 0 {
+                self.tok_at(s) as u32
+            } else {
+                oaddr(self.tpos_at(s))
+            }
+        } else {
+            self.record_word(o >> 2)
+        };
+        (v >> ((o & 2) * 8)) & 0xffff
     }
 
-    fn fail_oob(&mut self) {
-        self.oob = true;
-        self.has_error = true;
-        self.pos = self.end + 1;
+    /// Word w of the original's records (the same records in the same order,
+    /// as pointers and a `next` link per list instead of our kinds), 0 after
+    /// them.
+    fn record_word(&self, w: u32) -> u32 {
+        // our word for each word of the original's Import (start, end,
+        // statement_start, statement_end, assert_index, dynamic, safe, type)
+        const IMP: [u8; 8] = [1, 2, 3, 4, 6, 5, 8, 7];
+        let mut w = w as usize;
+        let mut a = self.base;
+        while a < self.top {
+            let r = a as *const i32;
+            let k = unsafe { *r };
+            let n = if k == K_EXPORT { 5 } else { 9 };
+            if w < n {
+                if w == n - 1 {
+                    // next: the next record of the same list (a dropped import
+                    // is in none)
+                    let mut b = a + 4 * n;
+                    while k != K_DROPPED && b < self.top {
+                        let kb = unsafe { *(b as *const i32) };
+                        if kb == k {
+                            return oaddr(self.len + 1) + (b - self.base) as u32;
+                        }
+                        b += if kb == K_EXPORT { 20 } else { 36 };
+                    }
+                    return 0;
+                }
+                let x = unsafe { *r.add(if k == K_EXPORT { w + 1 } else { IMP[w] as usize }) };
+                return if k != K_EXPORT && w >= 6 {
+                    x as u32
+                } else if k != K_EXPORT && w == 5 && x < 0 {
+                    // STANDARD_IMPORT 1, IMPORT_META 2
+                    x.wrapping_neg() as u32
+                } else if x == NULL {
+                    0
+                } else {
+                    oaddr(x)
+                };
+            }
+            w -= n;
+            a += 4 * n;
+        }
+        0
+    }
+
+    /// room for n more bytes of records (a fresh original traps when its
+    /// records do not fit in its memory)
+    #[inline(always)]
+    fn reserve(&mut self, n: usize) {
+        if self.top + n > self.rlimit {
+            unsafe { HDR[7] += 1 };
+            trap();
+        }
+        if self.top + n > self.limit {
+            self.limit = grow_memory(self.top + n);
+        }
     }
 
     // ---- open token stack
     #[inline(always)]
     fn push(&mut self, tok: u8, p: i32) {
         if (self.depth as u32) >= OT_MAX as u32 {
-            self.fail_oob();
+            self.syntax_error();
             return;
         }
         unsafe {
-            *self.ot_tok.add(self.depth as usize) = tok;
-            *self.ot_pos.add(self.depth as usize) = p;
+            OT_TOK[self.depth as usize] = tok;
+            OT_POS[self.depth as usize] = p;
         }
         self.depth += 1;
     }
-    /// Slot i of the token stack; slots not written in this parse (UNSET)
-    /// hold stale data in the original.
+    /// Slot i of the token stack; UNSET: not written in this parse (a fresh
+    /// original has zero there: token 0, position NULL)
     #[inline(always)]
-    fn tok_at(&mut self, i: i32) -> u8 {
-        let t = if (i as u32) < OT_MAX as u32 { unsafe { *self.ot_tok.add(i as usize) } } else { UNSET };
-        if t == UNSET {
-            self.oob = true;
-            return 0;
+    fn tok_at(&self, i: i32) -> u8 {
+        if (i as u32) < OT_MAX as u32 {
+            unsafe { OT_TOK[i as usize] }
+        } else {
+            UNSET
         }
-        t
     }
     #[inline(always)]
-    fn tpos_at(&mut self, i: i32) -> i32 {
-        if self.tok_at(i) == 0 {
-            return EMPTY;
+    fn tpos_at(&self, i: i32) -> i32 {
+        if self.tok_at(i) == UNSET {
+            return NULLP;
         }
-        unsafe { *self.ot_pos.add(i as usize) }
+        unsafe { OT_POS[i as usize] }
     }
-    /// `--openTokenDepth` (uint16_t in the original: wraps below zero)
+    /// `--openTokenDepth` (never below zero: every pop follows a push)
     #[inline(always)]
     fn pop(&mut self) {
         if self.depth <= 0 {
-            self.fail_oob();
-            self.depth = 0;
+            self.syntax_error();
             return;
         }
         self.depth -= 1;
     }
 
     // ---- records
+    #[inline(never)]
     fn add_import(&mut self, ss: i32, start: i32, end: i32, dynamic: i32) {
-        let idx = self.imps().len() as i32;
-        if self.import_head == NULL {
-            self.first_import = idx;
-        } else {
-            let h = self.import_head as usize;
-            self.imps()[h].next = idx;
-        }
-        self.import_head_last = self.import_head;
-        self.import_head = idx;
+        self.reserve(core::mem::size_of::<Imp>());
         let (se, ty) = if dynamic == D_META {
             (end, 3)
         } else if dynamic == D_STANDARD {
@@ -473,47 +655,79 @@ impl Lx {
         } else {
             (NULL, 2)
         };
-        self.imps().push(Imp {
-            start,
-            end,
-            ss,
-            se,
-            ai: NULL,
-            dynamic,
-            safe: (dynamic == D_STANDARD) as i32,
-            ty,
-            next: NULL,
-        });
+        let a = self.top;
+        unsafe {
+            *(a as *mut Imp) = Imp {
+                kind: K_IMPORT,
+                start,
+                end,
+                ss,
+                se,
+                dynamic,
+                ai: NULL,
+                ty,
+                name: (dynamic == D_STANDARD) as i32,
+            };
+        }
+        self.top = a + core::mem::size_of::<Imp>();
+        self.import_head_last = self.import_head;
+        self.import_head = a;
         if dynamic == D_META || dynamic == D_STANDARD {
             self.has_module_syntax = true;
         }
     }
     #[inline(always)]
     fn head(&mut self) -> &mut Imp {
-        let h = self.import_head as usize;
-        unsafe { (&mut *self.imps).get_unchecked_mut(h) }
+        unsafe { &mut *(self.import_head as *mut Imp) }
     }
+    #[inline(never)]
     fn add_export(&mut self, start: i32, end: i32, ls: i32, le: i32) {
-        self.exps().push(Exp { start, end, ls, le });
+        self.reserve(core::mem::size_of::<Exp>());
+        let a = self.top;
+        unsafe { *(a as *mut Exp) = Exp { kind: K_EXPORT, start, end, ls, le } };
+        self.top = a + core::mem::size_of::<Exp>();
+        self.last_export = a;
         self.has_module_syntax = true;
     }
 
     // ---- helpers over positions
-    fn memeq(&mut self, p: i32, s: &[u8]) -> bool {
-        let mut k = 0;
-        while k < s.len() {
-            if self.at(p + k as i32) != s[k] as u16 {
-                return false;
-            }
-            k += 1;
+    /// `s` (at most 8 chars, no NUL) at p. In the original a comparison
+    /// (memcmp) stops at the first mismatch, at the latest at the NUL
+    /// terminator: from p in [0, len] nothing outside the source is read, so
+    /// one 8-byte load (the padding covers it) compares the same; from any
+    /// other p it reads outside, char by char.
+    /// (want: the chars packed little-endian, n of them; see kw!; inlined:
+    /// a call per keyword check costs small modules ~5% in Chromium)
+    #[inline(always)]
+    fn memeq(&mut self, p: i32, want: u64, n: u32) -> bool {
+        if (p as u32) <= (self.len as u32) {
+            let got = unsafe { core::ptr::read_unaligned(self.src.add(p as usize) as *const u64) };
+            got & (!0u64 >> (64 - 8 * n)) == want
+        } else {
+            self.memeq_outside(p, want, n)
         }
-        true
     }
+    #[cold]
+    #[inline(never)]
+    fn memeq_outside(&mut self, p: i32, want: u64, n: u32) -> bool {
+        {
+            let mut k = 0;
+            while k < n {
+                if self.at(p + k as i32) != (want >> (8 * k)) as u8 as u32 {
+                    return false;
+                }
+                k += 1;
+            }
+            true
+        }
+    }
+    #[inline(never)]
     fn is_spread(&mut self, p: i32) -> bool {
         self.at(p) == c(b'.') && self.at(p - 1) == c(b'.') && self.at(p - 2) == c(b'.')
     }
+    #[inline(never)]
     fn is_br_or_ws_or_punctuator_or_spread_not_dot(&mut self, p: i32) -> bool {
-        let ch = self.at(p);
+        let ch = self.at_i(p);
         ch > 8 && ch < 14
             || ch == 32
             || ch == 160
@@ -523,20 +737,26 @@ impl Lx {
     fn keyword_start(&mut self, p: i32) -> bool {
         p == 0 || self.is_br_or_ws_or_punctuator_or_spread_not_dot(p - 1)
     }
+    // (`pos < source` in the original compares addresses, unsigned: a
+    // position computed from NULL wraps around and is not below the source)
+    #[inline(never)]
     fn rpk1(&mut self, p: i32, c1: u8) -> bool {
-        if p < 0 {
+        if oaddr(p) < O_SRC {
             return false;
         }
-        self.at(p) == c1 as u16 && (p == 0 || is_br_or_ws_or_punctuator_not_dot(self.at(p - 1)))
+        self.at(p) == c1 as u32 && (p == 0 || is_br_or_ws_or_punctuator_not_dot(self.at(p - 1)))
     }
-    fn rpkn(&mut self, p: i32, s: &[u8]) -> bool {
-        let n = s.len() as i32;
-        if p - n + 1 < 0 {
+    #[inline(never)]
+    fn rpkn(&mut self, p: i32, want: u64, n: u32) -> bool {
+        let n1 = n as i32;
+        if oaddr(p - n1 + 1) < O_SRC {
             return false;
         }
-        self.memeq(p - n + 1, s)
+        let n = n1;
+        self.memeq(p - n + 1, want, n1 as u32)
             && (p - n + 1 == 0 || self.is_br_or_ws_or_punctuator_or_spread_not_dot(p - n))
     }
+    #[inline(never)]
     fn is_expression_keyword(&mut self, p: i32) -> bool {
         let ch = self.at(p);
         if ch > 127 {
@@ -544,8 +764,8 @@ impl Lx {
         }
         match ch as u8 {
             b'd' => match self.at(p - 1) {
-                x if x == c(b'i') => self.rpkn(p - 2, b"vo"),
-                x if x == c(b'l') => self.rpkn(p - 2, b"yie"),
+                x if x == c(b'i') => rpkn!(self, p - 2, b"vo"),
+                x if x == c(b'l') => rpkn!(self, p - 2, b"yie"),
                 _ => false,
             },
             b'e' => {
@@ -560,9 +780,9 @@ impl Lx {
                         false
                     }
                 } else if c1 == c(b't') {
-                    self.rpkn(p - 2, b"dele")
+                    rpkn!(self, p - 2, b"dele")
                 } else if c1 == c(b'u') {
-                    self.rpkn(p - 2, b"contin")
+                    rpkn!(self, p - 2, b"contin")
                 } else {
                     false
                 }
@@ -573,24 +793,24 @@ impl Lx {
                 }
                 let c3 = self.at(p - 3);
                 if c3 == c(b'c') {
-                    self.rpkn(p - 4, b"instan")
+                    rpkn!(self, p - 4, b"instan")
                 } else if c3 == c(b'p') {
-                    self.rpkn(p - 4, b"ty")
+                    rpkn!(self, p - 4, b"ty")
                 } else {
                     false
                 }
             }
-            b'k' => self.rpkn(p - 1, b"brea"),
-            b'n' => self.rpk1(p - 1, b'i') || self.rpkn(p - 1, b"retur"),
+            b'k' => rpkn!(self, p - 1, b"brea"),
+            b'n' => self.rpk1(p - 1, b'i') || rpkn!(self, p - 1, b"retur"),
             b'o' => self.rpk1(p - 1, b'd'),
-            b'r' => self.rpkn(p - 1, b"debugge"),
-            b't' => self.rpkn(p - 1, b"awai"),
+            b'r' => rpkn!(self, p - 1, b"debugge"),
+            b't' => rpkn!(self, p - 1, b"awai"),
             b'w' => {
                 let c1 = self.at(p - 1);
                 if c1 == c(b'e') {
                     self.rpk1(p - 2, b'n')
                 } else if c1 == c(b'o') {
-                    self.rpkn(p - 2, b"thr")
+                    rpkn!(self, p - 2, b"thr")
                 } else {
                     false
                 }
@@ -598,19 +818,22 @@ impl Lx {
             _ => false,
         }
     }
+    #[inline(never)]
     fn is_paren_keyword(&mut self, p: i32) -> bool {
-        self.rpkn(p, b"while") || self.rpkn(p, b"for") || self.rpkn(p, b"if")
+        rpkn!(self, p, b"while") || rpkn!(self, p, b"for") || rpkn!(self, p, b"if")
     }
+    #[inline(never)]
     fn is_break_or_continue(&mut self, p: i32) -> bool {
         let ch = self.at(p);
         if ch == c(b'k') {
-            return self.rpkn(p - 1, b"brea");
+            return rpkn!(self, p - 1, b"brea");
         }
         if ch == c(b'e') && self.at(p - 1) == c(b'u') {
-            return self.rpkn(p - 2, b"contin");
+            return rpkn!(self, p - 2, b"contin");
         }
         false
     }
+    #[inline(never)]
     fn is_expression_terminator(&mut self, p: i32) -> bool {
         let ch = self.at(p);
         if ch == c(b'>') {
@@ -620,17 +843,19 @@ impl Lx {
             return true;
         }
         if ch == c(b'h') {
-            return self.rpkn(p - 1, b"catc");
+            return rpkn!(self, p - 1, b"catc");
         }
         if ch == c(b'y') {
-            return self.rpkn(p - 1, b"finall");
+            return rpkn!(self, p - 1, b"finall");
         }
         if ch == c(b'e') {
-            return self.rpkn(p - 1, b"els");
+            return rpkn!(self, p - 1, b"els");
         }
         false
     }
 
+    #[cold]
+    #[inline(never)]
     fn syntax_error(&mut self) {
         self.has_error = true;
         self.parse_error = self.pos;
@@ -639,7 +864,7 @@ impl Lx {
 
     // ---- SIMD scanners: first index >= from matching, or len
     #[inline(always)]
-    fn scan_string(&self, from: i32, quote: u16) -> i32 {
+    fn scan_string(&self, from: i32, quote: u32) -> i32 {
         unsafe {
             let q = u8x16_splat(quote as u8);
             let bs = u8x16_splat(b'\\');
@@ -756,7 +981,7 @@ impl Lx {
                 continue;
             }
             if ch == c(b'e') {
-                if self.depth == 0 && self.keyword_start(self.pos) && self.memeq(self.pos + 1, b"xport") {
+                if self.depth == 0 && self.keyword_start(self.pos) && kw!(self, self.pos + 1, b"xport") {
                     self.try_parse_export_statement();
                     if !self.facade {
                         self.last = self.pos;
@@ -765,18 +990,15 @@ impl Lx {
                     }
                 }
             } else if ch == c(b'i') {
-                if self.keyword_start(self.pos) && self.memeq(self.pos + 1, b"mport") {
+                if self.keyword_start(self.pos) && kw!(self, self.pos + 1, b"mport") {
                     self.try_parse_import_statement();
                 }
             } else if ch == c(b';') {
             } else {
                 if ch == c(b'/') {
                     let next = self.at(self.pos + 1);
-                    if next == c(b'/') {
-                        self.line_comment();
-                        continue;
-                    } else if next == c(b'*') {
-                        self.block_comment(true);
+                    if next == c(b'/') || next == c(b'*') {
+                        self.skip_comment(next, true);
                         continue;
                     }
                 }
@@ -800,16 +1022,15 @@ impl Lx {
     fn main_loop(&mut self) {
         let src = self.src;
         let len = self.len;
-        let ot_tok = unsafe { core::ptr::addr_of_mut!(OT_TOK) as *mut u8 };
-        let ot_pos = unsafe { core::ptr::addr_of_mut!(OT_POS) as *mut i32 };
-        let k = consts();
-        let raw = |i: i32| -> u16 { unsafe { *src.add(i as usize) as u16 } };
+        let ot_tok = core::ptr::addr_of_mut!(OT_TOK) as *mut u8;
+        let ot_pos = core::ptr::addr_of_mut!(OT_POS) as *mut i32;
+        let raw = |i: i32| -> u32 { unsafe { *src.add(i as usize) as u32 } };
         // `s` matches at i (i + s.len() <= len + 1: a mismatch at the NUL
         // terminator ends the comparison before anything past it is read)
         let eq = |i: i32, s: &[u8]| -> bool {
             let mut j = 0;
             while j < s.len() {
-                if raw(i + j as i32) != s[j] as u16 {
+                if raw(i + j as i32) != s[j] as u32 {
                     return false;
                 }
                 j += 1;
@@ -835,12 +1056,12 @@ impl Lx {
                 depth = self.depth;
             };
         }
-        // (a failed push ends the parse: has_error is set, pos is past end)
+        // (a full stack is a parse error: has_error is set, pos is past end)
         macro_rules! push {
             ($t:expr, $p:expr) => {
                 if (depth as u32) >= OT_MAX as u32 {
                     sync_out!();
-                    self.fail_oob();
+                    self.syntax_error();
                     return;
                 }
                 unsafe {
@@ -852,8 +1073,19 @@ impl Lx {
         }
         // 64-char block cache: stop chars and non-whitespace chars of block
         // h.b, kept in memory (only needed when the scan restarts)
-        let blk = unsafe { core::ptr::addr_of_mut!(BLK) as *mut u64 };
-        let mut h = Hot { last: 0, depth: 0, b: -64, p: 0, m: 0, nonws: 0, nbic: 0, head_end: NULL, dyn_depth: 0 };
+        let blk = core::ptr::addr_of_mut!(BLK) as *mut u64;
+        let mut h = Hot {
+            last: 0,
+            depth: 0,
+            b: -64,
+            p: 0,
+            m: 0,
+            nonws: 0,
+            skip: 0,
+            nbic: 0,
+            head_end: NULL,
+            dyn_depth: 0,
+        };
         loop {
             // (re)start from pos
             let from = pos + 1;
@@ -862,23 +1094,23 @@ impl Lx {
                 sync_out!();
                 return;
             }
+            // only stops and non-whitespace at or after from (chars before it
+            // belong to a comment, string etc. that was skipped): from the
+            // masks of its block if they are the cached ones, else hot makes
+            // them
             let nb = from & !63;
-            let (cstops, cnonws) = if nb != h.b {
-                h.b = nb;
-                let (s, w) = unsafe { block_masks(&k, src, nb) };
+            if nb == h.b {
+                let keep = !0u64 << (from - nb);
                 unsafe {
-                    core::ptr::write_volatile(blk, s);
-                    core::ptr::write_volatile(blk.add(1), w);
+                    h.m = core::ptr::read_volatile(blk) & keep;
+                    h.nonws = core::ptr::read_volatile(blk.add(1)) & keep;
                 }
-                (s, w)
             } else {
-                unsafe { (core::ptr::read_volatile(blk), core::ptr::read_volatile(blk.add(1))) }
-            };
-            let keep = !0u64 << (from - nb);
-            h.m = cstops & keep;
-            // non-whitespace at or after from (chars before it belong to a
-            // comment, string etc. that was skipped)
-            h.nonws = cnonws & keep;
+                h.b = nb - 64;
+                h.m = 0;
+                h.nonws = 0;
+                h.skip = from - nb;
+            }
             // stops that leave pos at the stop continue with the same masks:
             // then the previous stop (non-whitespace) bounds the search for
             // lastTokenPos by itself
@@ -886,7 +1118,7 @@ impl Lx {
                 h.last = last;
                 h.depth = depth;
                 h.nbic = self.next_brace_is_class as i32;
-                h.head_end = if self.import_head != NULL { self.head().end } else { NULL };
+                h.head_end = if self.import_head != 0 { self.head().end } else { NULL };
                 h.dyn_depth = self.dyn_depth;
                 // brackets that need nothing else are handled in there
                 let more = unsafe { hot(&mut h, src, len) };
@@ -922,7 +1154,7 @@ impl Lx {
                     b'{' => {
                         let l = last;
                         // at(l): l is EMPTY or a position before p
-                        if self.import_head != NULL && l >= 0 && raw(l) == c(b')') && self.head().end == l {
+                        if self.import_head != 0 && l >= 0 && raw(l) == c(b')') && self.head().end == l {
                             self.drop_import_head();
                         }
                         let t = if self.next_brace_is_class { CLASS_BRACE } else { ANY_BRACE };
@@ -1040,8 +1272,7 @@ impl Lx {
     /// `)` closing a dynamic import's parens
     #[inline(never)]
     fn dynamic_import_end(&mut self, p: i32, last: i32) {
-        let cur = unsafe { *self.dyn_stack.add(self.dyn_depth as usize - 1) } as usize;
-        let imp = &mut self.imps()[cur];
+        let imp = unsafe { &mut *(*(core::ptr::addr_of_mut!(DYN) as *mut usize).add(self.dyn_depth as usize - 1) as *mut Imp) };
         if imp.end == NULL {
             imp.end = last + 1;
         }
@@ -1052,15 +1283,16 @@ impl Lx {
     /// `{` after the `)` of the last import (`import(...) {`): not an import
     #[inline(never)]
     fn drop_import_head(&mut self) {
-        self.import_head = self.import_head_last;
-        if self.import_head != NULL {
-            self.head().next = NULL;
-        } else {
-            self.first_import = NULL;
+        // (the original unlinks what follows import_head_last: a second drop
+        // without an import in between drops nothing)
+        if self.import_head != self.import_head_last {
+            self.head().kind = K_DROPPED;
         }
+        self.import_head = self.import_head_last;
     }
 
     /// Division / regex ambiguity (the `/` case of the main switch)
+    #[inline(never)]
     fn slash(&mut self) {
         let last = self.last;
         let lt = self.at(last);
@@ -1082,7 +1314,7 @@ impl Lx {
                 && self.at(last - 1) == c(b'o')
                 && {
                     let tp = self.tpos_at(depth - 1);
-                    self.rpkn(tp, b"for")
+                    rpkn!(self, tp, b"for")
                 }
             || lt == c(b'}')
                 && ({
@@ -1097,9 +1329,9 @@ impl Lx {
             self.last_slash_was_division = false;
             return;
         }
-        let in_export = match self.exps().last() {
-            Some(e) => last >= e.start && last <= e.end,
-            None => false,
+        let in_export = self.last_export != 0 && {
+            let e = unsafe { &*(self.last_export as *const Exp) };
+            last >= e.start && last <= e.end
         };
         if in_export {
             // export default /some-regexp/
@@ -1140,10 +1372,11 @@ impl Lx {
         self.last_slash_was_division = true;
     }
 
+    #[inline(never)]
     fn try_parse_import_statement(&mut self) {
         let start_pos = self.pos;
         self.pos += 6;
-        let mut ch = self.comment_whitespace(true);
+        let mut ch = self.cw_i(true);
         let maybe_phase_pos = self.pos;
         let mut phase: i32 = 0;
 
@@ -1153,20 +1386,20 @@ impl Lx {
             ch = self.comment_whitespace(true);
             let last = self.last;
             if ch == c(b'm')
-                && self.memeq(self.pos + 1, b"eta")
+                && kw!(self, self.pos + 1, b"eta")
                 && (self.is_spread(last) || self.at(last) != c(b'.'))
             {
                 self.add_import(start_pos, start_pos, self.pos + 4, D_META);
                 return;
             } else if ch == c(b's')
-                && self.memeq(self.pos + 1, b"ource")
+                && kw!(self, self.pos + 1, b"ource")
                 && (self.is_spread(last) || self.at(last) != c(b'.'))
             {
                 phase = 1;
                 self.pos += 6;
                 ch = self.comment_whitespace(true);
             } else if ch == c(b'd')
-                && self.memeq(self.pos + 1, b"efer")
+                && kw!(self, self.pos + 1, b"efer")
                 && (self.is_spread(last) || self.at(last) != c(b'.'))
             {
                 phase = 2;
@@ -1177,7 +1410,7 @@ impl Lx {
             }
         } else if self.pos > start_pos + 6
             && ch == c(b's')
-            && self.memeq(self.pos + 1, b"ource")
+            && kw!(self, self.pos + 1, b"ource")
             && is_br_or_ws(self.at(self.pos + 6))
         {
             phase = 1;
@@ -1186,7 +1419,7 @@ impl Lx {
             // need a space after the source keyword, and must not be followed by from keyword
             if self.pos == maybe_phase_pos + 6
                 || ch == c(b'f')
-                    && self.memeq(self.pos + 1, b"rom")
+                    && kw!(self, self.pos + 1, b"rom")
                     && is_br_or_ws_or_punctuator_not_dot(self.at(self.pos + 4))
             {
                 self.pos = maybe_phase_pos;
@@ -1194,7 +1427,7 @@ impl Lx {
             }
         } else if self.pos > start_pos + 5
             && ch == c(b'd')
-            && self.memeq(self.pos + 1, b"efer")
+            && kw!(self, self.pos + 1, b"efer")
             && is_br_or_ws(self.at(self.pos + 5))
         {
             phase = 2;
@@ -1224,10 +1457,10 @@ impl Lx {
                 self.head().ty = if phase == 1 { 5 } else { 7 };
             }
             if self.dyn_depth >= DYN_MAX {
-                self.fail_oob();
+                self.syntax_error();
                 return;
             }
-            unsafe { *self.dyn_stack.add(self.dyn_depth as usize) = self.import_head };
+            unsafe { *(core::ptr::addr_of_mut!(DYN) as *mut usize).add(self.dyn_depth as usize) = self.import_head };
             self.dyn_depth += 1;
             if ch == c(b'\'') || ch == c(b'"') {
                 self.string_literal(ch);
@@ -1245,7 +1478,7 @@ impl Lx {
                 let h = self.head();
                 h.end = end_pos;
                 h.ai = p;
-                h.safe = 1;
+                h.name = 1;
                 self.pos -= 1;
             } else if ch == c(b')') {
                 self.pop();
@@ -1253,7 +1486,7 @@ impl Lx {
                 let h = self.head();
                 h.end = end_pos;
                 h.se = p + 1;
-                h.safe = 1;
+                h.name = 1;
                 self.dyn_depth -= 1;
             } else {
                 self.pos -= 1;
@@ -1284,7 +1517,7 @@ impl Lx {
                 self.pos += 1;
             }
             ch = self.comment_whitespace(true);
-            if ch == c(b'f') && !self.memeq(self.pos + 1, b"rom") {
+            if ch == c(b'f') && !kw!(self, self.pos + 1, b"rom") {
                 self.syntax_error();
                 return;
             }
@@ -1323,12 +1556,13 @@ impl Lx {
         }
     }
 
+    #[inline(never)]
     fn try_parse_export_statement(&mut self) {
         let s_start_pos = self.pos;
-        let prev_exports = self.exps().len();
+        let prev_top = self.top;
         self.pos += 6;
         let cur_pos = self.pos;
-        let mut ch = self.comment_whitespace(true);
+        let mut ch = self.cw_i(true);
 
         if self.pos == cur_pos && !is_punctuator(ch) {
             return;
@@ -1381,12 +1615,12 @@ impl Lx {
                 b'd' => {
                     let start_pos = self.pos;
                     self.pos += 7;
-                    ch = self.comment_whitespace(true);
+                    ch = self.cw_i(true);
                     let mut local_name = false;
                     let mut do_function = false;
                     if ch == c(b'a') {
                         // export default async? function*? name? (){}
-                        if self.memeq(self.pos + 1, b"sync") && is_ws_not_br(self.at(self.pos + 5)) {
+                        if kw!(self, self.pos + 1, b"sync") && is_ws_not_br(self.at(self.pos + 5)) {
                             self.pos += 5;
                             ch = self.comment_whitespace(false);
                             do_function = true;
@@ -1395,7 +1629,7 @@ impl Lx {
                         do_function = true;
                     } else if ch == c(b'c') {
                         // export default class name? {}
-                        if self.memeq(self.pos + 1, b"lass") && {
+                        if kw!(self, self.pos + 1, b"lass") && {
                             let d = self.at(self.pos + 5);
                             is_br_or_ws(d) || self.at(self.pos + 5) == c(b'{')
                         } {
@@ -1407,7 +1641,7 @@ impl Lx {
                         }
                     }
                     if do_function {
-                        if self.memeq(self.pos + 1, b"unction") && {
+                        if kw!(self, self.pos + 1, b"unction") && {
                             let d = self.at(self.pos + 8);
                             is_br_or_ws(d) || self.at(self.pos + 8) == c(b'*') || self.at(self.pos + 8) == c(b'(')
                         } {
@@ -1458,7 +1692,7 @@ impl Lx {
                 // export class name ... / export var/let/const name = ...(, name = ...)+
                 b'c' | b'v' | b'l' => {
                     if chb == b'c' {
-                        if self.memeq(self.pos + 1, b"lass")
+                        if kw!(self, self.pos + 1, b"lass")
                             && is_br_or_ws_or_punctuator_not_dot(self.at(self.pos + 5))
                         {
                             self.pos += 5;
@@ -1474,7 +1708,7 @@ impl Lx {
                     }
                     self.pos += 3;
                     self.facade = false;
-                    ch = self.comment_whitespace(true);
+                    ch = self.cw_i(true);
                     let mut start_pos = self.pos;
                     ch = self.read_to_ws_or_punctuator(ch);
                     // very basic destructuring support only of the singular form:
@@ -1493,7 +1727,7 @@ impl Lx {
                         }
                         let p = self.pos;
                         self.add_export(start_pos, p, start_pos, p);
-                        ch = self.comment_whitespace(true);
+                        ch = self.cw_i(true);
                         if destructuring && (ch == c(b'}') || ch == c(b']')) {
                             destructuring = false;
                             break;
@@ -1523,21 +1757,29 @@ impl Lx {
         }
 
         // from ...
-        if ch == c(b'f') && self.memeq(self.pos + 1, b"rom") {
+        if ch == c(b'f') && kw!(self, self.pos + 1, b"rom") {
             self.pos += 4;
             let q = self.comment_whitespace(true);
             self.read_import_string(s_start_pos, q, 0);
             // There were no local names.
-            for e in &mut self.exps()[prev_exports..] {
-                e.ls = NULL;
-                e.le = NULL;
+            let mut a = prev_top;
+            while a < self.top {
+                let e = unsafe { &mut *(a as *mut Exp) };
+                if e.kind == K_EXPORT {
+                    e.ls = NULL;
+                    e.le = NULL;
+                    a += core::mem::size_of::<Exp>();
+                } else {
+                    a += core::mem::size_of::<Imp>();
+                }
             }
         } else {
             self.pos -= 1;
         }
     }
 
-    fn read_export_as(&mut self, mut start_pos: i32, mut end_pos: i32) -> u16 {
+    #[inline(never)]
+    fn read_export_as(&mut self, mut start_pos: i32, mut end_pos: i32) -> u32 {
         let mut ch = self.at(self.pos);
         let local_start = if start_pos == end_pos { NULL } else { start_pos };
         let local_end = if start_pos == end_pos { NULL } else { end_pos };
@@ -1560,7 +1802,8 @@ impl Lx {
         ch
     }
 
-    fn read_import_string(&mut self, ss: i32, ch0: u16, phase: i32) {
+    #[inline(never)]
+    fn read_import_string(&mut self, ss: i32, ch0: u32, phase: i32) {
         let mut ch = ch0;
         let start_pos = self.pos + 1;
         if ch == c(b'\'') || ch == c(b'"') {
@@ -1575,8 +1818,8 @@ impl Lx {
             self.head().ty = if phase == 1 { 4 } else { 6 };
         }
         self.pos += 1;
-        ch = self.comment_whitespace(false);
-        if !(ch == c(b'a') && self.memeq(self.pos + 1, b"ssert"))
+        ch = self.cw_i(false);
+        if !(ch == c(b'a') && kw!(self, self.pos + 1, b"ssert"))
             && !(ch == c(b'w')
                 && self.at(self.pos + 1) == c(b'i')
                 && self.at(self.pos + 2) == c(b't')
@@ -1637,16 +1880,24 @@ impl Lx {
         h.se = p + 1;
     }
 
-    fn comment_whitespace(&mut self, br: bool) -> u16 {
+    /// the comment at pos (`next`: the char after the slash)
+    #[inline(never)]
+    fn skip_comment(&mut self, next: u32, br: bool) {
+        if next == c(b'/') {
+            self.line_comment();
+        } else {
+            self.block_comment(br);
+        }
+    }
+    #[inline(never)]
+    fn comment_whitespace(&mut self, br: bool) -> u32 {
         let mut ch;
         loop {
-            ch = self.at(self.pos);
+            ch = self.at_i(self.pos);
             if ch == c(b'/') {
-                let next = self.at(self.pos + 1);
-                if next == c(b'/') {
-                    self.line_comment();
-                } else if next == c(b'*') {
-                    self.block_comment(br);
+                let next = self.at_i(self.pos + 1);
+                if next == c(b'/') || next == c(b'*') {
+                    self.skip_comment(next, br);
                 } else {
                     return ch;
                 }
@@ -1660,6 +1911,32 @@ impl Lx {
             }
         }
         ch
+    }
+    /// comment_whitespace at the calls nearly every import / export
+    /// statement makes (~10% on small modules): its loop over plain
+    /// whitespace inside the source inlined, without calls; the rest
+    /// (comments, the end of the source, outside it) is comment_whitespace's
+    /// from where this one stopped
+    #[inline(always)]
+    fn cw_i(&mut self, br: bool) -> u32 {
+        loop {
+            let p = self.pos;
+            if (p as u32) >= self.len as u32 {
+                break;
+            }
+            let ch = self.raw(p);
+            if !(if br { is_br_or_ws(ch) } else { is_ws_not_br(ch) }) {
+                if ch == c(b'/') {
+                    break;
+                }
+                return ch;
+            }
+            if !(p < self.end) {
+                break;
+            }
+            self.pos = p + 1;
+        }
+        self.comment_whitespace(br)
     }
 
     fn template_string(&mut self) {
@@ -1684,7 +1961,7 @@ impl Lx {
             }
             if ch == c(b'`') {
                 self.pop();
-                if self.oob {
+                if self.has_error {
                     return;
                 }
                 let d = self.depth;
@@ -1725,7 +2002,8 @@ impl Lx {
         self.pos = if q >= self.len { self.len } else { q };
     }
 
-    fn string_literal(&mut self, quote: u16) {
+    #[inline(never)]
+    fn string_literal(&mut self, quote: u32) {
         loop {
             if !(self.pos < self.end) {
                 self.pos += 1;
@@ -1755,7 +2033,8 @@ impl Lx {
         self.syntax_error();
     }
 
-    fn regex_character_class(&mut self) -> u16 {
+    #[inline(never)]
+    fn regex_character_class(&mut self) -> u32 {
         loop {
             if !(self.pos < self.end) {
                 self.pos += 1;
@@ -1776,6 +2055,7 @@ impl Lx {
         0
     }
 
+    #[inline(never)]
     fn regular_expression(&mut self) {
         loop {
             if !(self.pos < self.end) {
@@ -1798,14 +2078,15 @@ impl Lx {
         self.syntax_error();
     }
 
-    fn read_to_ws_or_punctuator(&mut self, ch0: u16) -> u16 {
+    #[inline(never)]
+    fn read_to_ws_or_punctuator(&mut self, ch0: u32) -> u32 {
         let mut ch = ch0;
         loop {
-            if is_br_or_ws(ch) || is_punctuator(ch) {
+            if is_br_or_ws_or_punctuator(ch) {
                 return ch;
             }
             self.pos += 1;
-            ch = self.at(self.pos);
+            ch = self.at_i(self.pos);
             if ch == 0 {
                 return ch;
             }
@@ -1816,229 +2097,177 @@ impl Lx {
 // ------------------------------------------------------------------ exports
 
 const PAD: usize = 128; // zeroed bytes after the source (SIMD over-read)
+const PAGE: usize = 65536;
 
-static mut SRC: Vec<u64> = Vec::new();
-static mut IMPS: Vec<Imp> = Vec::new();
-static mut EXPS: Vec<Exp> = Vec::new();
-static mut OUT: Vec<i32> = Vec::new();
 // token stack; slots written by a parse are cleared (UNSET) before the next
 static mut OT_TOK: [u8; OT_MAX as usize] = [UNSET; OT_MAX as usize];
 static mut OT_POS: [i32; OT_MAX as usize] = [0; OT_MAX as usize];
 static mut BLK: [u64; 2] = [0; 2];
-static mut DYN: [i32; DYN_MAX as usize] = [0; DYN_MAX as usize];
+static mut DYN: [usize; DYN_MAX as usize] = [0; DYN_MAX as usize];
+// source buffer (start of the heap: the memory past the statics), its
+// capacity in bytes, end of memory
+static mut SRC: usize = 0;
+static mut CAP: usize = 0;
+static mut LIMIT: usize = 0;
 
-/// Result header: status (0 ok, 1 parse error, 2 use the original lexer),
-/// error index, facade, hasModuleSyntax, import count, export count, pointer
-/// to the records (imports: 8 ints each, then exports: 4 ints each), and why
-/// status 2 was chosen (bit 0: out-of-bounds read, bit 1: analysis memory).
+/// Result header: status (0 ok, 1 parse error), error index, facade,
+/// hasModuleSyntax, start and end of the records (byte offsets), the source
+/// buffer's capacity, and how many reads went outside the source (tests).
+/// (Exported: the export is a global holding its address, which JS reads
+/// without a call into wasm.)
+#[no_mangle]
 static mut HDR: [i32; 8] = [0; 8];
 
-#[no_mangle]
-pub extern "C" fn hdr() -> *const i32 {
-    unsafe { core::ptr::addr_of!(HDR) as *const i32 }
+/// Memory up to at least `need` (bytes); returns the end of memory.
+#[cold]
+#[inline(never)]
+fn grow_memory(need: usize) -> usize {
+    let cur = memory_size(0) * PAGE;
+    if need > cur {
+        // (at least 1/8 more: fewer grows, each detaches the JS views)
+        let pages = ((need - cur + PAGE - 1) / PAGE).max(cur / PAGE / 8);
+        if memory_grow(0, pages) == usize::MAX {
+            unreachable();
+        }
+    }
+    memory_size(0) * PAGE
 }
+
 
 /// Source buffer of at least `n` bytes (plus padding): 3 per UTF-16 unit
 /// for UTF-8, 2 for UTF-16, 1 for bytes. Its size in bytes is in HDR[6]
 /// afterwards.
 #[no_mangle]
-#[allow(static_mut_refs)]
 pub extern "C" fn buf(n: u32) -> *mut u8 {
     unsafe {
-        let need_words = (n as usize + PAD + 7) / 8;
-        if SRC.len() < need_words {
-            let n = need_words.max(SRC.len() * 3 / 2).max(1 << 13);
-            SRC = Vec::new();
-            SRC.resize(n, 0);
+        if SRC == 0 {
+            SRC = memory_size(0) * PAGE;
         }
-        HDR[6] = (SRC.len() * 8 - PAD) as i32;
-        SRC.as_mut_ptr() as *mut u8
-    }
-}
-
-// swizzle indices that gather the bytes selected by an 8-bit mask (0x80 pads)
-const fn gather_table() -> [u64; 256] {
-    let mut t = [0u64; 256];
-    let mut m = 0;
-    while m < 256 {
-        let mut idx = 0u64;
-        let mut n = 0;
-        let mut k = 0;
-        while k < 8 {
-            if m & (1 << k) != 0 {
-                idx |= (k as u64) << (8 * n);
-                n += 1;
-            }
-            k += 1;
+        let n = n as usize;
+        // (CAP == 0: nothing allocated yet, even for n == 0)
+        if n > CAP || CAP == 0 {
+            CAP = (n.max(CAP * 3 / 2).max(PAGE - PAD) + 7) & !7;
+            LIMIT = grow_memory(SRC + CAP + PAD);
         }
-        while n < 8 {
-            idx |= 0x80u64 << (8 * n);
-            n += 1;
-        }
-        t[m] = idx;
-        m += 1;
-    }
-    t
-}
-static GATHER: [u64; 256] = gather_table();
-
-/// One UTF-8 byte: continuation bytes vanish, lead bytes become 0x80 (0xa0
-/// for U+00A0), a 4-byte lead becomes two (a surrogate pair).
-#[inline(always)]
-unsafe fn squash_byte(p: *mut u8, i: usize, o: usize) -> usize {
-    let b = *p.add(i);
-    if b < 0x80 {
-        *p.add(o) = b;
-        o + 1
-    } else if b < 0xc0 {
-        o
-    } else if b < 0xf0 {
-        *p.add(o) = if b == 0xc2 && *p.add(i + 1) == 0xa0 { 0xa0 } else { 0x80 };
-        o + 1
-    } else {
-        *p.add(o) = 0x80;
-        *p.add(o + 1) = 0x80;
-        o + 2
+        HDR[6] = CAP as i32;
+        SRC as *mut u8
     }
 }
 
 /// UTF-8 (n bytes, as written by TextEncoder.encodeInto) to one byte per
 /// UTF-16 code unit, in place. The lexer only tells apart ASCII chars and
-/// U+00A0 (whitespace to it); every other code unit behaves the same, so it
-/// becomes 0x80. Returns the number of units written.
-unsafe fn squash(p: *mut u8, n: usize) -> usize {
+/// U+00A0 (whitespace to it); every other code unit behaves the same, so a
+/// sequence becomes 0x80 (0xa0 for U+00A0), a 4-byte one two of them (a
+/// surrogate pair). 16 bytes at a time while they are ASCII.
+unsafe fn squash(p: *mut u8, n: usize) {
     let mut i = 0usize;
-    // leading ASCII stays in place
-    while i + 16 <= n && u8x16_bitmask(v128_load(p.add(i) as *const v128)) == 0 {
-        i += 16;
-    }
-    let mut o = i;
-    while i + 16 <= n {
-        let v = v128_load(p.add(i) as *const v128);
-        let non_ascii = u8x16_bitmask(v);
-        if non_ascii == 0 {
-            v128_store(p.add(o) as *mut v128, v);
-            i += 16;
-            o += 16;
-            continue;
-        }
-        if u8x16_bitmask(u8x16_ge(v, u8x16_splat(0xf0))) != 0 {
-            // 4-byte sequence (two units): bytewise
-            let e = i + 16;
-            while i < e {
-                o = squash_byte(p, i, o);
-                i += 1;
-            }
-            continue;
-        }
-        let vn = v128_load(p.add(i + 1) as *const v128);
-        let cont = u8x16_eq(v128_and(v, u8x16_splat(0xc0)), u8x16_splat(0x80));
-        let nbsp = v128_and(u8x16_eq(v, u8x16_splat(0xc2)), u8x16_eq(vn, u8x16_splat(0xa0)));
-        let other = v128_bitselect(u8x16_splat(0xa0), u8x16_splat(0x80), nbsp);
-        let mapped = v128_bitselect(v, other, u8x16_lt(v, u8x16_splat(0x80)));
-        let keep = !(u8x16_bitmask(cont) as u32) & 0xffff;
-        let lo = keep & 0xff;
-        let hi = keep >> 8;
-        let idx = u64x2(GATHER[lo as usize], GATHER[hi as usize] + 0x0808_0808_0808_0808);
-        let out = u8x16_swizzle(mapped, idx);
-        v128_store64_lane::<0>(out, p.add(o) as *mut u64);
-        o += lo.count_ones() as usize;
-        v128_store64_lane::<1>(out, p.add(o) as *mut u64);
-        o += hi.count_ones() as usize;
-        i += 16;
-    }
+    let mut o = 0usize;
     while i < n {
-        o = squash_byte(p, i, o);
+        if i + 16 <= n {
+            let v = v128_load(p.add(i) as *const v128);
+            if u8x16_bitmask(v) == 0 {
+                v128_store(p.add(o) as *mut v128, v);
+                i += 16;
+                o += 16;
+                continue;
+            }
+        }
+        let b = *p.add(i);
+        if b < 0x80 {
+            *p.add(o) = b;
+            o += 1;
+        } else if b >= 0xc0 {
+            *p.add(o) = if b == 0xc2 && *p.add(i + 1) == 0xa0 { 0xa0 } else { 0x80 };
+            o += 1;
+            if b >= 0xf0 {
+                *p.add(o) = 0x80;
+                o += 1;
+            }
+        }
         i += 1;
     }
-    o
 }
 
-#[allow(static_mut_refs)]
+/// A lexer over the source buffer (len chars) with the given stacks, its
+/// records from `base`.
+unsafe fn lexer(len: u32, base: usize) -> Lx {
+    // a fresh original: 64 KB of memory, grown by its JS glue (whole pages)
+    // to hold __heap_base + 4 * (len + 1) bytes; its records start after the
+    // NUL terminator
+    let omem = ((O_SRC as u64 + 4 * (len as u64 + 1) + PAGE as u64 - 1) / PAGE as u64).max(1) * PAGE as u64;
+    let rlimit = base as u64 + omem.saturating_sub(O_SRC as u64 + 2 * (len as u64 + 1));
+    Lx {
+        src: SRC as *const u8,
+        len: len as i32,
+        end: len as i32 - 1,
+        pos: -1,
+        last: EMPTY,
+        facade: true,
+        has_module_syntax: false,
+        last_slash_was_division: false,
+        next_brace_is_class: false,
+        has_error: false,
+        parse_error: 0,
+        depth: 0,
+        dyn_depth: 0,
+        import_head: 0,
+        import_head_last: 0,
+        last_export: 0,
+        base,
+        top: base,
+        limit: LIMIT,
+        omem,
+        rlimit: rlimit.min(usize::MAX as u64) as usize,
+    }
+}
+
 fn run(len: u32) -> i32 {
     unsafe {
-        let src = SRC.as_mut_ptr() as *mut u8;
-        // NUL terminator + zero padding
-        core::ptr::write_bytes(src.add(len as usize), 0, PAD);
-        IMPS.clear();
-        EXPS.clear();
+        let src = SRC as *mut u8;
+        // NUL terminator + zero padding (v128 stores: a memory.fill is a call
+        // out of wasm in V8; the zero is opaque so that LLVM does not turn the
+        // stores back into one)
+        let zero = opaque(i8x16_splat(0));
+        let mut i = 0usize;
+        while i < PAD {
+            v128_store(src.add(len as usize + i) as *mut v128, zero);
+            i += 16;
+        }
         // the slots written by the last parse are a prefix of the stack
         let tok = core::ptr::addr_of_mut!(OT_TOK) as *mut u8;
         let mut i = 0usize;
-        while i < OT_MAX as usize && *tok.add(i) != UNSET {
-            *tok.add(i) = UNSET;
-            i += 1;
+        while i < OT_MAX as usize && v128_any_true(v128_load(tok.add(i) as *const v128)) {
+            v128_store(tok.add(i) as *mut v128, zero);
+            i += 16;
         }
-        let mut lx = Lx {
-            src,
-            len: len as i32,
-            end: len as i32 - 1,
-            pos: -1,
-            last: EMPTY,
-            facade: true,
-            has_module_syntax: false,
-            last_slash_was_division: false,
-            next_brace_is_class: false,
-            has_error: false,
-            parse_error: 0,
-            oob: false,
-            depth: 0,
-            dyn_depth: 0,
-            first_import: NULL,
-            import_head: NULL,
-            import_head_last: NULL,
-            ot_tok: core::ptr::addr_of_mut!(OT_TOK) as *mut u8,
-            ot_pos: core::ptr::addr_of_mut!(OT_POS) as *mut i32,
-            dyn_stack: core::ptr::addr_of_mut!(DYN) as *mut i32,
-            imps: core::ptr::addr_of_mut!(IMPS),
-            exps: core::ptr::addr_of_mut!(EXPS),
-        };
+        // the records follow the source
+        let base = (SRC + len as usize + PAD + 7) & !7;
+        let mut lx = lexer(len, base);
         let ok = lx.parse();
+        LIMIT = lx.limit;
 
-        // analysis records the original writes after the source; beyond what
-        // its JS glue guarantees it may run out of memory and trap
-        let n = len as i64;
-        let analysis = IMPS.len() as i64 * ORIG_IMPORT_SIZE + EXPS.len() as i64 * ORIG_EXPORT_SIZE;
-        let mem = ORIG_INITIAL_MEMORY.max(ORIG_HEAP_BASE + 4 * (n + 1));
-        let overflow = ORIG_HEAP_BASE + 2 * (n + 1) + analysis > mem;
-        HDR[7] = lx.oob as i32 | (overflow as i32) << 1;
-
-        let status = if lx.oob || overflow {
-            2
-        } else if !ok {
-            1
-        } else {
-            0
-        };
+        let status = if ok { 0 } else { 1 };
         HDR[0] = status;
         HDR[1] = lx.parse_error;
         HDR[2] = lx.facade as i32;
         HDR[3] = lx.has_module_syntax as i32;
-        HDR[4] = 0;
-        HDR[5] = 0;
-        if status == 0 {
-            OUT.clear();
-            let mut k = lx.first_import;
-            let mut ni = 0;
-            while k != NULL {
-                let r = IMPS[k as usize];
-                // name: 0 none, 1 the literal's body verbatim (no escapes:
-                // then eval of the literal is its body), 3 eval the literal
-                let mut name = 0;
-                if r.safe != 0 {
-                    let (a, b) = if r.dynamic == D_STANDARD { (r.start, r.end) } else { (r.start + 1, r.end - 1) };
-                    name = if has_backslash(src, a, b) { 3 } else { 1 };
+        HDR[4] = base as i32;
+        HDR[5] = lx.top as i32;
+        if ok {
+            // how the JS side gets the import names
+            let mut a = base;
+            while a < lx.top {
+                let r = &mut *(a as *mut Imp);
+                if r.kind == K_EXPORT {
+                    a += core::mem::size_of::<Exp>();
+                    continue;
                 }
-                OUT.extend_from_slice(&[r.start, r.end, r.ss, r.se, r.dynamic, r.ai, r.ty, name]);
-                ni += 1;
-                k = r.next;
+                if r.name != 0 {
+                    let (s, e) = if r.dynamic == D_STANDARD { (r.start, r.end) } else { (r.start + 1, r.end - 1) };
+                    r.name = if has_backslash(src, s, e) { 3 } else { 1 };
+                }
+                a += core::mem::size_of::<Imp>();
             }
-            for r in EXPS.iter() {
-                OUT.extend_from_slice(&[r.start, r.end, r.ls, r.le]);
-            }
-            HDR[4] = ni;
-            HDR[5] = EXPS.len() as i32;
-            HDR[6] = OUT.as_ptr() as i32;
         }
         status
     }
@@ -2064,16 +2293,9 @@ pub extern "C" fn parse8(len: u32) -> i32 {
 
 /// Lex a string of `len` UTF-16 units stored as `n` bytes of UTF-8.
 #[no_mangle]
-#[allow(static_mut_refs)]
 pub extern "C" fn parse_utf8(len: u32, n: u32) -> i32 {
-    unsafe {
-        let units = squash(SRC.as_mut_ptr() as *mut u8, n as usize);
-        if units != len as usize {
-            HDR[0] = 2;
-            HDR[7] = 4;
-            return 2;
-        }
-    }
+    // (the units are len: TextEncoder writes a lone surrogate as U+FFFD, one unit)
+    unsafe { squash(SRC as *mut u8, n as usize) };
     run(len)
 }
 
@@ -2084,40 +2306,28 @@ fn opaque(v: v128) -> v128 {
     unsafe { core::ptr::read_volatile(&v) }
 }
 
-/// UTF-16 (n units, little endian, as written by Node's ucs2Write or the
-/// charCodeAt copy) to one byte per unit, in place. The lexer only tells
-/// apart ASCII chars and U+00A0; every other unit behaves like 0x80, so
-/// Latin-1 stays as it is and everything above becomes 0xff.
+/// UTF-16 (n units, little endian, as written by Node's ucs2Write) to one
+/// byte per unit, in place. The lexer only tells apart ASCII chars and
+/// U+00A0; every other unit behaves like 0x80, so Latin-1 stays as it is and
+/// everything above becomes 0xff. 32 units at a time, the last block past
+/// the end (into the buffer's padding, which run() then clears).
 unsafe fn narrow(p: *mut u8, n: usize) {
     let ff = opaque(u16x8_splat(0xff));
     let mut i = 0usize;
-    while i + 32 <= n {
+    while i < n {
         let a = u16x8_min(v128_load(p.add(2 * i) as *const v128), ff);
         let b = u16x8_min(v128_load(p.add(2 * i + 16) as *const v128), ff);
         let c = u16x8_min(v128_load(p.add(2 * i + 32) as *const v128), ff);
         let d = u16x8_min(v128_load(p.add(2 * i + 48) as *const v128), ff);
-        // (even bytes: the low halves; a plain pack would add clamping)
-        v128_store(
-            p.add(i) as *mut v128,
-            i8x16_shuffle::<0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30>(a, b),
-        );
-        v128_store(
-            p.add(i + 16) as *mut v128,
-            i8x16_shuffle::<0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30>(c, d),
-        );
+        v128_store(p.add(i) as *mut v128, u8x16_narrow_i16x8(a, b));
+        v128_store(p.add(i + 16) as *mut v128, u8x16_narrow_i16x8(c, d));
         i += 32;
-    }
-    while i < n {
-        let c = core::ptr::read_unaligned(p.add(2 * i) as *const u16);
-        *p.add(i) = if c > 0xff { 0xff } else { c as u8 };
-        i += 1;
     }
 }
 
 /// Lex a string of `len` UTF-16 units stored as 2 * len bytes (UTF-16LE).
 #[no_mangle]
-#[allow(static_mut_refs)]
 pub extern "C" fn parse16(len: u32) -> i32 {
-    unsafe { narrow(SRC.as_mut_ptr() as *mut u8, len as usize) };
+    unsafe { narrow(SRC as *mut u8, len as usize) };
     run(len)
 }

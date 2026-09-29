@@ -1,16 +1,18 @@
 // Port of internal/js_parser/js_parser.go lines 10393-13276: visitAndAppendStmt
 // (every statement kind), minifySwitchStmt, visitClass, visitArgs, define
 // instantiation, equality/typeof warnings and maybeRewritePropertyAccess.
-//
-// Fast-path notes (CONVENTIONS.md section 5):
-// - Branches guarded by minifySyntax / keepNames / mangleProps are dropped and
-//   marked "(minify only)" / "(keepNames only)" / "(mangleProps only)".
-// - Lowering branches guarded by p.options.unsupportedJSFeatures.Has(...) are
-//   dropped and marked "(lowering only)". The object-rest lowering helpers
-//   (lowerObjectRestInDecls / InForLoopInit / InCatchBinding) return
-//   immediately when ObjectRestSpread is supported, so their calls are dropped.
-// - Bundle-only branches (ModeBundle) are dropped where noted "(bundle only)".
-import { bail } from "./bail.mjs";
+import { goQuote } from "./gostd.mjs";
+import { GoPanic } from "./gopanic.mjs";
+import {
+  jsFeatureHas,
+  AsyncAwait,
+  AsyncGenerator,
+  ExportStarAs,
+  ForAwait,
+  TopLevelAwait,
+  UnicodeEscapes,
+  Using,
+} from "./compat.mjs";
 import {
   mkRange,
   RANGE_ZERO,
@@ -20,12 +22,19 @@ import {
   MsgID_JS_EqualsNegativeZero,
   MsgID_JS_EqualsNaN,
   MsgID_JS_EqualsNewObject,
+  MsgID_JS_AssertTypeJSON,
+  MsgData,
+  LineColumnTracker,
 } from "./logger.mjs";
-import { stringArraysEqual } from "./helpers.mjs";
+import { stringArraysEqual, containsNonBMPCodePoint } from "./helpers.mjs";
 import {
   InvalidRef,
   LocRef,
   refInner,
+  SymbolImport,
+  NamespaceAlias,
+  ImportItemGenerated,
+  AssertTypeJSON,
   SymbolUnbound,
   SymbolOther,
   SymbolLabel,
@@ -33,6 +42,9 @@ import {
   SymbolClassInComputedPropertyKey,
   PrivateSymbolMustBeLowered,
   RemoveOverwrittenFunctionDeclaration,
+  DidKeepName,
+  IsEmptyFunction,
+  IsIdentityFunction,
   symbolKindIsUnboundOrInjected,
 } from "./ast.mjs";
 import {
@@ -45,6 +57,8 @@ import {
   Decorator,
   ClauseItem,
   Case,
+  Property,
+  ClassStaticBlock,
   ScopeMember,
   TSNamespaceMember,
   TSNamespaceMemberEnumNumber,
@@ -60,6 +74,7 @@ import {
   EIdentifier,
   EImportMeta,
   EIndex,
+  ENameOfSymbol,
   ENumber,
   EPrivateIdentifier,
   EString,
@@ -68,18 +83,26 @@ import {
   EThisShared,
   EUndefinedShared,
   SBlock,
+  SEmptyShared,
   SExportClause,
   SExpr,
+  SFor,
   SIf,
+  SImport,
   SLabel,
   SLocal,
   SReturn,
+  ConstValueNone,
+  SymbolUse,
+  exprToConstValue,
   AssignTargetNone,
   BinOpStrictEq,
   UnOpTypeof,
   UnOpVoid,
   OptionalChainNone,
   LocalVar,
+  LocalLet,
+  LocalConst,
   LocalUsing,
   LocalAwaitUsing,
   ScopeBlock,
@@ -94,6 +117,7 @@ import {
   ScopeClassStaticInit,
   ImplicitStrictModeClass,
   PropertyClassStaticBlock,
+  PropertySpread,
   PropertyIsComputed,
   PropertyIsStatic,
   propertyKindIsMethodDefinition,
@@ -107,11 +131,13 @@ import {
   E_DOT,
   E_FUNCTION,
   E_IDENTIFIER,
+  E_IMPORT_IDENTIFIER,
   E_IF,
   E_IMPORT_META,
   E_INDEX,
   E_INLINED_ENUM,
   E_MISSING,
+  E_NAME_OF_SYMBOL,
   E_NULL,
   E_NUMBER,
   E_OBJECT,
@@ -158,7 +184,12 @@ import {
   TS_NAMESPACE_MEMBER_ENUM_STRING,
   TS_NAMESPACE_MEMBER_NAMESPACE,
 } from "./js_ast.mjs";
-import { ModeBundle, formatKeepESMImportExportSyntax } from "./config.mjs";
+import {
+  ModeBundle,
+  ModePassThrough,
+  formatKeepESMImportExportSyntax,
+  prettyPrintTargetEnvironment,
+} from "./config.mjs";
 import {
   bindingOpts,
   visitFnOpts,
@@ -194,7 +225,12 @@ import {
   joinWithComma,
   toBooleanWithSideEffects,
   knownPrimitiveType,
+  PrimitiveUnknown,
+  PrimitiveNull,
+  PrimitiveUndefined,
   PrimitiveString,
+  NoSideEffects,
+  stringToEquivalentNumberValue,
   isPrimitiveLiteral,
   checkEqualityIfNoSideEffects,
   StrictEquality,
@@ -203,18 +239,16 @@ import {
 } from "./js_ast_helpers.mjs";
 import { isIdentifier } from "./js_ident.mjs";
 import { rangeOfIdentifier, StrictModeReservedWords } from "./js_lexer.mjs";
-import { analyzeSwitchCasesForLiveness, caseBodyCouldHaveFallThrough, stmtsToSingleStmt } from "./js_parser_visit_stmt.mjs";
-
-// p.markSyntaxFeature(compat.TopLevelAwait, r) specialised for the fast path
-// (UnsupportedJSFeatures == 0): the only possible effect is the error about
-// top-level await with a non-ESM output format.
-function markTopLevelAwaitSyntaxFeature(p, r) {
-  if (!formatKeepESMImportExportSyntax(p.options.outputFormat)) {
-    // "Top-level await is currently not supported with the %q output format"
-    p.log.addError();
-  }
-  return false;
-}
+import {
+  analyzeSwitchCasesForLiveness,
+  caseBodyCouldHaveFallThrough,
+  stmtsToSingleStmt,
+  stmtCaresAboutScope,
+  stmtsCareAboutScope,
+  shouldKeepStmtInDeadControlFlow,
+  mangleFor,
+  appendIfOrLabelBodyPreservingScope,
+} from "./js_parser_visit_stmt.mjs";
 
 // Go: "member := exportedMembers[name]" copies the struct (zero value if the
 // key is missing). Modifying the copy must not affect other holders.
@@ -294,8 +328,8 @@ export const visitStmt2Methods = {
             // those likely correspond to type-only exports. But report exports of
             // non-local symbols as errors in JavaScript.
             if (!p.options.ts.parse) {
-              // "%q is not declared in this file"
-              p.log.addError();
+              const r = rangeOfIdentifier(p.source, item.name.loc);
+              p.log.addError(p.tracker, r, goQuote(name) + " is not declared in this file");
             }
             continue;
           }
@@ -339,8 +373,25 @@ export const visitStmt2Methods = {
         p.currentScope.generated.push(s.namespaceRef);
         p.recordDeclaredSymbol(s.namespaceRef);
 
-        // "export * as ns from 'path'" -> "import * as ns" + "export {ns}"
-        // (lowering only: compat.ExportStarAs is always supported)
+        // "export * as ns from 'path'"
+        if (s.alias !== null) {
+          // "import * as ns from 'path'"
+          // "export {ns}"
+          if (jsFeatureHas(p.options.unsupportedJSFeatures, ExportStarAs)) {
+            p.recordUsage(s.namespaceRef);
+            stmts.push(
+              new Stmt(new SImport(null, null, s.alias.loc, s.namespaceRef, s.importRecordIndex), stmt.loc),
+              new Stmt(
+                new SExportClause(
+                  [new ClauseItem(s.alias.originalName, s.alias.originalName, s.alias.loc, new LocRef(s.alias.loc, s.namespaceRef))],
+                  true,
+                ),
+                stmt.loc,
+              ),
+            );
+            return stmts;
+          }
+        }
         break;
       }
 
@@ -383,14 +434,30 @@ export const visitStmt2Methods = {
             break;
           }
 
-          case S_FUNCTION:
-            // (keepNames only) generate a name if there is none
+          case S_FUNCTION: {
+            // If we need to preserve the name but there is no name, generate a name
+            let name = "";
+            if (p.options.keepNames) {
+              if (s2.fn.name === null) {
+                const clone = new LocRef(s.defaultName.loc, s.defaultName.ref);
+                s2.fn.name = clone;
+                name = "default";
+              } else {
+                name = p.symbols[refInner(s2.fn.name.ref)].originalName;
+              }
+            }
 
             p.visitFn(s2.fn, s2.fn.openParenLoc, new visitFnOpts());
             stmts.push(stmt);
 
-            // (keepNames only) optionally preserve the name
+            // Optionally preserve the name
+            if (p.options.keepNames) {
+              p.symbols[refInner(s2.fn.name.ref)].flags |= DidKeepName;
+              const fn = new Expr(new EIdentifier(s2.fn.name.ref), s2.fn.name.loc);
+              stmts.push(p.keepClassOrFnSymbolName(s2.fn.name.loc, fn, name));
+            }
             break;
+          }
 
           case S_CLASS: {
             const result = p.visitClass(s.value.loc, s2.class, s.defaultName.ref, "default");
@@ -414,7 +481,7 @@ export const visitStmt2Methods = {
           }
 
           default:
-            bail(); // panic("Internal error")
+            throw new GoPanic("Internal error");
         }
 
         // Use a more friendly name than "default" now that "--keep-names" has
@@ -445,8 +512,8 @@ export const visitStmt2Methods = {
           const ref = $d195[0];
           s.label = new LocRef(s.label.loc, ref);
         } else if (!p.fnOrArrowDataVisit.isInsideLoop && !p.fnOrArrowDataVisit.isInsideSwitch) {
-          // "Cannot use \"break\" here:"
-          p.log.addError();
+          const r = rangeOfIdentifier(p.source, stmt.loc);
+          p.log.addError(p.tracker, r, 'Cannot use "break" here:');
         }
         break;
 
@@ -457,12 +524,12 @@ export const visitStmt2Methods = {
           const ref = $d196[0], isLoop = $d196[1], ok = $d196[2];
           s.label = new LocRef(s.label.loc, ref);
           if (ok && !isLoop) {
-            // "Cannot continue to label \"%s\""
-            p.log.addError();
+            const r = rangeOfIdentifier(p.source, s.label.loc);
+            p.log.addError(p.tracker, r, 'Cannot continue to label "' + name + '"');
           }
         } else if (!p.fnOrArrowDataVisit.isInsideLoop) {
-          // "Cannot use \"continue\" here:"
-          p.log.addError();
+          const r = rangeOfIdentifier(p.source, stmt.loc);
+          p.log.addError(p.tracker, r, 'Cannot use "continue" here:');
         }
         break;
 
@@ -485,8 +552,9 @@ export const visitStmt2Methods = {
         // Duplicate labels are an error
         for (let scope = p.currentScope.parent; scope !== null; scope = scope.parent) {
           if (scope.label.ref !== InvalidRef && name === p.symbols[refInner(scope.label.ref)].originalName) {
-            // "Duplicate label %q"
-            p.log.addErrorWithNotes();
+            p.log.addErrorWithNotes(p.tracker, rangeOfIdentifier(p.source, s.name.loc), "Duplicate label " + goQuote(name), [
+              p.tracker.msgData(rangeOfIdentifier(p.source, scope.label.loc), "The original label " + goQuote(name) + " is here:"),
+            ]);
             break;
           }
           if (scope.kind === ScopeFunctionBody) {
@@ -522,7 +590,18 @@ export const visitStmt2Methods = {
           return stmts;
         }
 
-        // (minify only) "x: break x" and unused label removal
+        if (p.options.minifySyntax) {
+          // Optimize "x: break x" which some people apparently write by hand
+          const child = s.stmt.data;
+          if (child.k === S_BREAK && child.label !== null && child.label.ref === s.name.ref) {
+            return stmts;
+          }
+
+          // Remove the label if it's not necessary
+          if (p.symbols[refInner(ref)].useCountEstimate === 0) {
+            return appendIfOrLabelBodyPreservingScope(stmts, s.stmt);
+          }
+        }
 
         // Handle "for await" that has been lowered by moving this label inside the "try"
         const try_ = s.stmt.data;
@@ -540,12 +619,14 @@ export const visitStmt2Methods = {
       case S_LOCAL: {
         // Silently remove unsupported top-level "await" in dead code branches
         if (s.kind === LocalAwaitUsing && p.fnOrArrowDataVisit.isOutsideFnOrArrow) {
-          // (compat.TopLevelAwait is always supported in the fast path)
-          if (p.isControlFlowDead && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+          if (
+            p.isControlFlowDead &&
+            (jsFeatureHas(p.options.unsupportedJSFeatures, TopLevelAwait) || !formatKeepESMImportExportSyntax(p.options.outputFormat))
+          ) {
             s.kind = LocalUsing;
           } else {
             p.liveTopLevelAwaitKeyword = mkRange(stmt.loc, 5);
-            markTopLevelAwaitSyntaxFeature(p, mkRange(stmt.loc, 5));
+            p.markSyntaxFeature(TopLevelAwait, mkRange(stmt.loc, 5));
           }
         }
 
@@ -574,12 +655,62 @@ export const visitStmt2Methods = {
 
             p.shouldFoldTypeScriptConstantExpressions = oldShouldFoldTypeScriptConstantExpressions;
 
-            // (minify only) "let a = undefined;" => "let a;"
+            // Initializing to undefined is implicit, but be careful to not
+            // accidentally cause a syntax error or behavior change by removing
+            // the value
+            //
+            // Good:
+            //   "let a = undefined;" => "let a;"
+            //
+            // Bad (a syntax error):
+            //   "let {} = undefined;" => "let {};"
+            //
+            // Bad (a behavior change):
+            //   "a = 123; var a = undefined;" => "a = 123; var a;"
+            //
+            if (p.options.minifySyntax && s.kind === LocalLet) {
+              if (d.binding.data.k === B_IDENTIFIER) {
+                if (d.valueOrNil.data.k === E_UNDEFINED) {
+                  d.valueOrNil = null;
+                }
+              }
+            }
 
-            // (Yarn PnP only) decodeHydrateRuntimeStateYarnPnP string locals
+            // Yarn's PnP data may be stored in a variable: https://github.com/yarnpkg/berry/pull/4320
+            if (p.options.decodeHydrateRuntimeStateYarnPnP) {
+              const str = d.valueOrNil !== null ? d.valueOrNil.data : null;
+              if (str !== null && str.k === E_STRING) {
+                const id = d.binding.data;
+                if (id.k === B_IDENTIFIER) {
+                  p.stringLocalsForYarnPnP.set(id.ref, { value: str.value, loc: d.valueOrNil.loc });
+                }
+              }
+            }
           }
 
-          // (minify only) attempt to continue the const local prefix
+          // Attempt to continue the const local prefix
+          if (p.options.minifySyntax && !p.currentScope.isAfterConstLocalPrefix) {
+            const id = d.binding.data;
+            if (id.k === B_IDENTIFIER) {
+              if (s.kind === LocalConst && d.valueOrNil !== null) {
+                const value = exprToConstValue(d.valueOrNil);
+                if (value.kind !== ConstValueNone) {
+                  if (p.constValues === null) {
+                    p.constValues = new Map();
+                  }
+                  p.constValues.set(id.ref, value);
+                  continue;
+                }
+              }
+
+              if (d.valueOrNil !== null && !isSafeForConstLocalPrefix(d.valueOrNil)) {
+                p.currentScope.isAfterConstLocalPrefix = true;
+              }
+            } else {
+              // A non-identifier binding ends the const local prefix
+              p.currentScope.isAfterConstLocalPrefix = true;
+            }
+          }
         }
 
         // Handle being exported inside a namespace
@@ -611,9 +742,22 @@ export const visitStmt2Methods = {
           return stmts;
         }
 
-        // (lowering only) s.decls = p.lowerObjectRestInDecls(s.decls) is a no-op
+        s.decls = p.lowerObjectRestInDecls(s.decls);
 
-        // (minify only) "using" initialized to null/undefined => "const"
+        // Optimization: Avoid unnecessary "using" machinery by changing ones
+        // initialized to "null" or "undefined" into a normal variable. Note that
+        // "await using" still needs the "await", so we can't do it for those.
+        if (p.options.minifySyntax && s.kind === LocalUsing) {
+          s.kind = LocalConst;
+          for (let i = 0, a = s.decls; i < a.length; i++) {
+            const decl = a[i];
+            const t = decl.valueOrNil === null ? PrimitiveUnknown : knownPrimitiveType(decl.valueOrNil.data);
+            if (t !== PrimitiveNull && t !== PrimitiveUndefined) {
+              s.kind = LocalUsing;
+              break;
+            }
+          }
+        }
 
         s.kind = p.selectLocalKind(s.kind);
 
@@ -654,8 +798,8 @@ export const visitStmt2Methods = {
         // Forbid top-level return inside modules with ECMAScript syntax
         if (p.fnOrArrowDataVisit.isOutsideFnOrArrow) {
           if (p.isFileConsideredESM) {
-            // "Top-level return cannot be used inside an ECMAScript module"
-            p.log.addErrorWithNotes();
+            const notes = p.whyESModule()[1];
+            p.log.addErrorWithNotes(p.tracker, rangeOfIdentifier(p.source, stmt.loc), "Top-level return cannot be used inside an ECMAScript module", notes);
           } else {
             p.hasTopLevelReturn = true;
           }
@@ -664,7 +808,14 @@ export const visitStmt2Methods = {
         if (s.valueOrNil !== null) {
           s.valueOrNil = p.visitExpr(s.valueOrNil);
 
-          // (minify only) "return undefined" => "return"
+          // Returning undefined is implicit except when inside an async generator
+          // function, where "return undefined" behaves like "return await undefined"
+          // but just "return" has no "await".
+          if (p.options.minifySyntax && (!p.fnOrArrowDataVisit.isAsync || !p.fnOrArrowDataVisit.isGenerator)) {
+            if (s.valueOrNil.data.k === E_UNDEFINED) {
+              s.valueOrNil = null;
+            }
+          }
         }
         break;
 
@@ -682,7 +833,15 @@ export const visitStmt2Methods = {
 
         p.popScope();
 
-        // (minify only) unwrap single-statement blocks / trim empty blocks
+        if (p.options.minifySyntax) {
+          if (s.stmts.length === 1 && !stmtCaresAboutScope(s.stmts[0])) {
+            // Unwrap blocks containing a single statement
+            stmt = s.stmts[0];
+          } else if (s.stmts.length === 0) {
+            // Trim empty blocks
+            stmt = new Stmt(SEmptyShared, stmt.loc);
+          }
+        }
         break;
 
       case S_WITH:
@@ -697,20 +856,38 @@ export const visitStmt2Methods = {
         s.test = p.visitExpr(s.test);
         s.body = p.visitLoopBody(s.body);
 
-        // (minify only) "while (a) {}" => "for (;a;) {}"
+        if (p.options.minifySyntax) {
+          s.test = p.astHelpers.simplifyBooleanExpr(s.test);
+
+          // A true value is implied
+          let testOrNil = s.test;
+          const $b = toBooleanWithSideEffects(s.test.data);
+          if ($b[2] && $b[0] && $b[1] === NoSideEffects) {
+            testOrNil = null;
+          }
+
+          // "while (a) {}" => "for (;a;) {}"
+          const forS = new SFor(null, testOrNil, null, s.body, s.isSingleLineBody);
+          mangleFor(forS);
+          stmt = new Stmt(forS, stmt.loc);
+        }
         break;
 
       case S_DO_WHILE:
         s.body = p.visitLoopBody(s.body);
         s.test = p.visitExpr(s.test);
 
-        // (minify only) simplify the test
+        if (p.options.minifySyntax) {
+          s.test = p.astHelpers.simplifyBooleanExpr(s.test);
+        }
         break;
 
       case S_IF: {
         s.test = p.visitExpr(s.test);
 
-        // (minify only) simplify the test
+        if (p.options.minifySyntax) {
+          s.test = p.astHelpers.simplifyBooleanExpr(s.test);
+        }
 
         // Fold constants
         const $d199 = toBooleanWithSideEffects(s.test.data);
@@ -738,10 +915,17 @@ export const visitStmt2Methods = {
             s.noOrNil = p.visitSingleStmt(s.noOrNil, stmtsNormal);
           }
 
-          // (minify only) trim unnecessary "else" clauses
+          // Trim unnecessary "else" clauses
+          if (p.options.minifySyntax) {
+            if (s.noOrNil.data.k === S_EMPTY) {
+              s.noOrNil = null;
+            }
+          }
         }
 
-        // (minify only) return p.mangleIf(stmts, stmt.loc, s)
+        if (p.options.minifySyntax) {
+          return p.mangleIf(stmts, stmt.loc, s);
+        }
         break;
       }
 
@@ -754,7 +938,15 @@ export const visitStmt2Methods = {
         if (s.testOrNil !== null) {
           s.testOrNil = p.visitExpr(s.testOrNil);
 
-          // (minify only) simplify the test / drop an always-true test
+          if (p.options.minifySyntax) {
+            s.testOrNil = p.astHelpers.simplifyBooleanExpr(s.testOrNil);
+
+            // A true value is implied
+            const $b = toBooleanWithSideEffects(s.testOrNil.data);
+            if ($b[2] && $b[0] && $b[1] === NoSideEffects) {
+              s.testOrNil = null;
+            }
+          }
         }
 
         if (s.updateOrNil !== null) {
@@ -781,7 +973,9 @@ export const visitStmt2Methods = {
 
         p.popScope();
 
-        // (minify only) mangleFor(s)
+        if (p.options.minifySyntax) {
+          mangleFor(s);
+        }
         break;
       }
 
@@ -820,19 +1014,21 @@ export const visitStmt2Methods = {
 
         p.popScope();
 
-        // (lowering only) p.lowerObjectRestInForLoopInit(s.init, &s.body) is a no-op
+        p.lowerObjectRestInForLoopInit(s.init, s);
         break;
       }
 
       case S_FOR_OF: {
         // Silently remove unsupported top-level "await" in dead code branches
         if (s.await.len > 0 && p.fnOrArrowDataVisit.isOutsideFnOrArrow) {
-          // (compat.TopLevelAwait is always supported in the fast path)
-          if (p.isControlFlowDead && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+          if (
+            p.isControlFlowDead &&
+            (jsFeatureHas(p.options.unsupportedJSFeatures, TopLevelAwait) || !formatKeepESMImportExportSyntax(p.options.outputFormat))
+          ) {
             s.await = RANGE_ZERO;
           } else {
             p.liveTopLevelAwaitKeyword = s.await;
-            markTopLevelAwaitSyntaxFeature(p, s.await);
+            p.markSyntaxFeature(TopLevelAwait, s.await);
           }
         }
 
@@ -855,27 +1051,43 @@ export const visitStmt2Methods = {
         // Handle "for (using x of y)" and "for (await using x of y)"
         const local = s.init.data;
         if (local.k === S_LOCAL) {
-          // (lowering only) "using" with compat.Using unsupported
-          if (local.kind === LocalAwaitUsing) {
+          const unsupported = p.options.unsupportedJSFeatures;
+          if (local.kind === LocalUsing && jsFeatureHas(unsupported, Using)) {
+            p.lowerUsingDeclarationInForOf(s.init.loc, local, s);
+          } else if (local.kind === LocalAwaitUsing) {
             if (p.fnOrArrowDataVisit.isOutsideFnOrArrow) {
-              if (p.isControlFlowDead && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+              if (p.isControlFlowDead && (jsFeatureHas(unsupported, TopLevelAwait) || !formatKeepESMImportExportSyntax(p.options.outputFormat))) {
                 // Silently remove unsupported top-level "await" in dead code branches
                 local.kind = LocalUsing;
               } else {
                 p.liveTopLevelAwaitKeyword = mkRange(s.init.loc, 5);
-                markTopLevelAwaitSyntaxFeature(p, p.liveTopLevelAwaitKeyword);
+                p.markSyntaxFeature(TopLevelAwait, p.liveTopLevelAwaitKeyword);
               }
-              // (lowering only) p.lowerUsingDeclarationInForOf(...)
+              if (jsFeatureHas(unsupported, Using)) {
+                p.lowerUsingDeclarationInForOf(s.init.loc, local, s);
+              }
+            } else if (
+              jsFeatureHas(unsupported, Using) ||
+              jsFeatureHas(unsupported, AsyncAwait) ||
+              (jsFeatureHas(unsupported, AsyncGenerator) && p.fnOrArrowDataVisit.isGenerator)
+            ) {
+              p.lowerUsingDeclarationInForOf(s.init.loc, local, s);
             }
-            // (lowering only) Using / AsyncAwait / AsyncGenerator lowering
           }
         }
 
         p.popScope();
 
-        // (lowering only) p.lowerObjectRestInForLoopInit(s.init, &s.body) is a no-op
+        p.lowerObjectRestInForLoopInit(s.init, s);
 
-        // (lowering only) "for await" lowering via p.lowerForAwaitLoop
+        // Lower "for await" if it's unsupported if it's in a lowered async generator
+        if (
+          s.await.len > 0 &&
+          (jsFeatureHas(p.options.unsupportedJSFeatures, ForAwait) ||
+            (jsFeatureHas(p.options.unsupportedJSFeatures, AsyncGenerator) && p.fnOrArrowDataVisit.isGenerator))
+        ) {
+          return p.lowerForAwaitLoop(stmt.loc, s, stmts);
+        }
         break;
       }
 
@@ -910,7 +1122,7 @@ export const visitStmt2Methods = {
           s.catch.block.stmts = p.visitStmts(s.catch.block.stmts, stmtsNormal);
           p.popScope();
 
-          // (lowering only) p.lowerObjectRestInCatchBinding(s.catch) is a no-op
+          p.lowerObjectRestInCatchBinding(s.catch);
           p.popScope();
 
           p.isControlFlowDead = old;
@@ -922,7 +1134,52 @@ export const visitStmt2Methods = {
           p.popScope();
         }
 
-        // (minify only) drop/unwrap empty try, catch and finally blocks
+        if (p.options.minifySyntax) {
+          if (s.block.stmts.length === 0) {
+            // Try to drop the whole thing if the try body is empty
+            let keepCatch = false;
+
+            // Certain "catch" blocks need to be preserved:
+            //
+            //   try {} catch { let foo } // Can be removed
+            //   try {} catch { var foo } // Must be kept
+            //
+            if (s.catch !== null) {
+              for (let i = 0, a = s.catch.block.stmts; i < a.length; i++) {
+                if (shouldKeepStmtInDeadControlFlow(a[i])) {
+                  keepCatch = true;
+                  break;
+                }
+              }
+            }
+
+            // Make sure to preserve the "finally" block if present
+            if (!keepCatch) {
+              if (s.finally === null) {
+                return stmts;
+              }
+              if (!stmtsCareAboutScope(s.finally.block.stmts)) {
+                for (let i = 0, a = s.finally.block.stmts; i < a.length; i++) stmts.push(a[i]);
+                return stmts;
+              }
+              const block = s.finally.block.clone(); // Go copies the SBlock struct
+              stmt = new Stmt(block, s.finally.loc);
+            }
+          } else if (s.finally !== null && s.finally.block.stmts.length === 0) {
+            if (s.catch !== null) {
+              // Just remove the "finally" block if there's a "catch"
+              s.finally = null;
+            } else {
+              // Otherwise, try to unwrap the whole "try" statement
+              if (!stmtsCareAboutScope(s.block.stmts)) {
+                for (let i = 0, a = s.block.stmts; i < a.length; i++) stmts.push(a[i]);
+                return stmts;
+              }
+              const block = s.block.clone(); // Go copies the SBlock struct
+              stmt = new Stmt(block, s.finally.loc);
+            }
+          }
+        }
         break;
 
       case S_SWITCH: {
@@ -971,7 +1228,14 @@ export const visitStmt2Methods = {
           c.body = p.visitStmts(c.body, stmtsNormal);
           p.isControlFlowDead = old;
 
-          // (minify only) filter out this case if it's known to be dead and empty
+          // Filter out this case when minifying if it's known to be dead. Visiting
+          // the body above should already have removed any statements that can be
+          // removed safely, so if the body isn't empty then that means it contains
+          // some statements that can't be removed safely (e.g. a hoisted "var").
+          // So don't remove this case if the body isn't empty.
+          if (p.options.minifySyntax && isAlwaysDead && c.body.length === 0) {
+            continue;
+          }
 
           // Make sure the assignment to the body above is preserved
           s.cases[end] = c;
@@ -982,8 +1246,17 @@ export const visitStmt2Methods = {
         p.fnOrArrowDataVisit.isInsideSwitch = oldIsInsideSwitch;
         p.popScope();
 
-        // (minify only) unwrap switch statements in dead code
-        // (minify only) return p.minifySwitchStmt(stmt.loc, s, stmts)
+        // Unwrap switch statements in dead code
+        if (p.options.minifySyntax && p.isControlFlowDead) {
+          for (let i = 0, a = s.cases; i < a.length; i++) {
+            for (let j = 0, b = a[i].body; j < b.length; j++) stmts.push(b[j]);
+          }
+          return stmts;
+        }
+
+        if (p.options.minifySyntax) {
+          return p.minifySwitchStmt(stmt.loc, s, stmts);
+        }
         break;
       }
 
@@ -995,7 +1268,35 @@ export const visitStmt2Methods = {
           return stmts;
         }
 
-        // (minify only) mark empty functions and identity functions
+        if (p.options.minifySyntax && !s.fn.isGenerator && !s.fn.isAsync && !s.fn.hasRestArg && s.fn.name !== null) {
+          if (s.fn.body.block.stmts.length === 0) {
+            // Mark if this function is an empty function
+            let hasSideEffectFreeArguments = true;
+            for (let i = 0, a = s.fn.args; i < a.length; i++) {
+              if (a[i].binding.data.k !== B_IDENTIFIER) {
+                hasSideEffectFreeArguments = false;
+                break;
+              }
+            }
+            if (hasSideEffectFreeArguments) {
+              p.symbols[refInner(s.fn.name.ref)].flags |= IsEmptyFunction;
+            }
+          } else if (s.fn.args.length === 1 && s.fn.body.block.stmts.length === 1) {
+            // Mark if this function is an identity function
+            const arg = s.fn.args[0];
+            if (arg.defaultOrNil === null) {
+              const id = arg.binding.data;
+              if (id.k === B_IDENTIFIER) {
+                const ret = s.fn.body.block.stmts[0].data;
+                if (ret.k === S_RETURN) {
+                  if (ret.valueOrNil !== null && ret.valueOrNil.data.k === E_IDENTIFIER && id.ref === ret.valueOrNil.data.ref) {
+                    p.symbols[refInner(s.fn.name.ref)].flags |= IsIdentityFunction;
+                  }
+                }
+              }
+            }
+          }
+        }
 
         // Handle exporting this function from a namespace
         if (s.isExport && p.enclosingNamespaceArgRef !== null) {
@@ -1018,7 +1319,13 @@ export const visitStmt2Methods = {
           stmts.push(stmt);
         }
 
-        // (keepNames only) optionally preserve the name
+        // Optionally preserve the name
+        if (p.options.keepNames) {
+          const symbol = p.symbols[refInner(s.fn.name.ref)];
+          symbol.flags |= DidKeepName;
+          const fn = new Expr(new EIdentifier(s.fn.name.ref), s.fn.name.loc);
+          stmts.push(p.keepClassOrFnSymbolName(s.fn.name.loc, fn, symbol.originalName));
+        }
         return stmts;
       }
 
@@ -1181,13 +1488,16 @@ export const visitStmt2Methods = {
             valueOrNil = new Expr(EUndefinedShared, value.loc);
           }
 
-          // (minify only) "Enum.Name = value" when the name is an identifier
-
-          // "Enum['Name'] = value"
-          assignTarget = assign(
-            new Expr(new EIndex(new Expr(new EIdentifier(s.arg), value.loc), new Expr(new EString(value.name), value.loc)), value.loc),
-            valueOrNil,
-          );
+          if (p.options.minifySyntax && isIdentifier(name)) {
+            // "Enum.Name = value"
+            assignTarget = assign(new Expr(new EDot(new Expr(new EIdentifier(s.arg), value.loc), name, value.loc), value.loc), valueOrNil);
+          } else {
+            // "Enum['Name'] = value"
+            assignTarget = assign(
+              new Expr(new EIndex(new Expr(new EIdentifier(s.arg), value.loc), new Expr(new EString(value.name), value.loc)), value.loc),
+              valueOrNil,
+            );
+          }
           p.recordUsage(s.arg);
 
           // String-valued enums do not form a two-way map
@@ -1271,15 +1581,14 @@ export const visitStmt2Methods = {
       }
 
       default:
-        bail(); // panic("Internal error")
+        throw new GoPanic("Internal error");
     }
 
     stmts.push(stmt);
     return stmts;
   },
 
-  // Only called when minifySyntax is enabled (never in the fast path), but
-  // ported for completeness.
+  // Only called when minifySyntax is enabled
   minifySwitchStmt(loc, s, stmts) {
     const p = this;
 
@@ -1788,7 +2097,9 @@ export const visitStmt2Methods = {
 
     if (class_.name !== null) {
       p.recordDeclaredSymbol(class_.name.ref);
-      // (keepNames only) nameToKeep = the class name
+      if (p.options.keepNames) {
+        nameToKeep = p.symbols[refInner(class_.name.ref)].originalName;
+      }
     }
 
     // Replace "this" with a reference to the class inside static field
@@ -1937,7 +2248,7 @@ export const visitStmt2Methods = {
         }
 
         const $d209 = p.visitExprInOut(property.key, new exprIn(false, false, false, false, true));
-        const key = $d209[0];
+        let key = $d209[0];
         property.key = key;
 
         // Re-allow using the class name after visiting a computed key
@@ -1945,7 +2256,55 @@ export const visitStmt2Methods = {
           p.symbols[refInner(result.innerClassNameRef)].kind = SymbolConst;
         }
 
-        // (minify only) inline enum keys / "class { [123] }" => "class { 123 }"
+        if (p.options.minifySyntax) {
+          const inlined = key.data;
+          if (inlined.k === E_INLINED_ENUM) {
+            switch (inlined.value.data.k) {
+              case E_STRING:
+              case E_NUMBER:
+                key = new Expr(inlined.value.data, key.loc);
+                property.key = new Expr(key.data, property.key.loc);
+                break;
+            }
+          }
+          const k = key.data;
+          switch (k.k) {
+            case E_NUMBER:
+            case E_NAME_OF_SYMBOL:
+              // "class { [123] }" => "class { 123 }"
+              property.flags &= ~PropertyIsComputed;
+              break;
+            case E_STRING: {
+              const $n = stringToEquivalentNumberValue(k.value);
+              const numberValue = $n[0];
+              if ($n[1] && numberValue >= 0) {
+                // "class { '123' }" => "class { 123 }"
+                property.key = new Expr(new ENumber(numberValue), property.key.loc);
+                property.flags &= ~PropertyIsComputed;
+              } else if ((property.flags & PropertyIsComputed) !== 0) {
+                // "class {['x'] = y}" => "class {'x' = y}"
+                let isInvalidConstructor = false;
+                if (k.value === "constructor") {
+                  if (!propertyKindIsMethodDefinition(property.kind)) {
+                    // "constructor" is an invalid name for both instance and static fields
+                    isInvalidConstructor = true;
+                  } else if ((property.flags & PropertyIsStatic) === 0) {
+                    // Calling an instance method "constructor" is problematic so avoid that too
+                    isInvalidConstructor = true;
+                  }
+                }
+
+                // A static property must not be called "prototype"
+                const isInvalidPrototype = (property.flags & PropertyIsStatic) !== 0 && k.value === "prototype";
+
+                if (!isInvalidConstructor && !isInvalidPrototype) {
+                  property.flags &= ~PropertyIsComputed;
+                }
+              }
+              break;
+            }
+          }
+        }
       }
 
       // Make it an error to use "arguments" in a class body
@@ -2043,8 +2402,38 @@ export const visitStmt2Methods = {
     // Analyze side effects before adding the name keeping call
     result.canBeRemovedIfUnused = p.astHelpers.classCanBeRemovedIfUnused(class_);
 
-    // (keepNames only) implement name keeping using a static block at the start
-    // of the class body
+    // Implement name keeping using a static block at the start of the class body
+    if (p.options.keepNames && nameToKeep !== "") {
+      let propertyPreventsKeepNames = false;
+      for (let i = 0, a = class_.properties; i < a.length; i++) {
+        const prop = a[i];
+        // A static property called "name" shadows the automatically-generated name
+        if ((prop.flags & PropertyIsStatic) !== 0) {
+          if (prop.key !== null && prop.key.data.k === E_STRING && prop.key.data.value === "name") {
+            propertyPreventsKeepNames = true;
+            break;
+          }
+        }
+      }
+      if (!propertyPreventsKeepNames) {
+        let this_;
+        if (classLoweringInfo.lowerAllStaticFields) {
+          p.recordUsage(result.innerClassNameRef);
+          this_ = new Expr(new EIdentifier(result.innerClassNameRef), class_.bodyLoc);
+        } else {
+          this_ = new Expr(EThisShared, class_.bodyLoc);
+        }
+        const staticBlock = new Property();
+        staticBlock.kind = PropertyClassStaticBlock;
+        staticBlock.classStaticBlock = new ClassStaticBlock(
+          new SBlock([p.keepClassOrFnSymbolName(class_.bodyLoc, this_, nameToKeep)]),
+          class_.bodyLoc,
+        );
+        const properties = [staticBlock];
+        for (let i = 0, a = class_.properties; i < a.length; i++) properties.push(a[i]);
+        class_.properties = properties;
+      }
+    }
 
     p.enclosingClassKeyword = oldEnclosingClassKeyword;
     p.superCtorRef = oldSuperCtorRef;
@@ -2079,7 +2468,7 @@ export const visitStmt2Methods = {
       classLoweringInfo.lowerAllStaticFields !== check.lowerAllStaticFields ||
       classLoweringInfo.shimSuperCtorCalls !== check.shimSuperCtorCalls
     ) {
-      bail(); // panic("Internal error")
+      throw new GoPanic("Internal error");
     }
 
     return result;
@@ -2089,15 +2478,14 @@ export const visitStmt2Methods = {
     const p = this;
     let duplicateArgCheck = null;
     const $d211 = fnBodyContainsUseStrict(opts.body);
-    const hasUseStrict = $d211[1];
+    const useStrictLoc = $d211[0], hasUseStrict = $d211[1];
     const hasSimpleArgs = isSimpleParameterList(args, opts.hasRestArg);
 
     // Section 15.2.1 Static Semantics: Early Errors: "It is a Syntax Error if
     // FunctionBodyContainsUseStrict of FunctionBody is true and
     // IsSimpleParameterList of FormalParameters is false."
     if (hasUseStrict && !hasSimpleArgs) {
-      // "Cannot use a \"use strict\" directive in a function with a non-simple parameter list"
-      p.log.addError();
+      p.log.addError(p.tracker, p.source.rangeOfString(useStrictLoc), 'Cannot use a "use strict" directive in a function with a non-simple parameter list');
     }
 
     // Section 15.1.1 Static Semantics: Early Errors: "Multiple occurrences of
@@ -2242,8 +2630,9 @@ export const visitStmt2Methods = {
       const expr2 = $d214[0], ok = $d214[1];
       if (ok) {
         value = expr2;
+      } else if (p.isMangledProp(part)) {
+        value = new Expr(new EIndex(value, new Expr(new ENameOfSymbol(p.symbolForMangledProp(part)), loc)), loc);
       } else {
-        // (mangleProps only) p.isMangledProp(part) is always false here
         value = new Expr(
           new EDot(
             value,
@@ -2271,9 +2660,17 @@ export const visitStmt2Methods = {
     p.recordUsage(ref);
 
     if (assignTarget !== AssignTargetNone) {
-      if (p.injectedSymbolSources !== null && p.injectedSymbolSources.has(ref)) {
-        // "Cannot assign to %q because it's an import from an injected file"
-        p.log.addErrorWithNotes();
+      const where = p.injectedSymbolSources !== null ? p.injectedSymbolSources.get(ref) : undefined;
+      if (where !== undefined) {
+        const r = rangeOfIdentifier(p.source, loc);
+        const tracker = new LineColumnTracker(where.source);
+        const joined = name.parts.join(".");
+        p.log.addErrorWithNotes(p.tracker, r, "Cannot assign to " + goQuote(joined) + " because it's an import from an injected file", [
+          tracker.msgData(
+            rangeOfIdentifier(where.source, where.loc),
+            "The symbol " + goQuote(joined) + " was exported from " + goQuote(where.source.prettyPaths.select(p.options.logPathStyle)) + " here:",
+          ),
+        ]);
       }
     }
 
@@ -2281,9 +2678,18 @@ export const visitStmt2Methods = {
   },
 
   checkForUnrepresentableIdentifier(loc, name) {
-    // Go: "if p.options.asciiOnly && p.options.unsupportedJSFeatures.Has(compat.UnicodeEscapes) && ..."
-    // compat.UnicodeEscapes is always supported in the fast path, so this
-    // never does anything. (lowering only)
+    const p = this;
+    if (p.options.asciiOnly && jsFeatureHas(p.options.unsupportedJSFeatures, UnicodeEscapes) && containsNonBMPCodePoint(name)) {
+      if (p.unrepresentableIdentifiers === null) {
+        p.unrepresentableIdentifiers = new Map();
+      }
+      if (!p.unrepresentableIdentifiers.get(name)) {
+        p.unrepresentableIdentifiers.set(name, true);
+        const where = prettyPrintTargetEnvironment(p.options.originalTargetEnv, p.options.unsupportedJSFeatureOverridesMask);
+        const r = rangeOfIdentifier(p.source, loc);
+        p.log.addError(p.tracker, r, goQuote(name) + " cannot be escaped in " + where + ' but you can set the charset to "utf8" to allow unescaped Unicode characters');
+      }
+    }
   },
 
   warnAboutTypeofAndString(a, b, order) {
@@ -2320,8 +2726,19 @@ export const visitStmt2Methods = {
             if (p.suppressWarningsAboutWeirdCode) {
               kind = Debug;
             }
-            // "The \"typeof\" operator will never evaluate to %q"
-            p.log.addIDWithNotes(MsgID_JS_ImpossibleTypeof, kind);
+            const r = p.source.rangeOfString(b.loc);
+            const text = 'The "typeof" operator will never evaluate to ' + goQuote(value);
+            let notes = null;
+            if (value === "null") {
+              notes = [
+                new MsgData(
+                  null,
+                  null,
+                  'The expression "typeof x" actually evaluates to "object" in JavaScript, not "null". ' + 'You need to use "x === null" to test for null.',
+                ),
+              ];
+            }
+            p.log.addIDWithNotes(MsgID_JS_ImpossibleTypeof, kind, p.tracker, r, text, notes);
           }
         }
       }
@@ -2336,23 +2753,49 @@ export const visitStmt2Methods = {
         // "0 === -0" is true in JavaScript. Here's an example of code with this
         // problem: https://github.com/mrdoob/three.js/pull/11183
         if (e.value === 0 && Object.is(e.value, -0)) {
+          const r = mkRange(value.loc, 0);
+          if (r.loc < p.source.contents.length && p.source.contents.charCodeAt(r.loc) === 45) {
+            const zeroRange = p.source.rangeOfNumber(r.loc + 1);
+            r.len = zeroRange.len + 1;
+          }
+          let text = "Comparison with -0 using the " + goQuote(op) + " operator will also match 0";
+          if (op === "case") {
+            text = "Comparison with -0 using a case clause will also match 0";
+          }
           let kind = Warning;
           if (p.suppressWarningsAboutWeirdCode) {
             kind = Debug;
           }
-          // "Comparison with -0 using the %q operator will also match 0"
-          p.log.addIDWithNotes(MsgID_JS_EqualsNegativeZero, kind);
+          p.log.addIDWithNotes(MsgID_JS_EqualsNegativeZero, kind, p.tracker, r, text, [
+            new MsgData(
+              null,
+              null,
+              'Floating-point equality is defined such that 0 and -0 are equal, so "x === -0" returns true for both 0 and -0. ' +
+                'You need to use "Object.is(x, -0)" instead to test for -0.',
+            ),
+          ]);
           return true;
         }
 
         // "NaN === NaN" is false in JavaScript
         if (e.value !== e.value) {
+          let text = "Comparison with NaN using the " + goQuote(op) + " operator here is always " + (op.charCodeAt(0) === 33);
+          if (op === "case") {
+            text = "This case clause will never be evaluated because equality with NaN is always false";
+          }
+          const r = p.source.rangeOfOperatorBefore(afterOpLoc, op);
           let kind = Warning;
           if (p.suppressWarningsAboutWeirdCode) {
             kind = Debug;
           }
-          // "Comparison with NaN using the %q operator here is always %v"
-          p.log.addIDWithNotes(MsgID_JS_EqualsNaN, kind);
+          p.log.addIDWithNotes(MsgID_JS_EqualsNaN, kind, p.tracker, r, text, [
+            new MsgData(
+              null,
+              null,
+              'Floating-point equality is defined such that NaN is never equal to anything, so "x === NaN" always returns false. ' +
+                'You need to use "Number.isNaN(x)" instead to test for NaN.',
+            ),
+          ]);
           return true;
         }
         break;
@@ -2369,12 +2812,24 @@ export const visitStmt2Methods = {
         // empty string. Here's an example of code with this problem:
         // https://github.com/aws/aws-sdk-js/issues/3325
         if (op.length > 2) {
+          let text = "Comparison using the " + goQuote(op) + " operator here is always " + (op.charCodeAt(0) === 33);
+          if (op === "case") {
+            text = "This case clause will never be evaluated because the comparison is always false";
+          }
+          const r = p.source.rangeOfOperatorBefore(afterOpLoc, op);
           let kind = Warning;
           if (p.suppressWarningsAboutWeirdCode) {
             kind = Debug;
           }
-          // "Comparison using the %q operator here is always %v"
-          p.log.addIDWithNotes(MsgID_JS_EqualsNewObject, kind);
+          p.log.addIDWithNotes(MsgID_JS_EqualsNewObject, kind, p.tracker, r, text, [
+            new MsgData(
+              null,
+              null,
+              "Equality with a new object is always false in JavaScript because the equality operator tests object identity. " +
+                "You need to write code to compare the contents of the object instead. " +
+                'For example, use "Array.isArray(x) && x.length === 0" instead of "x === []" to test for an empty array.',
+            ),
+          ]);
           return true;
         }
         break;
@@ -2390,10 +2845,165 @@ export const visitStmt2Methods = {
   maybeRewritePropertyAccess(loc, assignTarget, isDeleteTarget, target, name, nameLoc, isCallTarget, isTemplateTag, preferQuotedKey) {
     const p = this;
 
-    // (bundle only) rewrite property accesses on explicit namespace imports as
-    // an identifier, and "module.require()" to "require()"
+    if (target.data.k === E_IDENTIFIER) {
+      const id = target.data;
+      // Rewrite property accesses on explicit namespace imports as an identifier.
+      // This lets us replace them easily in the printer to rebind them to
+      // something else without paying the cost of a whole-tree traversal during
+      // module linking just to rewrite these EDot expressions.
+      if (p.options.mode === ModeBundle) {
+        const importItems = p.importItemsForNamespace.get(id.ref);
+        if (importItems !== undefined) {
+          // Cache translation so each property access resolves to the same import
+          let item = importItems.entries.get(name);
+          if (item === undefined) {
+            // Replace non-default imports with "undefined" for JSON import assertions
+            const record = p.importRecords[importItems.importRecordIndex];
+            if ((record.flags & AssertTypeJSON) !== 0 && name !== "default") {
+              let kind = Warning;
+              if (p.suppressWarningsAboutWeirdCode) {
+                kind = Debug;
+              }
+              p.log.addIDWithNotes(
+                MsgID_JS_AssertTypeJSON,
+                kind,
+                p.tracker,
+                rangeOfIdentifier(p.source, nameLoc),
+                "Non-default import " + goQuote(name) + " is undefined with a JSON import assertion",
+                p.notesForAssertTypeJSON(record, name),
+              );
+              p.ignoreUsage(id.ref);
+              return [new Expr(EUndefinedShared, loc), true];
+            }
 
-    // (minify only) simplify statically-determined object literal property accesses
+            // Generate a new import item symbol in the module scope
+            item = new LocRef(nameLoc, p.newSymbol(SymbolImport, name));
+            p.moduleScope.generated.push(item.ref);
+
+            // Link the namespace import and the import item together
+            importItems.entries.set(name, item);
+            p.isImportItem.set(item.ref, true);
+
+            const symbol = p.symbols[refInner(item.ref)];
+            if (p.options.mode === ModePassThrough) {
+              // Make sure the printer prints this as a property access
+              symbol.namespaceAlias = new NamespaceAlias(name, id.ref);
+            } else {
+              // Mark this as generated in case it's missing. We don't want to
+              // generate errors for missing import items that are automatically
+              // generated.
+              symbol.importItemStatus = ImportItemGenerated;
+            }
+          }
+
+          // Undo the usage count for the namespace itself. This is used later
+          // to detect whether the namespace symbol has ever been "captured"
+          // or whether it has just been used to read properties off of.
+          //
+          // The benefit of doing this is that if both this module and the
+          // imported module end up in the same module group and the namespace
+          // symbol has never been captured, then we don't need to generate
+          // any code for the namespace at all.
+          p.ignoreUsage(id.ref);
+
+          // Track how many times we've referenced this symbol
+          p.recordUsage(item.ref);
+          return [
+            p.handleIdentifier(
+              nameLoc,
+              new EIdentifier(item.ref),
+              new identifierOpts(
+                assignTarget,
+                isCallTarget,
+                isDeleteTarget,
+                preferQuotedKey,
+
+                // If this expression is used as the target of a call expression, make
+                // sure the value of "this" is preserved.
+                false, // wasOriginallyIdentifier
+              ),
+            ),
+            true,
+          ];
+        }
+
+        // Rewrite "module.require()" to "require()" for Webpack compatibility.
+        // See https://github.com/webpack/webpack/pull/7750 for more info.
+        if (isCallTarget && id.ref === p.moduleRef && name === "require") {
+          p.ignoreUsage(p.moduleRef);
+
+          // This uses "require" instead of a reference to our "__require"
+          // function so that the code coming up that detects calls to
+          // "require" will recognize it.
+          p.recordUsage(p.requireRef);
+          return [new Expr(new EIdentifier(p.requireRef), nameLoc), true];
+        }
+      }
+    }
+
+    // Attempt to simplify statically-determined object literal property accesses
+    if (!isCallTarget && !isTemplateTag && p.options.minifySyntax && assignTarget === AssignTargetNone) {
+      const object = target.data;
+      if (object.k === E_OBJECT) {
+        let replace = null;
+        let hasProtoNull = false;
+        let isUnsafe = false;
+
+        // Check that doing this is safe
+        for (let i = 0, a = object.properties; i < a.length; i++) {
+          const prop = a[i];
+
+          // "{ ...a }.a" must be preserved
+          // "new ({ a() {} }.a)" must throw
+          // "{ get a() {} }.a" must be preserved
+          // "{ set a(b) {} }.a = 1" must be preserved
+          // "{ a: 1, [String.fromCharCode(97)]: 2 }.a" must be 2
+          if (prop.kind === PropertySpread || (prop.flags & PropertyIsComputed) !== 0 || propertyKindIsMethodDefinition(prop.kind)) {
+            isUnsafe = true;
+            break;
+          }
+
+          // Do not attempt to compare against numeric keys
+          const key = prop.key.data;
+          if (key.k !== E_STRING) {
+            isUnsafe = true;
+            break;
+          }
+
+          // The "__proto__" key has special behavior
+          if (key.value === "__proto__") {
+            if (prop.valueOrNil !== null && prop.valueOrNil.data.k === E_NULL) {
+              // Replacing "{__proto__: null}.a" with undefined should be safe
+              hasProtoNull = true;
+            }
+          }
+
+          // This entire object literal must have no side effects
+          if (!p.astHelpers.exprCanBeRemovedIfUnused(prop.valueOrNil)) {
+            isUnsafe = true;
+            break;
+          }
+
+          // Note that we need to take the last value if there are duplicate keys
+          if (key.value === name) {
+            replace = prop.valueOrNil;
+          }
+        }
+
+        if (!isUnsafe) {
+          // If the key was found, return the value for that key. Note
+          // that "{__proto__: null}.__proto__" is undefined, not null.
+          if (replace !== null && name !== "__proto__") {
+            return [replace, true];
+          }
+
+          // We can only return "undefined" when a key is missing if the prototype is null
+          if (hasProtoNull) {
+            return [new Expr(EUndefinedShared, target.loc), true];
+          }
+        }
+      }
+    }
 
     // Handle references to namespaces or namespace members
     if (target.data === p.tsNamespaceTarget && assignTarget === AssignTargetNone && !isDeleteTarget) {
@@ -2427,10 +3037,62 @@ export const visitStmt2Methods = {
       }
     }
 
-    // (bundle only) symbol uses due to a property access off of an imported
-    // symbol are tracked specially (cross-file TypeScript enum tree shaking)
+    // Symbol uses due to a property access off of an imported symbol are tracked
+    // specially. This lets us do tree shaking for cross-file TypeScript enums.
+    if (p.options.mode === ModeBundle && !p.isControlFlowDead) {
+      const id = target.data;
+      if (id.k === E_IMPORT_IDENTIFIER) {
+        // Remove the normal symbol use
+        // (JS-only: the map values are updated in place like recordUsage does)
+        const symbolUses = p.currentPart.symbolUses;
+        const use = symbolUses.get(id.ref);
+        const countEstimate = ((use === undefined ? 0 : use.countEstimate) - 1) >>> 0; // uint32
+        if (countEstimate === 0) {
+          symbolUses.delete(id.ref);
+        } else if (use === undefined) {
+          symbolUses.set(id.ref, new SymbolUse(countEstimate));
+        } else {
+          use.countEstimate = countEstimate;
+        }
 
-    // (minify only) "foo".length
+        // Add a special symbol use instead
+        let importSymbolPropertyUses = p.currentPart.importSymbolPropertyUses;
+        if (importSymbolPropertyUses === null) {
+          importSymbolPropertyUses = new Map();
+          p.currentPart.importSymbolPropertyUses = importSymbolPropertyUses;
+        }
+        let properties = importSymbolPropertyUses.get(id.ref);
+        if (properties === undefined) {
+          properties = new Map();
+          importSymbolPropertyUses.set(id.ref, properties);
+        }
+        const propUse = properties.get(name);
+        if (propUse === undefined) {
+          properties.set(name, new SymbolUse(1));
+        } else {
+          propUse.countEstimate = (propUse.countEstimate + 1) >>> 0; // uint32
+        }
+      }
+    }
+
+    // Minify "foo".length
+    if (p.options.minifySyntax && assignTarget === AssignTargetNone) {
+      const t = target.data;
+      switch (t.k) {
+        case E_STRING:
+          if (name === "length") {
+            return [new Expr(new ENumber(t.value.length), loc), true];
+          }
+          break;
+        case E_INLINED_ENUM: {
+          const s = t.value.data;
+          if (s.k === E_STRING && name === "length") {
+            return [new Expr(new ENumber(s.value.length), loc), true];
+          }
+          break;
+        }
+      }
+    }
 
     return NOT_REWRITTEN; // [null, false] (callers only read it)
   },

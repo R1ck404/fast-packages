@@ -3,7 +3,10 @@
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const esbuild = require("esbuild");
-const { fastTransform, stats } = await import("../src/transform.mjs");
+const { fastTransform, stats } = await (await import("./engine.mjs")).loadEngine();
+const { classifyTransform } = await import("./flags.mjs");
+// (what the engine prints at the "warning" level goes nowhere)
+(await (await import("./engine.mjs")).loadEngine()).setStderr(() => {});
 
 const args = process.argv.slice(2);
 const only = args.includes("--only") ? args[args.indexOf("--only") + 1] : null;
@@ -206,26 +209,28 @@ function run(cases, optSets) {
     for (const [optName, opts] of optSets) {
       if (onlyOpts && !onlyOpts.includes(optName)) continue;
       let ref = null;
-      let refErr = null;
+      let refError = null;
       try {
         ref = esbuild.transformSync(code, opts);
       } catch (e) {
-        refErr = e.message.split("\n").slice(0, 2).join(" ");
+        refError = e;
       }
       const errBefore = stats.error;
       const fast = fastTransform(flagsFor(opts), code, undefined);
-      if (stats.error !== errBefore) {
+      // (errors and warnings must be esbuild's)
+      const [cat, diff] = stats.error !== errBefore ? ["CRASH", null] : classifyTransform(ref, refError, fast);
+      if (cat === "CRASH") {
         bad++;
         console.log(`CRASH ${name} [${optName}]: ${String(stats.lastError?.stack).split("\n").slice(0, 8).join("\n    ")}`);
-      } else if (fast === undefined) {
+      } else if (cat === "bail" || cat === "bothFail") {
         bail++;
-        if (verbose || !refErr) console.log(`bail  ${name} [${optName}]${refErr ? " (esbuild errors too)" : ""}`);
-      } else if (ref === null) {
+        if (verbose || cat === "bail") console.log(`bail  ${name} [${optName}]${cat === "bothFail" ? " (esbuild errors too)" : ""}`);
+      } else if (cat === "okError") {
+        ok++;
+        if (verbose) console.log(`ok    ${name} [${optName}] (errors)`);
+      } else if (cat !== "ok" && cat !== "MISMATCH") {
         bad++;
-        console.log(`FALSE-ACCEPT ${name} [${optName}]: esbuild says ${refErr}`);
-      } else if (ref.warnings.length) {
-        bad++;
-        console.log(`WARN-ACCEPT ${name} [${optName}]: ${ref.warnings[0].text}`);
+        console.log(`${cat} ${name} [${optName}]\n${diff}`);
       } else if (ref.code !== fast.code) {
         bad++;
         console.log(`MISMATCH ${name} [${optName}]\n--- esbuild ---\n${ref.code}--- fast ---\n${fast.code}---`);
@@ -313,8 +318,8 @@ const TSCONFIG_CASES = [
   ["strict-js-cjs", "exports.a = 1; function f() {}", { loader: "js", format: "cjs", tsconfigRaw: tc({ strict: true }) }, "ok"],
   ["strict-iife", "var a = 1", { loader: "js", format: "iife", tsconfigRaw: tc({ strict: true }) }, "ok"],
   ["strict-esm", "export let a = 1", { loader: "ts", format: "esm", tsconfigRaw: tc({ strict: true }) }, "ok"],
-  ["strict-with", "with (a) b()", { loader: "js", tsconfigRaw: tc({ strict: true }) }, "bail"],
-  ["strict-octal", "x = 010", { loader: "ts", tsconfigRaw: tc({ alwaysStrict: true }) }, "bail"],
+  ["strict-with", "with (a) b()", { loader: "js", tsconfigRaw: tc({ strict: true }) }, "msg"],
+  ["strict-octal", "x = 010", { loader: "ts", tsconfigRaw: tc({ alwaysStrict: true }) }, "msg"],
   // JSON flavor and ignored fields
   ["jsonc", CLASS_SRC, { loader: "ts", tsconfigRaw: '// line\n{ /* block */ "compilerOptions": { "useDefineForClassFields": false, }, // trailing\n}' }, "ok"],
   ["empty-object", CLASS_SRC, { loader: "ts", tsconfigRaw: "{}" }, "ok"],
@@ -328,52 +333,54 @@ const TSCONFIG_CASES = [
   ["paths-relative", "x()", { loader: "ts", tsconfigRaw: tc({ paths: { "@/*": ["./src/*", "../x", ".", "..", "/abs/*", "c:/d/*"] } }) }, "ok"],
   ["paths-configDir", "x()", { loader: "ts", tsconfigRaw: tc({ paths: { "@/*": ["${configDir}/src/*"] } }) }, "ok"],
   ["unknown-options", "x()", { loader: "ts", tsconfigRaw: { compilerOptions: { module: "esnext", lib: ["dom"], emitDecoratorMetadata: true }, include: ["src"] } }, "ok"],
-  // invalid values and syntax: esbuild warns or errors
-  ["bad-target", "x()", { loader: "ts", tsconfigRaw: tc({ target: "es2099" }) }, "bail"],
-  ["bad-importsNotUsed", "x()", { loader: "ts", tsconfigRaw: tc({ importsNotUsedAsValues: "bogus" }) }, "bail"],
-  ["bad-jsxFactory", JSX_SRC, { loader: "jsx", tsconfigRaw: tc({ jsxFactory: "h()" }) }, "bail"],
-  ["bad-jsxFragment", JSX_SRC, { loader: "jsx", tsconfigRaw: tc({ jsxFragmentFactory: "a..b" }) }, "bail"],
-  ["top-level-option", "x()", { loader: "ts", tsconfigRaw: { jsx: "react-jsx" } }, "bail"],
-  ["duplicate-key", "x()", { loader: "ts", tsconfigRaw: '{"compilerOptions": {"strict": true, "strict": false}}' }, "bail"],
-  ["single-quotes", "x()", { loader: "ts", tsconfigRaw: "{'compilerOptions': {}}" }, "bail"],
-  ["syntax-error", "x()", { loader: "ts", tsconfigRaw: "{" }, "bail"],
-  ["trailing-garbage", "x()", { loader: "ts", tsconfigRaw: "{} x" }, "bail"],
-  ["unterminated-comment", "x()", { loader: "ts", tsconfigRaw: "{} /*" }, "bail"],
-  ["bigint", "x()", { loader: "ts", tsconfigRaw: '{"a": 1n}' }, "bail"],
-  ["identifier-value", "x()", { loader: "ts", tsconfigRaw: '{"a": undefined}' }, "bail"],
-  ["paths-no-baseUrl", "x()", { loader: "ts", tsconfigRaw: tc({ paths: { "@/*": ["src/*"] } }) }, "bail"],
-  ["paths-two-stars", "x()", { loader: "ts", tsconfigRaw: tc({ baseUrl: ".", paths: { "@/*/*": ["./*"] } }) }, "bail"],
-  ["paths-not-array", "x()", { loader: "ts", tsconfigRaw: tc({ baseUrl: ".", paths: { "@/*": "./src/*" } }) }, "bail"],
+  // invalid values and syntax: esbuild warns or errors ("msg": the engine
+  // reports the same)
+  ["bad-target", "x()", { loader: "ts", tsconfigRaw: tc({ target: "es2099" }) }, "msg"],
+  ["bad-importsNotUsed", "x()", { loader: "ts", tsconfigRaw: tc({ importsNotUsedAsValues: "bogus" }) }, "msg"],
+  ["bad-jsxFactory", JSX_SRC, { loader: "jsx", tsconfigRaw: tc({ jsxFactory: "h()" }) }, "msg"],
+  ["bad-jsxFragment", JSX_SRC, { loader: "jsx", tsconfigRaw: tc({ jsxFragmentFactory: "a..b" }) }, "msg"],
+  ["top-level-option", "x()", { loader: "ts", tsconfigRaw: { jsx: "react-jsx" } }, "msg"],
+  ["duplicate-key", "x()", { loader: "ts", tsconfigRaw: '{"compilerOptions": {"strict": true, "strict": false}}' }, "msg"],
+  ["single-quotes", "x()", { loader: "ts", tsconfigRaw: "{'compilerOptions': {}}" }, "msg"],
+  ["syntax-error", "x()", { loader: "ts", tsconfigRaw: "{" }, "msg"],
+  ["trailing-garbage", "x()", { loader: "ts", tsconfigRaw: "{} x" }, "msg"],
+  ["unterminated-comment", "x()", { loader: "ts", tsconfigRaw: "{} /*" }, "msg"],
+  ["bigint", "x()", { loader: "ts", tsconfigRaw: '{"a": 1n}' }, "msg"],
+  ["identifier-value", "x()", { loader: "ts", tsconfigRaw: '{"a": undefined}' }, "msg"],
+  ["paths-no-baseUrl", "x()", { loader: "ts", tsconfigRaw: tc({ paths: { "@/*": ["src/*"] } }) }, "msg"],
+  ["paths-two-stars", "x()", { loader: "ts", tsconfigRaw: tc({ baseUrl: ".", paths: { "@/*/*": ["./*"] } }) }, "msg"],
+  ["paths-not-array", "x()", { loader: "ts", tsconfigRaw: tc({ baseUrl: ".", paths: { "@/*": "./src/*" } }) }, "msg"],
 ];
 for (const [name, code, opts, expected] of TSCONFIG_CASES) {
   if (only && name !== only) continue;
   if (onlyOpts && !onlyOpts.includes("tsconfig")) continue;
   let ref = null;
-  let refErr = null;
+  let refError = null;
   try {
     ref = esbuild.transformSync(code, opts);
   } catch (e) {
-    refErr = e.message.split("\n").slice(0, 2).join(" ");
+    refError = e;
   }
   const errBefore = stats.error;
   const fast = fastTransform(flagsFor(opts), code, undefined);
   const refFails = ref === null || ref.warnings.length > 0;
+  const [cat, diff] = stats.error !== errBefore ? ["CRASH", null] : classifyTransform(ref, refError, fast);
   let verdict;
-  if (stats.error !== errBefore) verdict = `CRASH: ${String(stats.lastError?.stack).split("\n").slice(0, 8).join("\n    ")}`;
-  else if (fast !== undefined && ref === null) verdict = `FALSE-ACCEPT: esbuild says ${refErr}`;
-  else if (fast !== undefined && ref.warnings.length) verdict = `WARN-ACCEPT: ${ref.warnings[0].text}`;
-  else if (fast !== undefined && ref.code !== fast.code) verdict = `MISMATCH\n--- esbuild ---\n${ref.code}--- fast ---\n${fast.code}---`;
-  else if (expected === "ok" && fast === undefined) verdict = `UNNECESSARY BAIL${refFails ? ` (but esbuild ${refErr ? "errors: " + refErr : "warns: " + ref.warnings[0].text})` : ""}`;
-  else if (expected === "bail" && !refFails) verdict = "EXPECTED esbuild to warn or error, but it succeeded";
+  if (cat === "CRASH") verdict = `CRASH: ${String(stats.lastError?.stack).split("\n").slice(0, 8).join("\n    ")}`;
+  else if (cat === "bail" || cat === "bothFail") verdict = `BAIL: the engine should report esbuild's result`;
+  else if (cat !== "ok" && cat !== "okError") verdict = `${cat}:\n${diff}`;
+  else if (expected === "msg" && !refFails) verdict = "EXPECTED esbuild to warn or error, but it succeeded";
+  else if (expected === "ok" && refFails) verdict = "EXPECTED esbuild to succeed without warnings";
   if (verdict !== undefined) {
     bad++;
     console.log(`${verdict.split(":")[0].split("\n")[0]} tsconfig/${name}: ${verdict}`);
   } else if (fast === undefined) {
     bail++;
-    if (verbose) console.log(`bail  tsconfig/${name} (esbuild ${refErr ? "errors" : "warns"})`);
+    if (verbose) console.log(`bail  tsconfig/${name}`);
   } else {
     ok++;
     if (verbose) console.log(`ok    tsconfig/${name}`);
   }
 }
 console.log(`ok ${ok}, bad ${bad}, bail ${bail}`);
+process.exit(bad === 0 ? 0 : 1);

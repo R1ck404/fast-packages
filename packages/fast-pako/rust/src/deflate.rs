@@ -5,6 +5,9 @@
 // indexing in the hot loops, 64-bit bit output (trees.rs), fast checksums,
 // and reusing buffers instead of reallocating per stream.
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::checksum::{adler32, crc32};
 use crate::trees::*;
 
@@ -18,23 +21,29 @@ pub const Z_STREAM_END: i32 = 1;
 pub const Z_STREAM_ERROR: i32 = -2;
 pub const Z_DATA_ERROR: i32 = -3;
 pub const Z_BUF_ERROR: i32 = -5;
-const Z_FILTERED: i32 = 1;
-const Z_HUFFMAN_ONLY: i32 = 2;
-const Z_RLE: i32 = 3;
-const Z_FIXED: i32 = 4;
 const Z_UNKNOWN: i32 = 2;
-const Z_DEFLATED: i32 = 8;
 
-const MAX_MEM_LEVEL: i32 = 9;
+// Parameter flags. The JS glue runs pako's option handling (deflateInit2's
+// checks, JS comparisons and coercions included) and passes the outcome;
+// e.g. a level of "0" (string) is not `=== 0` but still indexes the
+// configuration table and is not `> 0`.
+/// level === 0: deflate_stored before any strategy
+pub const F_STRICT0: u32 = 1;
+/// level > 0 (otherwise _tr_flush_block forces stored blocks)
+pub const F_GT0: u32 = 2;
+/// strategy === Z_FILTERED
+pub const F_FILTERED: u32 = 4;
+/// strategy === Z_HUFFMAN_ONLY
+pub const F_HUFF: u32 = 8;
+/// strategy === Z_RLE
+pub const F_RLE: u32 = 16;
+/// strategy === Z_FIXED
+pub const F_FIXED: u32 = 32;
+
 const MIN_LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
-const PRESET_DICT: u32 = 0x20;
 
 const INIT_STATE: i32 = 42;
 const GZIP_STATE: i32 = 57;
-const EXTRA_STATE: i32 = 69;
-const NAME_STATE: i32 = 73;
-const COMMENT_STATE: i32 = 91;
-const HCRC_STATE: i32 = 103;
 const BUSY_STATE: i32 = 113;
 const FINISH_STATE: i32 = 666;
 
@@ -42,8 +51,6 @@ const BS_NEED_MORE: i32 = 1;
 const BS_BLOCK_DONE: i32 = 2;
 const BS_FINISH_STARTED: i32 = 3;
 const BS_FINISH_DONE: i32 = 4;
-
-const OS_CODE: u8 = 0x03;
 
 // message ids (mapped to pako's message strings in JS)
 pub const MSG_NONE: i32 = 0;
@@ -60,10 +67,10 @@ struct Config {
     max_lazy: u16,
     nice_length: u16,
     max_chain: u16,
-    func: u8, // 0 stored, 1 fast, 2 slow
+    func: u8, // 0 stored, 1 fast, 2 slow, 3 not a function (see deflate())
 }
 
-const CONFIG: [Config; 10] = [
+const CONFIG: [Config; 11] = [
     Config { good_length: 0, max_lazy: 0, nice_length: 0, max_chain: 0, func: 0 },
     Config { good_length: 4, max_lazy: 4, nice_length: 8, max_chain: 4, func: 1 },
     Config { good_length: 4, max_lazy: 5, nice_length: 16, max_chain: 8, func: 1 },
@@ -74,17 +81,10 @@ const CONFIG: [Config; 10] = [
     Config { good_length: 8, max_lazy: 32, nice_length: 128, max_chain: 256, func: 2 },
     Config { good_length: 32, max_lazy: 128, nice_length: 258, max_chain: 1024, func: 2 },
     Config { good_length: 32, max_lazy: 258, nice_length: 258, max_chain: 4096, func: 2 },
+    // a level that indexes something else on pako's configuration table
+    // (e.g. "length"): its .func is called on the first deflate() call
+    Config { good_length: 0, max_lazy: 0, nice_length: 0, max_chain: 0, func: 3 },
 ];
-
-pub struct GzHead {
-    pub text: bool,
-    pub hcrc: bool,
-    pub time: u32,
-    pub os: u8,
-    pub extra: Option<Vec<u8>>,
-    pub name: Option<Vec<u8>>,
-    pub comment: Option<Vec<u8>>,
-}
 
 pub struct Deflate {
     // ---- z_stream ----
@@ -106,11 +106,18 @@ pub struct Deflate {
     pub pending_out: usize,
     pub pending: usize,
     pub wrap: i32,
-    pub gzhead: Option<GzHead>,
-    pub gzindex: usize,
+    /// the zlib or gzip header (built by the JS glue), written by deflate()
+    /// through pending_buf like pako's header states
+    pub hdr: Vec<u8>,
+    pub hdr_pos: usize,
+    /// header bytes covered by the gzip header crc: [hdr_c0, hdr_crc)
+    /// (hdr_crc 0: no FHCRC)
+    pub hdr_crc: usize,
+    pub hdr_c0: usize,
+    /// input is read through js_op (not a Uint8Array: pako's subarray+set)
+    pub ext: bool,
     pub last_flush: i32,
     pub w_size: usize,
-    pub w_bits: usize,
     pub w_mask: usize,
     pub window: Vec<u8>,
     pub window_size: usize,
@@ -118,7 +125,6 @@ pub struct Deflate {
     pub head: Vec<u16>,
     pub ins_h: usize,
     pub hash_size: usize,
-    pub hash_bits: usize,
     pub hash_mask: usize,
     pub hash_shift: usize,
     pub block_start: isize,
@@ -131,8 +137,10 @@ pub struct Deflate {
     pub prev_length: usize,
     pub max_chain_length: usize,
     pub max_lazy_match: usize,
-    pub level: i32,
-    pub strategy: i32,
+    /// index into CONFIG (the configuration_table entry pako's level selects)
+    pub cfg: usize,
+    /// F_* flags
+    pub flags: u32,
     pub good_match: usize,
     pub nice_match: usize,
     pub dyn_ltree: [u16; HEAP_SIZE * 2],
@@ -162,46 +170,17 @@ pub struct Deflate {
     pub ctab: [u32; crate::trees::CT_SIZE],
     /// heap keys for build_tree: freq << 10 | depth
     pub hkey: [u32; HEAP_SIZE],
+    /// MAX_MATCH, read from memory: a constant bound gets the compare loop
+    /// of longest_match fully unrolled (32 copies in deflate_fast and _slow)
+    pub cmp_max: usize,
 }
 
 impl Deflate {
-    /// deflateInit2. Returns Err(status) on bad parameters.
-    pub fn new(level: i32, method: i32, window_bits: i32, mem_level: i32, strategy: i32) -> Result<Box<Deflate>, i32> {
-        let mut level = level;
-        let mut window_bits = window_bits;
-        let mut wrap = 1;
-        if level == -1 {
-            level = 6;
-        }
-        if window_bits < 0 {
-            wrap = 0;
-            window_bits = -window_bits;
-        } else if window_bits > 15 {
-            wrap = 2;
-            window_bits -= 16;
-        }
-        if mem_level < 1
-            || mem_level > MAX_MEM_LEVEL
-            || method != Z_DEFLATED
-            || window_bits < 8
-            || window_bits > 15
-            || level < 0
-            || level > 9
-            || strategy < 0
-            || strategy > Z_FIXED
-            || (window_bits == 8 && wrap != 1)
-        {
-            return Err(Z_STREAM_ERROR);
-        }
-        if window_bits == 8 {
-            window_bits = 9;
-        }
-        let w_bits = window_bits as usize;
-        let w_size = 1usize << w_bits;
-        let hash_bits = mem_level as usize + 7;
-        let hash_size = 1usize << hash_bits;
-        let lit_bufsize = 1usize << (mem_level as usize + 6);
-        let mut s = Box::new(Deflate {
+    /// An empty state: reinit() (deflateInit2) validates the parameters,
+    /// allocates the buffers and sets every field like a fresh pako state.
+    pub fn new() -> Box<Deflate> {
+        crate::trees::init_tables();
+        Box::new(Deflate {
             input: core::ptr::null(),
             next_in: 0,
             avail_in: 0,
@@ -211,29 +190,30 @@ impl Deflate {
             avail_out: 0,
             total_out: 0,
             msg: MSG_NONE,
-            data_type: Z_UNKNOWN,
+            data_type: 0,
             adler: 0,
-            status: INIT_STATE,
-            pending_buf: vec![0u8; lit_bufsize * 4 + SLACK],
-            pending_buf_size: lit_bufsize * 4,
+            status: 0,
+            pending_buf: Vec::new(),
+            pending_buf_size: 0,
             pending_out: 0,
             pending: 0,
-            wrap,
-            gzhead: None,
-            gzindex: 0,
-            last_flush: -1,
-            w_size,
-            w_bits,
-            w_mask: w_size - 1,
-            window: vec![0u8; w_size * 2 + MAX_MATCH + SLACK],
+            wrap: 0,
+            hdr: Vec::new(),
+            hdr_pos: 0,
+            hdr_crc: 0,
+            hdr_c0: 0,
+            ext: false,
+            last_flush: 0,
+            w_size: 0,
+            w_mask: 0,
+            window: Vec::new(),
             window_size: 0,
-            prev: vec![0u16; w_size],
-            head: vec![0u16; hash_size],
+            prev: Vec::new(),
+            head: Vec::new(),
             ins_h: 0,
-            hash_size,
-            hash_bits,
-            hash_mask: hash_size - 1,
-            hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
+            hash_size: 0,
+            hash_mask: 0,
+            hash_shift: 0,
             block_start: 0,
             match_length: 0,
             prev_match: 0,
@@ -244,8 +224,8 @@ impl Deflate {
             prev_length: 0,
             max_chain_length: 0,
             max_lazy_match: 0,
-            level,
-            strategy,
+            cfg: 0,
+            flags: 0,
             good_match: 0,
             nice_match: 0,
             dyn_ltree: [0; HEAP_SIZE * 2],
@@ -259,10 +239,10 @@ impl Deflate {
             heap_len: 0,
             heap_max: 0,
             depth: [0; 2 * L_CODES + 1],
-            sym_buf: vec![0u8; lit_bufsize * 3 + SLACK],
-            lit_bufsize,
+            sym_buf: Vec::new(),
+            lit_bufsize: 0,
             sym_next: 0,
-            sym_end: (lit_bufsize - 1) * 3,
+            sym_end: 0,
             opt_len: 0,
             static_len: 0,
             matches: 0,
@@ -272,48 +252,20 @@ impl Deflate {
             win_dirty: 0,
             ctab: [0; crate::trees::CT_SIZE],
             hkey: [0; HEAP_SIZE],
-        });
-        s.reset();
-        Ok(s)
+            cmp_max: MAX_MATCH,
+        })
     }
 
     /// Re-initialize an existing state for new parameters, reusing buffers
     /// when the sizes allow (equivalent to a freshly allocated pako state).
-    pub fn reinit(&mut self, level: i32, method: i32, window_bits: i32, mem_level: i32, strategy: i32) -> i32 {
-        let mut level = level;
-        let mut window_bits = window_bits;
-        let mut wrap = 1;
-        if level == -1 {
-            level = 6;
-        }
-        if window_bits < 0 {
-            wrap = 0;
-            window_bits = -window_bits;
-        } else if window_bits > 15 {
-            wrap = 2;
-            window_bits -= 16;
-        }
-        if mem_level < 1
-            || mem_level > MAX_MEM_LEVEL
-            || method != Z_DEFLATED
-            || window_bits < 8
-            || window_bits > 15
-            || level < 0
-            || level > 9
-            || strategy < 0
-            || strategy > Z_FIXED
-            || (window_bits == 8 && wrap != 1)
-        {
-            return Z_STREAM_ERROR;
-        }
-        if window_bits == 8 {
-            window_bits = 9;
-        }
-        let w_bits = window_bits as usize;
-        let w_size = 1usize << w_bits;
-        let hash_bits = mem_level as usize + 7;
-        let hash_size = 1usize << hash_bits;
-        let lit_bufsize = 1usize << (mem_level as usize + 6);
+    /// The parameters are deflateInit2's, already validated and derived by
+    /// the JS glue: CONFIG index, F_* flags, wrap, log2 of the window, hash
+    /// table and literal buffer sizes, and the hash shift (all as pako
+    /// computes them, e.g. with a string memLevel).
+    pub fn reinit(&mut self, cfg: usize, flags: u32, wrap: i32, w_log: usize, hash_log: usize, hash_shift: usize, lit_log: usize) {
+        let w_size = 1usize << w_log;
+        let hash_size = 1usize << hash_log;
+        let lit_bufsize = 1usize << lit_log;
         // window must look freshly zeroed (stale bytes past the input can
         // influence match selection exactly like in pako's fresh arrays)
         let need_win = w_size * 2 + MAX_MATCH + SLACK;
@@ -352,20 +304,19 @@ impl Deflate {
         self.pending_out = 0;
         self.pending = 0;
         self.wrap = wrap;
-        self.gzhead = None;
-        self.gzindex = 0;
+        self.hdr.clear();
+        self.hdr_pos = 0;
+        self.hdr_crc = 0;
         self.last_flush = -1;
         self.w_size = w_size;
-        self.w_bits = w_bits;
         self.w_mask = w_size - 1;
         self.hash_size = hash_size;
-        self.hash_bits = hash_bits;
         self.hash_mask = hash_size - 1;
-        self.hash_shift = (hash_bits + MIN_MATCH - 1) / MIN_MATCH;
+        self.hash_shift = hash_shift;
         self.lit_bufsize = lit_bufsize;
         self.sym_end = (lit_bufsize - 1) * 3;
-        self.level = level;
-        self.strategy = strategy;
+        self.cfg = cfg;
+        self.flags = flags;
         self.dyn_ltree = [0; HEAP_SIZE * 2];
         self.dyn_dtree = [0; (2 * D_CODES + 1) * 2];
         self.bl_tree = [0; (2 * BL_CODES + 1) * 2];
@@ -375,7 +326,6 @@ impl Deflate {
         self.match_start = 0;
         self.prev_match = 0;
         self.reset();
-        Z_OK
     }
 
     fn reset_keep(&mut self) {
@@ -408,7 +358,7 @@ impl Deflate {
         self.window_size = 2 * self.w_size;
         let hs = self.hash_size;
         self.head[..hs].fill(0);
-        let c = CONFIG[self.level as usize];
+        let c = CONFIG[self.cfg];
         self.max_lazy_match = c.max_lazy as usize;
         self.good_match = c.good_length as usize;
         self.nice_match = c.nice_length as usize;
@@ -430,14 +380,11 @@ impl Deflate {
 
     fn slide_hash(&mut self) {
         let wsize = self.w_size as u16;
-        for m in self.head[..self.hash_size].iter_mut() {
-            *m = if *m >= wsize { *m - wsize } else { 0 };
-        }
-        for m in self.prev[..self.w_size].iter_mut() {
-            *m = if *m >= wsize { *m - wsize } else { 0 };
-        }
+        slide(&mut self.head[..self.hash_size], wsize);
+        slide(&mut self.prev[..self.w_size], wsize);
     }
 
+    #[inline(never)]
     fn flush_pending(&mut self) {
         let mut len = self.pending;
         if len > self.avail_out {
@@ -467,14 +414,29 @@ impl Deflate {
         self.flush_pending();
     }
 
-    #[inline(always)]
-    fn put_short_msb(&mut self, b: u32) {
-        self.put_byte(((b >> 8) & 0xff) as u8);
-        self.put_byte((b & 0xff) as u8);
+    /// append bytes to pending_buf (headers, trailers)
+    #[inline(never)]
+    fn put_bytes(&mut self, b: &[u8]) {
+        let p = self.pending;
+        self.pending_buf[p..p + b.len()].copy_from_slice(b);
+        self.pending += b.len();
     }
 
-    /// read_buf into the window at `start` (dst = window) — returns bytes read
-    fn read_buf_window(&mut self, start: usize, size: usize) -> usize {
+    /// Copy input[from..from + n] to dst: the bytes of a Uint8Array, or (ext)
+    /// through the JS glue with pako's own `buf.set(strm.input.subarray(..))`,
+    /// which converts other typed arrays and throws for anything else.
+    #[inline(always)]
+    unsafe fn copy_in(&self, from: usize, dst: *mut u8, n: usize) {
+        if self.ext {
+            crate::js_op(crate::OP_DCOPY, from, n, dst as usize);
+        } else {
+            core::ptr::copy_nonoverlapping(self.input.add(from), dst, n);
+        }
+    }
+
+    /// pako's read_buf into `dst` (the window, or the output for
+    /// deflate_stored); returns the number of bytes read
+    fn read_buf(&mut self, dst: *mut u8, size: usize) -> usize {
         let mut len = self.avail_in;
         if len > size {
             len = size;
@@ -483,11 +445,10 @@ impl Deflate {
             return 0;
         }
         self.avail_in -= len;
-        let src = unsafe { core::slice::from_raw_parts(self.input.add(self.next_in), len) };
-        self.window[start..start + len].copy_from_slice(src);
-        if start + len > self.win_dirty {
-            self.win_dirty = start + len;
-        }
+        let src = unsafe {
+            self.copy_in(self.next_in, dst, len);
+            core::slice::from_raw_parts(dst, len)
+        };
         if self.wrap == 1 {
             self.adler = adler32(self.adler, src);
         } else if self.wrap == 2 {
@@ -498,26 +459,19 @@ impl Deflate {
         len
     }
 
+    /// read_buf into the window at `start`
+    fn read_buf_window(&mut self, start: usize, size: usize) -> usize {
+        let dst = unsafe { self.window.as_mut_ptr().add(start) };
+        let n = self.read_buf(dst, size);
+        if start + n > self.win_dirty {
+            self.win_dirty = start + n;
+        }
+        n
+    }
+
     /// read_buf directly into the output (deflate_stored)
     fn read_buf_output(&mut self, len0: usize) -> usize {
-        let mut len = self.avail_in;
-        if len > len0 {
-            len = len0;
-        }
-        if len == 0 {
-            return 0;
-        }
-        self.avail_in -= len;
-        let src = unsafe { core::slice::from_raw_parts(self.input.add(self.next_in), len) };
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.output.add(self.next_out), len) };
-        if self.wrap == 1 {
-            self.adler = adler32(self.adler, src);
-        } else if self.wrap == 2 {
-            self.adler = crc32(self.adler, src);
-        }
-        self.next_in += len;
-        self.total_in += len as u64;
-        len
+        self.read_buf(unsafe { self.output.add(self.next_out) }, len0)
     }
 
     /// longest_match — identical semantics to pako: bytes at offsets 0,1 and
@@ -542,6 +496,7 @@ impl Deflate {
         unsafe {
             let rd16 = |p: usize| -> u16 { (win.add(p) as *const u16).read_unaligned() };
             let rd64 = |p: usize| -> u64 { (win.add(p) as *const u64).read_unaligned() };
+            let max_match = self.cmp_max;
             let scan_start = rd16(scan);
             let mut scan_end = rd16(scan + best_len - 1);
             loop {
@@ -556,7 +511,7 @@ impl Deflate {
                             break;
                         }
                         len += 8;
-                        if len >= MAX_MATCH {
+                        if len >= max_match {
                             break;
                         }
                     }
@@ -690,9 +645,9 @@ impl Deflate {
         if used != 0 {
             if used >= self.w_size {
                 self.matches = 2;
-                let src = unsafe { core::slice::from_raw_parts(self.input.add(self.next_in - self.w_size), self.w_size) };
                 let ws = self.w_size;
-                self.window[..ws].copy_from_slice(src);
+                let dst = self.window.as_mut_ptr();
+                unsafe { self.copy_in(self.next_in - ws, dst, ws) };
                 if ws > self.win_dirty {
                     self.win_dirty = ws;
                 }
@@ -711,9 +666,9 @@ impl Deflate {
                         self.insert = self.strstart;
                     }
                 }
-                let src = unsafe { core::slice::from_raw_parts(self.input.add(self.next_in - used), used) };
                 let ss = self.strstart;
-                self.window[ss..ss + used].copy_from_slice(src);
+                let dst = unsafe { self.window.as_mut_ptr().add(ss) };
+                unsafe { self.copy_in(self.next_in - used, dst, used) };
                 if ss + used > self.win_dirty {
                     self.win_dirty = ss + used;
                 }
@@ -876,7 +831,7 @@ impl Deflate {
             if hash_head != 0 && self.prev_length < self.max_lazy_match && self.strstart - hash_head <= (self.w_size - MIN_LOOKAHEAD) {
                 self.match_length = self.longest_match(hash_head);
                 if self.match_length <= 5
-                    && (self.strategy == Z_FILTERED || (self.match_length == MIN_MATCH && self.strstart - self.match_start > 4096))
+                    && (self.flags & F_FILTERED != 0 || (self.match_length == MIN_MATCH && self.strstart - self.match_start > 4096))
                 {
                     self.match_length = MIN_MATCH - 1;
                 }
@@ -1061,10 +1016,7 @@ impl Deflate {
     }
 
     fn state_ok(&self) -> bool {
-        matches!(
-            self.status,
-            INIT_STATE | GZIP_STATE | EXTRA_STATE | NAME_STATE | COMMENT_STATE | HCRC_STATE | BUSY_STATE | FINISH_STATE
-        )
+        matches!(self.status, INIT_STATE | GZIP_STATE | BUSY_STATE | FINISH_STATE)
     }
 
     fn err(&mut self, code: i32) -> i32 {
@@ -1072,11 +1024,41 @@ impl Deflate {
         code
     }
 
-    #[inline(always)]
-    fn hcrc_update(&mut self, beg: usize) {
-        if self.gzhead.as_ref().map_or(false, |h| h.hcrc) && self.pending > beg {
-            self.adler = crc32(self.adler, &self.pending_buf[beg..self.pending]);
+    /// pako's header states (INIT_STATE, GZIP_STATE .. HCRC_STATE): the
+    /// header bytes, built by the JS glue (set_header), go through
+    /// pending_buf, which is flushed whenever it is full, with the gzip
+    /// header crc in strm.adler updated before every flush. Returns true
+    /// when deflate() has to return Z_OK (output full).
+    #[cold]
+    #[inline(never)]
+    fn write_header(&mut self) -> bool {
+        if self.wrap == 2 && self.hdr_pos == 0 {
+            self.adler = 0;
         }
+        loop {
+            let pos = self.hdr_pos;
+            let n = core::cmp::min(self.hdr.len() - pos, self.pending_buf_size - self.pending);
+            let p = self.pending;
+            self.pending_buf[p..p + n].copy_from_slice(&self.hdr[pos..pos + n]);
+            if pos + n > self.hdr_c0 && pos < self.hdr_crc {
+                let a = core::cmp::max(pos, self.hdr_c0);
+                let e = core::cmp::min(pos + n, self.hdr_crc);
+                self.adler = crc32(self.adler, &self.hdr[a..e]);
+            }
+            self.pending += n;
+            self.hdr_pos += n;
+            if self.hdr_pos == self.hdr.len() {
+                break;
+            }
+            self.flush_pending();
+            if self.pending != 0 {
+                return true;
+            }
+        }
+        self.adler = if self.wrap == 2 { 0 } else { 1 };
+        self.status = BUSY_STATE;
+        self.flush_pending();
+        self.pending != 0
     }
 
     /// deflate(strm, flush) — the zlib state machine (output = self.output)
@@ -1103,233 +1085,26 @@ impl Deflate {
         if self.status == FINISH_STATE && self.avail_in != 0 {
             return self.err(Z_BUF_ERROR);
         }
-        if self.status == INIT_STATE && self.wrap == 0 {
-            self.status = BUSY_STATE;
-        }
-        if self.status == INIT_STATE {
-            let mut header: u32 = (Z_DEFLATED as u32 + ((self.w_bits as u32 - 8) << 4)) << 8;
-            let level_flags: u32 = if self.strategy >= Z_HUFFMAN_ONLY || self.level < 2 {
-                0
-            } else if self.level < 6 {
-                1
-            } else if self.level == 6 {
-                2
-            } else {
-                3
-            };
-            header |= level_flags << 6;
-            if self.strstart != 0 {
-                header |= PRESET_DICT;
-            }
-            header += 31 - (header % 31);
-            self.put_short_msb(header);
-            if self.strstart != 0 {
-                let a = self.adler;
-                self.put_short_msb(a >> 16);
-                self.put_short_msb(a & 0xffff);
-            }
-            self.adler = 1;
-            self.status = BUSY_STATE;
-            self.flush_pending();
-            if self.pending != 0 {
-                self.last_flush = -1;
-                return Z_OK;
-            }
-        }
-        if self.status == GZIP_STATE {
-            self.adler = 0;
-            self.put_byte(31);
-            self.put_byte(139);
-            self.put_byte(8);
-            let xfl = if self.level == 9 {
-                2
-            } else if self.strategy >= Z_HUFFMAN_ONLY || self.level < 2 {
-                4
-            } else {
-                0
-            };
-            if self.gzhead.is_none() {
-                self.put_byte(0);
-                self.put_byte(0);
-                self.put_byte(0);
-                self.put_byte(0);
-                self.put_byte(0);
-                self.put_byte(xfl);
-                self.put_byte(OS_CODE);
-                self.status = BUSY_STATE;
-                self.flush_pending();
-                if self.pending != 0 {
-                    self.last_flush = -1;
-                    return Z_OK;
-                }
-            } else {
-                let h = self.gzhead.as_ref().unwrap();
-                let flags = (h.text as u8)
-                    + if h.hcrc { 2 } else { 0 }
-                    + if h.extra.is_some() { 4 } else { 0 }
-                    + if h.name.is_some() { 8 } else { 0 }
-                    + if h.comment.is_some() { 16 } else { 0 };
-                let time = h.time;
-                let os = h.os;
-                let hcrc = h.hcrc;
-                let extra_len = h.extra.as_ref().map(|e| e.len());
-                self.put_byte(flags);
-                self.put_byte((time & 0xff) as u8);
-                self.put_byte(((time >> 8) & 0xff) as u8);
-                self.put_byte(((time >> 16) & 0xff) as u8);
-                self.put_byte(((time >> 24) & 0xff) as u8);
-                self.put_byte(xfl);
-                self.put_byte(os);
-                if let Some(el) = extra_len {
-                    if el != 0 {
-                        self.put_byte((el & 0xff) as u8);
-                        self.put_byte(((el >> 8) & 0xff) as u8);
-                    }
-                }
-                if hcrc {
-                    self.adler = crc32(self.adler, &self.pending_buf[..self.pending]);
-                }
-                self.gzindex = 0;
-                self.status = EXTRA_STATE;
-            }
-        }
-        if self.status == EXTRA_STATE {
-            if self.gzhead.as_ref().unwrap().extra.is_some() {
-                let mut beg = self.pending;
-                let extra_len = self.gzhead.as_ref().unwrap().extra.as_ref().unwrap().len();
-                let mut left = (extra_len & 0xffff) - self.gzindex;
-                while self.pending + left > self.pending_buf_size {
-                    let copy = self.pending_buf_size - self.pending;
-                    {
-                        let h = self.gzhead.as_ref().unwrap();
-                        let ex = h.extra.as_ref().unwrap();
-                        let p = self.pending;
-                        let gi = self.gzindex;
-                        self.pending_buf[p..p + copy].copy_from_slice(&ex[gi..gi + copy]);
-                    }
-                    self.pending = self.pending_buf_size;
-                    self.hcrc_update(beg);
-                    self.gzindex += copy;
-                    self.flush_pending();
-                    if self.pending != 0 {
-                        self.last_flush = -1;
-                        return Z_OK;
-                    }
-                    beg = 0;
-                    left -= copy;
-                }
-                {
-                    let h = self.gzhead.as_ref().unwrap();
-                    let ex = h.extra.as_ref().unwrap();
-                    let p = self.pending;
-                    let gi = self.gzindex;
-                    let avail = ex.len().saturating_sub(gi);
-                    let n = core::cmp::min(left, avail);
-                    self.pending_buf[p..p + n].copy_from_slice(&ex[gi..gi + n]);
-                }
-                self.pending += left;
-                self.hcrc_update(beg);
-                self.gzindex = 0;
-            }
-            self.status = NAME_STATE;
-        }
-        if self.status == NAME_STATE {
-            if self.gzhead.as_ref().unwrap().name.is_some() {
-                let mut beg = self.pending;
-                loop {
-                    if self.pending == self.pending_buf_size {
-                        self.hcrc_update(beg);
-                        self.flush_pending();
-                        if self.pending != 0 {
-                            self.last_flush = -1;
-                            return Z_OK;
-                        }
-                        beg = 0;
-                    }
-                    let val = {
-                        let name = self.gzhead.as_ref().unwrap().name.as_ref().unwrap();
-                        if self.gzindex < name.len() {
-                            let v = name[self.gzindex];
-                            self.gzindex += 1;
-                            v
-                        } else {
-                            0
-                        }
-                    };
-                    self.put_byte(val);
-                    if val == 0 {
-                        break;
-                    }
-                }
-                self.hcrc_update(beg);
-                self.gzindex = 0;
-            }
-            self.status = COMMENT_STATE;
-        }
-        if self.status == COMMENT_STATE {
-            if self.gzhead.as_ref().unwrap().comment.is_some() {
-                let mut beg = self.pending;
-                loop {
-                    if self.pending == self.pending_buf_size {
-                        self.hcrc_update(beg);
-                        self.flush_pending();
-                        if self.pending != 0 {
-                            self.last_flush = -1;
-                            return Z_OK;
-                        }
-                        beg = 0;
-                    }
-                    let val = {
-                        let c = self.gzhead.as_ref().unwrap().comment.as_ref().unwrap();
-                        if self.gzindex < c.len() {
-                            let v = c[self.gzindex];
-                            self.gzindex += 1;
-                            v
-                        } else {
-                            0
-                        }
-                    };
-                    self.put_byte(val);
-                    if val == 0 {
-                        break;
-                    }
-                }
-                self.hcrc_update(beg);
-            }
-            self.status = HCRC_STATE;
-        }
-        if self.status == HCRC_STATE {
-            if self.gzhead.as_ref().unwrap().hcrc {
-                if self.pending + 2 > self.pending_buf_size {
-                    self.flush_pending();
-                    if self.pending != 0 {
-                        self.last_flush = -1;
-                        return Z_OK;
-                    }
-                }
-                let a = self.adler;
-                self.put_byte((a & 0xff) as u8);
-                self.put_byte(((a >> 8) & 0xff) as u8);
-                self.adler = 0;
-            }
-            self.status = BUSY_STATE;
-            self.flush_pending();
-            if self.pending != 0 {
-                self.last_flush = -1;
-                return Z_OK;
-            }
+        if self.status != BUSY_STATE && self.status != FINISH_STATE && self.write_header() {
+            self.last_flush = -1;
+            return Z_OK;
         }
         if self.avail_in != 0 || self.lookahead != 0 || (flush != Z_NO_FLUSH && self.status != FINISH_STATE) {
-            let bstate = if self.level == 0 {
+            let f = self.flags;
+            let func = CONFIG[self.cfg].func;
+            let bstate = if f & F_STRICT0 != 0 || (f & (F_HUFF | F_RLE) == 0 && func == 0) {
                 self.deflate_stored(flush)
-            } else if self.strategy == Z_HUFFMAN_ONLY {
+            } else if f & F_HUFF != 0 {
                 self.deflate_huff(flush)
-            } else if self.strategy == Z_RLE {
+            } else if f & F_RLE != 0 {
                 self.deflate_rle(flush)
-            } else if CONFIG[self.level as usize].func == 1 {
+            } else if func == 1 {
                 self.deflate_fast(flush)
-            } else {
+            } else if func == 2 {
                 self.deflate_slow(flush)
+            } else {
+                // pako: configuration_table[s.level].func(s, flush) throws
+                crate::js_throw(crate::OP_NOFUNC)
             };
             if bstate == BS_FINISH_STARTED || bstate == BS_FINISH_DONE {
                 self.status = FINISH_STATE;
@@ -1369,20 +1144,12 @@ impl Deflate {
             return Z_STREAM_END;
         }
         if self.wrap == 2 {
-            let a = self.adler;
-            let t = self.total_in as u32;
-            self.put_byte((a & 0xff) as u8);
-            self.put_byte(((a >> 8) & 0xff) as u8);
-            self.put_byte(((a >> 16) & 0xff) as u8);
-            self.put_byte(((a >> 24) & 0xff) as u8);
-            self.put_byte((t & 0xff) as u8);
-            self.put_byte(((t >> 8) & 0xff) as u8);
-            self.put_byte(((t >> 16) & 0xff) as u8);
-            self.put_byte(((t >> 24) & 0xff) as u8);
+            let mut t8 = [0u8; 8];
+            t8[..4].copy_from_slice(&self.adler.to_le_bytes());
+            t8[4..].copy_from_slice(&(self.total_in as u32).to_le_bytes());
+            self.put_bytes(&t8);
         } else {
-            let a = self.adler;
-            self.put_short_msb(a >> 16);
-            self.put_short_msb(a & 0xffff);
+            self.put_bytes(&self.adler.to_be_bytes());
         }
         self.flush_pending();
         if self.wrap > 0 {
@@ -1410,15 +1177,26 @@ impl Deflate {
         }
     }
 
-    pub fn set_header(&mut self, head: GzHead) -> i32 {
-        if !self.state_ok() || self.wrap != 2 {
-            return Z_STREAM_ERROR;
+    /// The header bytes (built by the JS glue from pako's header options),
+    /// whether pako appends a header crc (then computed here) and where the
+    /// bytes it covers begin (after bytes of failed attempts).
+    pub fn set_header(&mut self, blob: &[u8], hcrc: bool, c0: usize) {
+        self.hdr.clear();
+        self.hdr.extend_from_slice(blob);
+        self.hdr_pos = 0;
+        self.hdr_crc = 0;
+        self.hdr_c0 = c0;
+        if hcrc {
+            let c = crc32(0, &blob[c0..]);
+            self.hdr.extend_from_slice(&[c as u8, (c >> 8) as u8]);
+            self.hdr_crc = blob.len();
         }
-        self.gzhead = Some(head);
-        Z_OK
     }
 
-    pub fn set_dictionary(&mut self, dictionary: &[u8]) -> i32 {
+    /// deflateSetDictionary. `adler`: the dictionary's check value when the
+    /// JS glue computed it (pako's adler32 over the raw element values of a
+    /// dictionary that is not a Uint8Array).
+    pub fn set_dictionary(&mut self, dictionary: &[u8], adler: Option<u32>) -> i32 {
         let mut dict_length = dictionary.len();
         if !self.state_ok() {
             return Z_STREAM_ERROR;
@@ -1428,9 +1206,14 @@ impl Deflate {
             return Z_STREAM_ERROR;
         }
         if wrap == 1 {
-            self.adler = adler32(self.adler, dictionary);
+            self.adler = match adler {
+                Some(a) => a,
+                None => adler32(self.adler, dictionary),
+            };
         }
         self.wrap = 0;
+        let ext = self.ext;
+        self.ext = false;
         let mut dict = dictionary;
         if dict_length >= self.w_size {
             if wrap == 0 {
@@ -1478,6 +1261,27 @@ impl Deflate {
         self.input = input;
         self.avail_in = avail;
         self.wrap = wrap;
+        self.ext = ext;
         Z_OK
+    }
+}
+
+/// m = max(m - w, 0) for every entry (explicit SIMD: the crate is built
+/// without auto-vectorization, which mostly bloated cold code)
+fn slide(v: &mut [u16], w: u16) {
+    let mut chunks = v.chunks_exact_mut(8);
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::*;
+        let ws = u16x8_splat(w);
+        for c in &mut chunks {
+            unsafe {
+                let q = c.as_mut_ptr() as *mut v128;
+                v128_store(q, u16x8_sub_sat(v128_load(q), ws));
+            }
+        }
+    }
+    for m in chunks.into_remainder() {
+        *m = m.saturating_sub(w);
     }
 }

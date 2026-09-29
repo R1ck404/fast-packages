@@ -19,6 +19,10 @@ if (!process.argv.includes("--no-opt")) {
   mod.setFeatures(binaryen.Features.All);
   binaryen.setOptimizeLevel(3);
   binaryen.setShrinkLevel(0);
+  // functions with one caller are only inlined when small: fully inlined, the
+  // encoder became one 100 KB function that V8 compiles as a whole at the
+  // first compress() (about 6 ms more for the first call)
+  binaryen.setOneCallerInlineMaxSize(3000);
   mod.optimize();
   bytes = Buffer.from(mod.emitBinary());
   console.log("wasm-opt -O3:", bytes.length, "bytes");

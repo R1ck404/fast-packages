@@ -15,7 +15,7 @@
 // - Mapping buffers ([]byte) are JS strings. Offsets into them (e.g.
 //   FirstNameOffset) are string indices, which equal Go's byte offsets since
 //   mappings are ASCII.
-import { quoteForJSON } from "./helpers.mjs";
+import { quoteForJSON, hasRawBytes, internalQuoteRaw } from "./helpers.mjs";
 
 export class Mapping {
   declare generatedLine: number;
@@ -641,6 +641,8 @@ let quoteBuffer = null;
 const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 const hexDigitCodes = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 65, 66, 67, 68, 69, 70]; // "0123456789ABCDEF"
 export function quoteForJSONLong(text, asciiOnly) {
+  // (raw bytes of invalid UTF-8: Go works on bytes)
+  if (hasRawBytes(text)) return internalQuoteRaw(text, asciiOnly, '"');
   const n = text.length;
   let buf = quoteBuffer;
   // (Grown below when needed: an escape is at most 12 bytes per code unit pair)

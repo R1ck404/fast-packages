@@ -37,14 +37,27 @@ Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#r
   64-bit bit reader, fused tables); the reference decoder handles streams and
   errors.
 * A plain C ABI (`rust/src/lib.rs`) and a small JS glue (`core.mts`, shipped as `core.mjs`) that
-  reproduces wasm-bindgen's behaviour (copies, error types, option parsing
-  through serde including its panics).
+  reproduces wasm-bindgen's behaviour (copies, error types, and the options:
+  `rust/options` is serde_json's parsing for brotli-wasm's options
+  struct without serde, with the same accepted inputs and the same panic
+  messages).
+* A smaller wasm than brotli-wasm's (709 KB vs 1057 KB; -46% gzip, -41% brotli): no serde or
+  `core::fmt` float code, no metablock logging (brotli-wasm only ever sets the
+  quality), and the encoder's four big lookup tables (518 KB) are stored
+  packed and rebuilt at the first encoder use (`rust/vendor/brotli/src/enc/fast_tables.rs`,
+  written by `tools/pack-tables.mjs` from brotli-wasm's own tables).
 
 ## Development
 
     node build.mjs            # cargo build (wasm32, simd128) + wasm-opt -> fastbrotli.wasm
-    npm test                  # API parity, streams, quick decode equivalence
-    npm run test:full         # compress at qualities 0-11 over a corpus, stress inputs, 285k decode checks
+    npm test                  # API parity, options, tables, streams, quick decode equivalence
+    npm run test:full         # + options fuzz, compress at qualities 0-11 over a corpus, stress inputs, 285k decode checks
+
+`test/options.mjs` compares `compress()` options handling with brotli-wasm on
+fresh instances (hand-picked and random values: quality used, thrown value,
+console output); `test/tables.mjs` checks the rebuilt tables against
+brotli-wasm's. `tools/debug-escapes.mjs` and `tools/pack-tables.mjs`
+regenerate the data files they check.
 
 `test/compress-equiv.mjs --dir=<dir> --max=N` runs the compressor over any
 directory (reference outputs from brotli-wasm are cached by content hash).

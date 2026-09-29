@@ -79,37 +79,48 @@ pub fn adler32(adler: u32, buf: &[u8]) -> u32 {
     adler32_scalar(adler, buf)
 }
 
-const fn make_crc_tables() -> [[u32; 256]; 8] {
-    let mut t = [[0u32; 256]; 8];
-    let mut n = 0;
-    while n < 256 {
-        let mut c = n as u32;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
-            k += 1;
+/// crc32 tables (slice-by-8), built on first use: 8 KB of table data is
+/// smaller as ~100 bytes of code (and takes a few microseconds to build).
+static mut CRC_TABLES: [[u32; 256]; 8] = [[0; 256]; 8];
+static mut CRC_READY: bool = false;
+
+#[inline(always)]
+#[allow(static_mut_refs)]
+fn crc_tables() -> &'static [[u32; 256]; 8] {
+    unsafe {
+        if !CRC_READY {
+            make_crc_tables();
         }
-        t[0][n] = c;
-        n += 1;
+        &CRC_TABLES
     }
-    let mut n = 0;
-    while n < 256 {
-        let mut c = t[0][n];
-        let mut k = 1;
-        while k < 8 {
-            c = t[0][(c & 0xff) as usize] ^ (c >> 8);
-            t[k][n] = c;
-            k += 1;
-        }
-        n += 1;
-    }
-    t
 }
 
-static CRC_TABLES: [[u32; 256]; 8] = make_crc_tables();
+#[cold]
+#[inline(never)]
+#[allow(static_mut_refs)]
+unsafe fn make_crc_tables() {
+    let t = &mut CRC_TABLES;
+    for n in 0..256 {
+        let mut c = n as u32;
+        for _ in 0..crate::rolled(8) {
+            c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
+        }
+        t[0][n] = c;
+    }
+    for n in 0..256 {
+        let mut c = t[0][n];
+        for k in 1..8 {
+            c = t[0][(c & 0xff) as usize] ^ (c >> 8);
+            t[k][n] = c;
+        }
+    }
+    CRC_READY = true;
+}
+#[cfg(test)]
 const POLY: u32 = 0xedb88320;
 
 /// a*b mod P (reflected), zlib multmodp
+#[cfg(test)]
 pub(crate) const fn multmodp(a: u32, mut b: u32) -> u32 {
     let mut m: u32 = 1 << 31;
     let mut p: u32 = 0;
@@ -126,6 +137,7 @@ pub(crate) const fn multmodp(a: u32, mut b: u32) -> u32 {
     p
 }
 
+#[cfg(test)]
 const fn make_x2n() -> [u32; 32] {
     let mut t = [0u32; 32];
     let mut p: u32 = 1 << 30;
@@ -138,9 +150,10 @@ const fn make_x2n() -> [u32; 32] {
     }
     t
 }
-static X2N: [u32; 32] = make_x2n();
+
 
 /// x^(n * 2^k) mod P
+#[cfg(test)]
 const fn x2nmodp(mut n: u64, mut k: u32) -> u32 {
     let t = make_x2n();
     let mut p: u32 = 1 << 31;
@@ -154,7 +167,9 @@ const fn x2nmodp(mut n: u64, mut k: u32) -> u32 {
     p
 }
 
+#[cfg(test)]
 const LANE: usize = 8192;
+#[cfg(test)]
 static LANE_OP: u32 = x2nmodp(LANE as u64, 3);
 
 #[inline(always)]
@@ -171,7 +186,7 @@ fn crc_word(t: &[[u32; 256]; 8], c: u32, lo: u32, hi: u32) -> u32 {
 }
 
 fn crc32_1(crc: u32, buf: &[u8]) -> u32 {
-    let t = &CRC_TABLES;
+    let t = crc_tables();
     let mut c = !crc;
     let mut chunks = buf.chunks_exact(8);
     for b in &mut chunks {
@@ -306,19 +321,22 @@ unsafe fn sparse_block(src: *const u8, dst: *mut u64, from: usize, n: usize) {
 }
 
 /// Table method only (reference for tests).
+#[cfg(test)]
 pub fn crc32_tables(crc: u32, buf: &[u8]) -> u32 {
     crc32_lanes(crc, buf)
 }
 
+#[inline(never)]
 pub fn crc32(crc: u32, buf: &[u8]) -> u32 {
     if buf.len() >= C_MIN {
         return crc32_sparse(crc, buf);
     }
-    crc32_lanes(crc, buf)
+    crc32_1(crc, buf)
 }
 
+#[cfg(test)]
 fn crc32_lanes(crc: u32, buf: &[u8]) -> u32 {
-    let t = &CRC_TABLES;
+    let t = crc_tables();
     let mut c = crc;
     let mut p = buf;
     while p.len() >= 3 * LANE {
@@ -352,6 +370,6 @@ fn crc32_lanes(crc: u32, buf: &[u8]) -> u32 {
         c = multmodp(LANE_OP, ab) ^ cd;
         p = &p[3 * LANE..];
     }
-    let _ = &X2N;
+
     crc32_1(c, p)
 }

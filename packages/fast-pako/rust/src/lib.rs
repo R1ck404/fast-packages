@@ -3,14 +3,22 @@
 // multi-member handling, to:'string' segmentation) so results, chunk
 // boundaries and error behaviour match pako 2.1.0 exactly.
 
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 mod checksum;
 mod deflate;
+mod heap;
 mod fasttab;
 mod inflate;
 mod inftrees;
 mod trees;
 
-use deflate::{Deflate, GzHead};
+use deflate::Deflate;
 use inflate::Inflate;
 
 #[cfg(target_arch = "wasm32")]
@@ -18,7 +26,66 @@ use inflate::Inflate;
 extern "C" {
     /// kind: 0 = full chunk, 1 = partial chunk (subarray), 2 = string segment
     fn js_emit(kind: u32, ptr: *const u8, len: usize, chunk_size: usize);
+    /// input access with pako's JS semantics, and pako's own exceptions
+    /// (OP_*); may throw (which unwinds the wasm call)
+    #[link_name = "js_op"]
+    fn js_op_import(op: u32, a: usize, b: usize, c: usize) -> i32;
 }
+
+/// deflate: `buf.set(strm.input.subarray(a, a + b))` into memory at c
+pub const OP_DCOPY: u32 = 0;
+/// inflate: `buf.set(input.subarray(a, a + b))` into memory at c (c = 0:
+/// only the subarray() call)
+pub const OP_ICOPY: u32 = 1;
+/// inflate: element a as int32 (`input[a] << 0`)
+pub const OP_ELEM: u32 = 2;
+/// inflate: element a of a gzip name/comment: 0 if falsy, else 0x10000 |
+/// the code String.fromCharCode gives it
+pub const OP_CHAR: u32 = 3;
+/// inflate: `data[a] !== 0` (the multi-member check in Inflate.push)
+pub const OP_NZ: u32 = 4;
+/// throw: configuration_table[s.level].func is not a function
+pub const OP_NOFUNC: u32 = 5;
+/// throw: new Uint8Array(extra_len) (length in Res.arg)
+pub const OP_EXTRA: u32 = 6;
+/// throw: the dictionary has no subarray() (updatewindow)
+pub const OP_DICT: u32 = 7;
+/// throw: TypedArray set() out of bounds
+pub const OP_RANGE: u32 = 8;
+/// throw: a Deflate.push pako never returns from (see def_push)
+pub const OP_LOOP: u32 = 9;
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub fn js_op(op: u32, a: usize, b: usize, c: usize) -> i32 {
+    unsafe { js_op_import(op, a, b, c) }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn js_op(_op: u32, _a: usize, _b: usize, _c: usize) -> i32 {
+    panic!("js_op")
+}
+
+/// an op that always throws
+#[cold]
+#[inline(never)]
+pub fn js_throw(op: u32) -> ! {
+    js_op(op, 0, 0, 0);
+    #[cfg(target_arch = "wasm32")]
+    core::arch::wasm32::unreachable();
+    #[cfg(not(target_arch = "wasm32"))]
+    unreachable!()
+}
+// no panic machinery: bounds-check failures and the like just trap
+#[cfg(all(target_arch = "wasm32", not(test)))]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    core::arch::wasm32::unreachable()
+}
+
+#[cfg(all(target_arch = "wasm32", not(test)))]
+#[global_allocator]
+static ALLOC: heap::Global = heap::Global;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub static mut EMITTED: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -56,8 +123,8 @@ impl OutBuf {
         self.cap
     }
     #[inline(always)]
-    fn layout(n: usize) -> std::alloc::Layout {
-        unsafe { std::alloc::Layout::from_size_align_unchecked(n, 16) }
+    fn layout(n: usize) -> alloc::alloc::Layout {
+        unsafe { alloc::alloc::Layout::from_size_align_unchecked(n, 16) }
     }
     /// Ensure capacity >= need (doubling), preserving bytes [0, keep).
     #[inline]
@@ -81,7 +148,7 @@ impl OutBuf {
     pub fn hint(&mut self, need: usize) {
         if need > self.cap {
             unsafe {
-                let p = std::alloc::alloc(Self::layout(need));
+                let p = alloc::alloc::alloc(Self::layout(need));
                 if !p.is_null() {
                     self.free();
                     self.ptr = p;
@@ -93,7 +160,7 @@ impl OutBuf {
     #[cold]
     #[inline(never)]
     fn set_cap(&mut self, n: usize, keep: usize) {
-        use std::alloc::{alloc, dealloc, handle_alloc_error, realloc};
+        use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
         unsafe {
             let p = if self.ptr.is_null() {
                 alloc(Self::layout(n))
@@ -116,7 +183,7 @@ impl OutBuf {
     }
     pub fn free(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { std::alloc::dealloc(self.ptr, Self::layout(self.cap)) };
+            unsafe { alloc::alloc::dealloc(self.ptr, Self::layout(self.cap)) };
             self.ptr = core::ptr::null_mut();
             self.cap = 0;
         }
@@ -129,44 +196,32 @@ impl Drop for OutBuf {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn fz_alloc(n: usize) -> *mut u8 {
-    let mut v: Vec<u8> = Vec::with_capacity(n.max(1));
-    let p = v.as_mut_ptr();
-    core::mem::forget(v);
-    p
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fz_free(p: *mut u8, n: usize) {
-    drop(Vec::from_raw_parts(p, 0, n.max(1)));
-}
-
-/// Shared result block read by JS after each call.
+/// Shared result block, filled by the push functions (and before each
+/// js_emit, so onData sees the stream fields pako would show).
 #[repr(C)]
 pub struct Res {
-    pub status: i32,    // 0
-    pub ret: i32,       // 1  push() return value (1 = true)
-    pub ended: i32,     // 2  onEnd called
-    pub end_status: i32,// 3
-    pub msg: i32,       // 4  strm.msg id
-    pub out_ptr: u32,   // 5
-    pub out_len: u32,   // 6
-    pub adler: u32,     // 7
-    pub avail_in: u32,  // 8
-    pub next_in: u32,   // 9
-    pub avail_out: u32, // 10
-    pub next_out: u32,  // 11
-    pub data_type: i32, // 12
-    pub seg_ptr: u32,   // 13 string segments (pairs of u32 start,len)
-    pub seg_len: u32,   // 14 number of segments
-    pub hv: u32,        // 15 header version
-    pub total_in: f64,  // 16..17
-    pub total_out: f64, // 18..19
+    pub ret: i32,        // 0  push() return value (1 = true)
+    pub ended: i32,      // 1  onEnd called
+    pub end_status: i32, // 2
+    pub msg: i32,        // 3  strm.msg id
+    pub out_ptr: u32,    // 4
+    pub out_len: u32,    // 5
+    pub adler: u32,      // 6
+    pub avail_in: u32,   // 7
+    pub next_in: u32,    // 8
+    pub avail_out: u32,  // 9
+    pub next_out: u32,   // 10
+    pub data_type: i32,  // 11
+    pub seg_ptr: u32,    // 12 string segments (pairs of u32 start,len)
+    pub seg_len: u32,    // 13 number of segments
+    pub hv: u32,         // 14 header version
+    pub pad: u32,        // 15
+    pub total_in: f64,   // 16..17
+    pub total_out: f64,  // 18..19
+    pub arg: f64,        // 20..21 argument of a js_op
 }
 
 static mut RES: Res = Res {
-    status: 0,
     ret: 0,
     ended: 0,
     end_status: 0,
@@ -182,8 +237,10 @@ static mut RES: Res = Res {
     seg_ptr: 0,
     seg_len: 0,
     hv: 0,
+    pad: 0,
     total_in: 0.0,
     total_out: 0.0,
+    arg: 0.0,
 };
 
 #[no_mangle]
@@ -193,7 +250,7 @@ pub extern "C" fn fz_res() -> *const Res {
 }
 
 #[allow(static_mut_refs)]
-fn res() -> &'static mut Res {
+pub fn res() -> &'static mut Res {
     unsafe { &mut RES }
 }
 
@@ -203,49 +260,47 @@ pub struct DefSession {
     d: Box<Deflate>,
     out: OutBuf,
     chunk_base: usize,
+    /// chunkSize for new chunks (the option, read at every push)
     chunk_size: usize,
+    /// size of the current chunk
+    cur_cs: usize,
     produced: usize,
     streaming: bool,
     input: OutBuf,
 }
 
-/// Create (or re-initialize) a deflate session. Returns 0 and sets
-/// RES.status on invalid parameters.
+/// Create (or re-initialize) a deflate session with deflateInit2's
+/// parameters as derived by the JS glue (see Deflate::reinit). hdr: the
+/// header pako writes without a dictionary or header option (1 << 16 | the
+/// zlib header, 2 << 16 | gzip XFL; 0: none or set later).
 #[no_mangle]
-pub unsafe extern "C" fn def_init(prev: *mut DefSession, level: i32, method: i32, wbits: i32, mem_level: i32, strategy: i32, chunk_size: usize, streaming: i32) -> *mut DefSession {
-    let r = res();
-    if !prev.is_null() {
-        let s = &mut *prev;
-        let st = s.d.reinit(level, method, wbits, mem_level, strategy);
-        if st != 0 {
-            r.status = st;
-            return core::ptr::null_mut();
-        }
-        s.chunk_size = chunk_size;
-        s.streaming = streaming != 0;
-        s.chunk_base = 0;
-        s.produced = 0;
-        r.status = 0;
-        return prev;
+pub unsafe extern "C" fn def_init(prev: *mut DefSession, cfg: usize, flags: u32, wrap: i32, w_log: usize, hash_log: usize, hash_shift: usize, lit_log: usize, streaming: i32, hdr: u32) -> *mut DefSession {
+    let sp = if prev.is_null() {
+        Box::into_raw(Box::new(DefSession {
+            d: Deflate::new(),
+            out: OutBuf::new(),
+            chunk_base: 0,
+            chunk_size: 0,
+            cur_cs: 0,
+            produced: 0,
+            streaming: false,
+            input: OutBuf::new(),
+        }))
+    } else {
+        prev
+    };
+    let s = &mut *sp;
+    s.d.reinit(cfg, flags, wrap, w_log, hash_log, hash_shift, lit_log);
+    if hdr >> 16 == 1 {
+        s.d.set_header(&(hdr as u16).to_be_bytes(), false, 0);
+    } else if hdr != 0 {
+        s.d.set_header(&[31, 139, 8, 0, 0, 0, 0, 0, hdr as u8, 3], false, 0);
     }
-    match Deflate::new(level, method, wbits, mem_level, strategy) {
-        Ok(d) => {
-            r.status = 0;
-            Box::into_raw(Box::new(DefSession {
-                d,
-                out: OutBuf::new(),
-                chunk_base: 0,
-                chunk_size,
-                produced: 0,
-                streaming: streaming != 0,
-                input: OutBuf::new(),
-            }))
-        }
-        Err(e) => {
-            r.status = e;
-            core::ptr::null_mut()
-        }
-    }
+    s.d.ext = false;
+    s.streaming = streaming != 0;
+    s.chunk_base = 0;
+    s.produced = 0;
+    sp
 }
 
 #[no_mangle]
@@ -255,7 +310,8 @@ pub unsafe extern "C" fn def_destroy(s: *mut DefSession) {
     }
 }
 
-/// Buffer for the next push's input (valid until the next call).
+/// Buffer for the next push's input, header or dictionary (valid until the
+/// next call).
 #[no_mangle]
 pub unsafe extern "C" fn def_input(s: *mut DefSession, n: usize) -> *mut u8 {
     let s = &mut *s;
@@ -263,44 +319,21 @@ pub unsafe extern "C" fn def_input(s: *mut DefSession, n: usize) -> *mut u8 {
     s.input.ptr()
 }
 
+/// The header bytes (n at offset off in def_input), whether a header crc
+/// follows, and where the bytes it covers begin.
 #[no_mangle]
-pub unsafe extern "C" fn def_set_header(
-    s: *mut DefSession,
-    text: i32,
-    hcrc: i32,
-    time: u32,
-    os: u32,
-    extra_ptr: *const u8,
-    extra_len: i32,
-    name_ptr: *const u8,
-    name_len: i32,
-    comment_ptr: *const u8,
-    comment_len: i32,
-) -> i32 {
+pub unsafe extern "C" fn def_set_header(s: *mut DefSession, off: usize, n: usize, hcrc: i32, c0: usize) {
     let s = &mut *s;
-    let v = |p: *const u8, n: i32| -> Option<Vec<u8>> {
-        if n < 0 {
-            None
-        } else {
-            Some(core::slice::from_raw_parts(p, n as usize).to_vec())
-        }
-    };
-    s.d.set_header(GzHead {
-        text: text != 0,
-        hcrc: hcrc != 0,
-        time,
-        os: os as u8,
-        extra: v(extra_ptr, extra_len),
-        name: v(name_ptr, name_len),
-        comment: v(comment_ptr, comment_len),
-    })
+    s.d.set_header(core::slice::from_raw_parts(s.input.ptr().add(off), n), hcrc != 0, c0);
 }
 
+/// deflateSetDictionary with the dictionary bytes (n, in def_input); `has`:
+/// `adler` is the dictionary's check value (computed by the JS glue).
 #[no_mangle]
-pub unsafe extern "C" fn def_set_dict(s: *mut DefSession, p: *const u8, n: usize) -> i32 {
+pub unsafe extern "C" fn def_set_dict(s: *mut DefSession, n: usize, adler: u32, has: i32) -> i32 {
     let s = &mut *s;
-    let dict = core::slice::from_raw_parts(p, n).to_vec();
-    s.d.set_dictionary(&dict)
+    let dict = core::slice::from_raw_parts(s.input.ptr(), n).to_vec();
+    s.d.set_dictionary(&dict, if has != 0 { Some(adler) } else { None })
 }
 
 unsafe fn def_new_chunk(s: &mut DefSession) {
@@ -309,28 +342,33 @@ unsafe fn def_new_chunk(s: &mut DefSession) {
     } else {
         s.chunk_base = s.produced;
     }
-    let need = s.chunk_base + s.chunk_size + SLACK;
+    s.cur_cs = s.chunk_size;
+    let need = s.chunk_base + s.cur_cs + SLACK;
     s.out.reserve(need, s.chunk_base);
     s.d.output = s.out.ptr().add(s.chunk_base);
     s.d.next_out = 0;
-    s.d.avail_out = s.chunk_size;
+    s.d.avail_out = s.cur_cs;
 }
 
 unsafe fn def_emit(s: &mut DefSession, full: bool) {
     let len = s.d.next_out;
     if s.streaming {
-        js_emit(if full { 0 } else { 1 }, s.out.ptr().add(s.chunk_base), len, s.chunk_size);
+        def_fill_res(s);
+        js_emit(if full { 0 } else { 1 }, s.out.ptr().add(s.chunk_base), len, s.cur_cs);
     } else {
         s.produced = s.chunk_base + len;
     }
 }
 
-/// pako Deflate.prototype.push for input already placed in def_input().
+/// pako Deflate.prototype.push for input already placed in def_input()
+/// (ext: read through js_op instead).
 #[no_mangle]
-pub unsafe extern "C" fn def_push(sp: *mut DefSession, len: usize, flush: i32) -> i32 {
+pub unsafe extern "C" fn def_push(sp: *mut DefSession, len: usize, flush: i32, chunk_size: usize, ext: i32) -> i32 {
     let s = &mut *sp;
     let r = res();
     r.ended = 0;
+    s.chunk_size = chunk_size;
+    s.d.ext = ext != 0;
     s.d.input = s.input.ptr() as *const u8;
     s.d.next_in = 0;
     s.d.avail_in = len;
@@ -338,10 +376,18 @@ pub unsafe extern "C" fn def_push(sp: *mut DefSession, len: usize, flush: i32) -
         s.chunk_base = 0;
         // one-shot: capacity hint only (compressed output is rarely > len/2
         // for real data; the buffer still grows on demand)
-        s.out.hint((len / 2).min(1 << 28) + s.chunk_size + SLACK);
+        s.out.hint((len / 2).min(1 << 28) + chunk_size + SLACK);
     }
     let mut ret = 1;
+    // pako can loop forever: Z_PARTIAL_FLUSH into chunks of 1 byte writes a
+    // new empty block per chunk. More output than the input, window, pending
+    // buffer and markers can account for means that loop.
+    let t0 = s.d.total_out;
+    let budget = (len as u64) + 2 * s.d.w_size as u64 + 4 * s.d.lit_bufsize as u64 + (1 << 20);
     loop {
+        if s.d.total_out - t0 > budget {
+            js_throw(OP_LOOP);
+        }
         if s.d.avail_out == 0 {
             def_new_chunk(s);
         }
@@ -394,6 +440,19 @@ unsafe fn def_fill_res(s: &mut DefSession) {
     r.out_len = s.produced as u32;
 }
 
+/// crc32 (for the JS glue: pako's gzip header crc after an exception)
+#[no_mangle]
+pub unsafe extern "C" fn fz_crc32(crc: u32, p: *const u8, n: usize) -> u32 {
+    checksum::crc32(crc, core::slice::from_raw_parts(p, n))
+}
+
+/// the stream fields as they are (after an exception thrown by a js_op or
+/// an onData handler)
+#[no_mangle]
+pub unsafe extern "C" fn def_res(s: *mut DefSession) {
+    def_fill_res(&mut *s);
+}
+
 // ---------------------------------------------------------------- inflate
 
 pub struct InfSession {
@@ -401,67 +460,57 @@ pub struct InfSession {
     out: OutBuf,
     chunk_base: usize,
     chunk_size: usize,
+    cur_cs: usize,
     produced: usize,
     streaming: bool,
     to_string: bool,
     input: OutBuf,
     dict: Option<Vec<u8>>,
+    /// inflate::DICT_* and the id computed by the JS glue
+    dict_ext: u32,
+    dict_id: u32,
     segs: Vec<u32>,
-    wbits: i32,
     ended: bool,
 }
 
+/// Create (or re-initialize) an inflate session (wrap and wbits as pako's
+/// inflateReset2 derives them, computed by the JS glue).
 #[no_mangle]
-pub unsafe extern "C" fn inf_init(prev: *mut InfSession, wbits: i32, chunk_size: usize, streaming: i32, to_string: i32) -> *mut InfSession {
-    let r = res();
-    if !prev.is_null() {
-        let s = &mut *prev;
-        let st = s.s.reinit(wbits);
-        if st != 0 {
-            r.status = st;
-            return core::ptr::null_mut();
-        }
-        s.chunk_size = chunk_size;
-        s.streaming = streaming != 0;
-        s.to_string = to_string != 0;
-        s.chunk_base = 0;
-        s.produced = 0;
-        s.dict = None;
-        s.segs.clear();
-        s.wbits = wbits;
-        s.ended = false;
-        r.status = 0;
-        s.s.get_header();
-        s.s.contiguous = streaming == 0;
-        s.s.defer_check = streaming == 0;
-        return prev;
-    }
-    match Inflate::new(wbits) {
-        Ok(mut st) => {
-            r.status = 0;
-            st.get_header();
-            st.contiguous = streaming == 0;
-            st.defer_check = streaming == 0;
-            Box::into_raw(Box::new(InfSession {
-                s: st,
-                out: OutBuf::new(),
-                chunk_base: 0,
-                chunk_size,
-                produced: 0,
-                streaming: streaming != 0,
-                to_string: to_string != 0,
-                input: OutBuf::new(),
-                dict: None,
-                segs: Vec::new(),
-                wbits,
-                ended: false,
-            }))
-        }
-        Err(e) => {
-            r.status = e;
-            core::ptr::null_mut()
-        }
-    }
+pub unsafe extern "C" fn inf_init(prev: *mut InfSession, wrap: i32, wbits: u32, streaming: i32) -> *mut InfSession {
+    let sp = if prev.is_null() {
+        Box::into_raw(Box::new(InfSession {
+            s: Inflate::new(),
+            out: OutBuf::new(),
+            chunk_base: 0,
+            chunk_size: 0,
+            cur_cs: 0,
+            produced: 0,
+            streaming: false,
+            to_string: false,
+            input: OutBuf::new(),
+            dict: None,
+            dict_ext: 0,
+            dict_id: 0,
+            segs: Vec::new(),
+            ended: false,
+        }))
+    } else {
+        prev
+    };
+    let s = &mut *sp;
+    s.s.reinit(wrap, wbits);
+    s.streaming = streaming != 0;
+    s.chunk_base = 0;
+    s.produced = 0;
+    s.dict = None;
+    s.segs.clear();
+    s.ended = false;
+    s.s.get_header();
+    s.s.contiguous = streaming == 0;
+    s.s.defer_check = streaming == 0;
+    s.s.wide = false;
+    s.s.nan_have = false;
+    sp
 }
 
 #[no_mangle]
@@ -478,15 +527,23 @@ pub unsafe extern "C" fn inf_input(s: *mut InfSession, n: usize) -> *mut u8 {
     s.input.ptr()
 }
 
-/// Store the dictionary option; in raw mode it is applied immediately
-/// (pako does that in the constructor). Returns the zlib status.
+/// Store the dictionary option (n bytes in inf_input; ext: inflate::DICT_*,
+/// 4 = none (a falsy option); id: its id when computed by the JS glue); in
+/// raw mode it is applied immediately (pako does that in the constructor).
+/// Returns the zlib status.
 #[no_mangle]
-pub unsafe extern "C" fn inf_set_dict(s: *mut InfSession, p: *const u8, n: usize, raw: i32) -> i32 {
+pub unsafe extern "C" fn inf_set_dict(s: *mut InfSession, n: usize, raw: i32, ext: u32, id: u32) -> i32 {
     let s = &mut *s;
-    let d = core::slice::from_raw_parts(p, n).to_vec();
+    if ext == 4 {
+        s.dict = None;
+        return 0;
+    }
+    let d = core::slice::from_raw_parts(s.input.ptr(), n).to_vec();
+    s.dict_ext = ext;
+    s.dict_id = id;
     let mut st = 0;
     if raw != 0 {
-        st = s.s.set_dictionary(&d);
+        st = s.s.set_dictionary(&d, ext, id);
     }
     s.dict = Some(d);
     st
@@ -515,7 +572,7 @@ static UTF8LEN: [u8; 256] = {
     t
 };
 
-/// pako strings.utf8border(buf, max) with buf.length == chunk_size
+/// pako strings.utf8border(buf, max) with buf.length == chunk_len
 fn utf8border(buf: &[u8], chunk_len: usize, max0: usize) -> usize {
     let mut max = if max0 == 0 { chunk_len } else { max0 };
     if max > chunk_len {
@@ -544,27 +601,47 @@ unsafe fn inf_new_chunk(s: &mut InfSession) {
     } else {
         s.chunk_base = s.produced;
     }
-    let need = s.chunk_base + s.chunk_size + SLACK;
+    s.cur_cs = s.chunk_size;
+    let need = s.chunk_base + s.cur_cs + SLACK;
     s.out.reserve(need, s.chunk_base);
     s.s.out_base = s.out.ptr();
     s.s.output = s.out.ptr().add(s.chunk_base);
     s.s.next_out = 0;
-    s.s.avail_out = s.chunk_size;
+    s.s.avail_out = s.cur_cs;
 }
 
-/// pako Inflate.prototype.push. `ab` = input was an ArrayBuffer (pako's
-/// multi-member check then reads `undefined`, which is always !== 0).
+/// inf_push flags: the input was an ArrayBuffer (data[i] is undefined)
+const IF_AB: i32 = 1;
+/// options.to === 'string'
+const IF_STRING: i32 = 2;
+/// input elements are read through js_op
+const IF_WIDE: i32 = 4;
+/// (wide) pako's avail_in is NaN
+const IF_NAN: i32 = 8;
+/// strm.input is falsy
+const IF_NULL: i32 = 16;
+
+/// pako Inflate.prototype.push for input placed in inf_input() (or read
+/// through js_op: IF_WIDE; len is then the element count).
 #[no_mangle]
-pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, ab: i32) -> i32 {
+pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, flags: i32, chunk_size: usize) -> i32 {
     let s = &mut *sp;
     let r = res();
     r.ended = 0;
     s.segs.clear();
-    s.s.input = s.input.ptr() as *const u8;
+    s.chunk_size = chunk_size;
+    s.to_string = flags & IF_STRING != 0;
+    let wide = flags & IF_WIDE != 0;
+    let nan = flags & IF_NAN != 0;
+    if wide {
+        s.s.set_wide();
+    }
+    s.s.nan_have = nan;
+    s.s.input = if flags & IF_NULL != 0 { core::ptr::null() } else { s.input.ptr() as *const u8 };
     s.s.next_in = 0;
     s.s.avail_in = len;
     let data = s.input.ptr() as *const u8;
-    if !s.streaming && s.produced == 0 && s.chunk_base == 0 {
+    if !s.streaming && s.produced == 0 && s.chunk_base == 0 && !wide {
         // one-shot: size the output buffer up front (only a capacity hint;
         // the chunking below is unchanged). A gzip member's trailer holds
         // the uncompressed size; otherwise guess 4x.
@@ -575,7 +652,7 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
         if len >= 18 && (s.s.wrap & 2) != 0 && *data == 0x1f && *data.add(1) == 0x8b {
             hint = (data.add(len - 4) as *const u32).read_unaligned() as usize;
         }
-        s.out.hint(hint.min(cap) + s.chunk_size + SLACK);
+        s.out.hint(hint.min(cap) + chunk_size + SLACK);
     }
     let mut ret = 1;
     loop {
@@ -584,17 +661,22 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
         }
         let mut status = s.s.inflate(flush);
         if status == inflate::Z_NEED_DICT {
-            if let Some(d) = s.dict.take() {
-                status = s.s.set_dictionary(&d);
+            if let Some(d) = s.dict.as_deref() {
+                status = s.s.set_dictionary(d, s.dict_ext, s.dict_id);
                 if status == 0 {
                     status = s.s.inflate(flush);
                 } else if status == inflate::Z_DATA_ERROR {
                     status = inflate::Z_NEED_DICT;
                 }
-                s.dict = Some(d);
             }
         }
-        while s.s.avail_in > 0 && status == inflate::Z_STREAM_END && s.s.wrap > 0 && (ab != 0 || *data.add(s.s.next_in) != 0) {
+        // (the next member starts unless the next input element is 0)
+        while s.s.avail_in > 0
+            && !nan
+            && status == inflate::Z_STREAM_END
+            && s.s.wrap > 0
+            && (flags & IF_AB != 0 || if wide { js_op(OP_NZ, s.s.next_in, 0, 0) != 0 } else { *data.add(s.s.next_in) != 0 })
+        {
             s.s.reset();
             status = s.s.inflate(flush);
         }
@@ -613,10 +695,14 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
             let next_out = s.s.next_out;
             if s.to_string {
                 let chunk = core::slice::from_raw_parts(s.out.ptr().add(s.chunk_base), next_out);
-                let border = utf8border(chunk, s.chunk_size, next_out);
+                let border = utf8border(chunk, s.cur_cs, next_out);
                 let tail = next_out - border;
+                // (pako realigns the counters before onData)
+                s.s.next_out = tail;
+                s.s.avail_out = s.cur_cs - tail;
                 if s.streaming {
-                    js_emit(2, s.out.ptr().add(s.chunk_base), border, s.chunk_size);
+                    inf_fill_res(s);
+                    js_emit(2, s.out.ptr().add(s.chunk_base), border, s.cur_cs);
                     if tail != 0 {
                         let base = s.out.ptr().add(s.chunk_base);
                         core::ptr::copy(base.add(border), base, tail);
@@ -627,15 +713,14 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
                     // the chunk now logically starts at the tail
                     s.chunk_base += border;
                     s.produced = s.chunk_base + tail;
-                    let need = s.chunk_base + s.chunk_size + SLACK;
+                    let need = s.chunk_base + s.cur_cs + SLACK;
                     s.out.reserve(need, s.produced);
                     s.s.out_base = s.out.ptr();
                     s.s.output = s.out.ptr().add(s.chunk_base);
                 }
-                s.s.next_out = tail;
-                s.s.avail_out = s.chunk_size - tail;
             } else if s.streaming {
-                js_emit(if s.chunk_size == next_out { 0 } else { 1 }, s.out.ptr().add(s.chunk_base), next_out, s.chunk_size);
+                inf_fill_res(s);
+                js_emit(if s.cur_cs == next_out { 0 } else { 1 }, s.out.ptr().add(s.chunk_base), next_out, s.cur_cs);
             } else {
                 s.produced = s.chunk_base + next_out;
             }
@@ -661,6 +746,12 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
         s.produced = s.chunk_base + s.s.next_out;
     }
     r.ret = ret;
+    inf_fill_res(s);
+    ret
+}
+
+unsafe fn inf_fill_res(s: &mut InfSession) {
+    let r = res();
     r.msg = s.s.msg as i32;
     r.adler = s.s.adler;
     r.avail_in = s.s.avail_in as u32;
@@ -675,21 +766,26 @@ pub unsafe extern "C" fn inf_push(sp: *mut InfSession, len: usize, flush: i32, a
     r.seg_ptr = s.segs.as_ptr() as u32;
     r.seg_len = (s.segs.len() / 2) as u32;
     r.hv = s.s.head.version;
-    ret
+}
+
+/// the stream fields as they are (after an exception)
+#[no_mangle]
+pub unsafe extern "C" fn inf_res(s: *mut InfSession) {
+    inf_fill_res(&mut *s);
 }
 
 /// Header snapshot for JS: returns pointer to a small struct.
 #[repr(C)]
 pub struct HeadOut {
+    time: f64,
+    extra_len: f64,
     text: u32,
-    time: u32,
     xflags: u32,
-    os: u32,
+    os: i32,
     extra_ptr: u32,
-    extra_len: i32, // -1 = null
-    extra_field_len: u32,
+    extra_bytes: i32, // -1 = null
     name_ptr: u32,
-    name_len: i32,
+    name_len: i32, // UTF-16 code units; -1 = null
     comment_ptr: u32,
     comment_len: i32,
     hcrc: u32,
@@ -697,13 +793,13 @@ pub struct HeadOut {
 }
 
 static mut HEAD_OUT: HeadOut = HeadOut {
+    time: 0.0,
+    extra_len: 0.0,
     text: 0,
-    time: 0,
     xflags: 0,
     os: 0,
     extra_ptr: 0,
-    extra_len: -1,
-    extra_field_len: 0,
+    extra_bytes: -1,
     name_ptr: 0,
     name_len: 0,
     comment_ptr: 0,
@@ -724,25 +820,17 @@ pub unsafe extern "C" fn inf_header(sp: *mut InfSession) -> *const HeadOut {
     match &h.extra {
         Some(e) => {
             o.extra_ptr = e.as_ptr() as u32;
-            o.extra_len = e.len() as i32;
+            o.extra_bytes = e.len() as i32;
         }
-        None => o.extra_len = -1,
+        None => o.extra_bytes = -1,
     }
-    o.extra_field_len = h.extra_len;
-    match &h.name {
-        Some(e) => {
-            o.name_ptr = e.as_ptr() as u32;
-            o.name_len = e.len() as i32;
-        }
-        None => o.name_len = -1,
-    }
-    match &h.comment {
-        Some(e) => {
-            o.comment_ptr = e.as_ptr() as u32;
-            o.comment_len = e.len() as i32;
-        }
-        None => o.comment_len = -1,
-    }
+    o.extra_len = h.extra_len;
+    let v = |x: &Option<Vec<u16>>| match x {
+        Some(e) => (e.as_ptr() as u32, e.len() as i32),
+        None => (0, -1),
+    };
+    (o.name_ptr, o.name_len) = v(&h.name);
+    (o.comment_ptr, o.comment_len) = v(&h.comment);
     o.hcrc = h.hcrc;
     o.done = h.done as u32;
     o as *const HeadOut
@@ -771,12 +859,10 @@ pub unsafe extern "C" fn def_trim(sp: *mut DefSession, keep: usize) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn fz_crc32(crc: u32, p: *const u8, n: usize) -> u32 {
-    checksum::crc32(crc, unsafe { core::slice::from_raw_parts(p, n) })
-}
-
-#[no_mangle]
-pub extern "C" fn fz_adler32(a: u32, p: *const u8, n: usize) -> u32 {
-    checksum::adler32(a, unsafe { core::slice::from_raw_parts(p, n) })
+/// `n` through an opaque stack round trip: the bound of small setup loops
+/// (once per stream or block), so LLVM keeps them as loops instead of
+/// unrolling them for speed nobody needs there.
+#[inline(always)]
+pub(crate) fn rolled(n: usize) -> usize {
+    core::hint::black_box(n)
 }

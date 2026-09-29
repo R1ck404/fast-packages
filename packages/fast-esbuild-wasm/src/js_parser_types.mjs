@@ -427,9 +427,9 @@ export class invalidLog {
 }
 
 export class syntaxFeature {
-  ;                       
+  ;                     // compat.JSFeature
   ;                    
-  constructor(feature = 0, token = RANGE_ZERO) {
+  constructor(feature = null, token = RANGE_ZERO) {
     this.feature = feature;
     this.token = token;
   }

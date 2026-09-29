@@ -1,11 +1,12 @@
-// options.mjs getOptions() vs acorn's own getOptions (the vendored
-// copy of acorn 8.18's code): result keys (order), values, the onToken /
-// onComment array wrappers' behaviour, thrown errors, and the exact sequence
-// of operations on the given options object (via a Proxy).
-import * as V from "../vendor/acorn.mjs";
-import { getOptions as fastGetOptions } from "../options.mjs";
+// shared.mjs getOptions() vs acorn 8.18's own getOptions (its code from
+// node_modules, bound to the same defaultOptions object): result keys
+// (order), values, the onToken / onComment array wrappers' behaviour, thrown
+// errors, and the exact sequence of operations on the given options object
+// (via a Proxy).
+import { getOptions as fastGetOptions, defaultOptions, SourceLocation, Position } from "../src/shared.mjs";
+import { acornGetOptions as makeAcornGetOptions } from "./acorn-ref.mjs";
 
-const acornGetOptions = V._getOptions;
+const acornGetOptions = makeAcornGetOptions(defaultOptions, SourceLocation);
 let checks = 0, fails = 0;
 
 function describe(o) {
@@ -50,9 +51,9 @@ function run(fn, opts) {
       opts.onToken.length = 0;
     }
     if (typeof o.onComment === "function" && Array.isArray(opts && opts.onComment)) {
-      o.onComment.call(o, true, "c", 1, 5, new V.Position(1, 1), new V.Position(1, 5));
-      o.onComment.call(o, false, "d", 6, 9, new V.Position(2, 0), new V.Position(2, 3));
-      extra += " comments=" + JSON.stringify(opts.onComment) + " protos=" + opts.onComment.map((c) => c.loc && Object.getPrototypeOf(c.loc) === V.SourceLocation.prototype).join();
+      o.onComment.call(o, true, "c", 1, 5, new Position(1, 1), new Position(1, 5));
+      o.onComment.call(o, false, "d", 6, 9, new Position(2, 0), new Position(2, 3));
+      extra += " comments=" + JSON.stringify(opts.onComment) + " protos=" + opts.onComment.map((c) => c.loc && Object.getPrototypeOf(c.loc) === SourceLocation.prototype).join();
       opts.onComment.length = 0;
     }
     return "OK " + describe(o) + extra;
@@ -104,6 +105,7 @@ for (const ecmaVersion of ECMA)
           if (i % 9 === 0) o.onComment = () => {};
           if (i % 10 === 0) o.sourceFile = "f.js";
           if (i % 17 === 0) o.unknownOption = 1;
+          if (i % 19 === 0) o.startLocation = { line: 3, column: 4 };
           return o;
         });
       }
@@ -117,19 +119,19 @@ check("array opts", () => Object.assign([], { ecmaVersion: 2020 }));
 check("null ecmaVersion", () => ({ ecmaVersion: null, sourceType: "module" }));
 check("commonjs+await", () => ({ ecmaVersion: "latest", sourceType: "commonjs", allowAwaitOutsideFunction: true }));
 // modified defaultOptions
-const saved = { ...V.defaultOptions };
-V.defaultOptions.locations = true;
+const saved = { ...defaultOptions };
+defaultOptions.locations = true;
 check("defaultOptions value changed", () => ({ ecmaVersion: "latest" }));
-V.defaultOptions.extraKey = 5;
+defaultOptions.extraKey = 5;
 check("defaultOptions key added", () => ({ ecmaVersion: "latest" }));
-delete V.defaultOptions.extraKey;
-delete V.defaultOptions.strict;
+delete defaultOptions.extraKey;
+delete defaultOptions.strict;
 check("defaultOptions key deleted", () => ({ ecmaVersion: "latest" }));
-V.defaultOptions.strict = saved.strict; // re-added: now last in iteration order
+defaultOptions.strict = saved.strict; // re-added: now last in iteration order
 check("defaultOptions key re-added (order changed)", () => ({ ecmaVersion: "latest", strict: true }));
 // restore the original order
-for (const k of Object.keys(V.defaultOptions)) delete V.defaultOptions[k];
-Object.assign(V.defaultOptions, saved);
+for (const k of Object.keys(defaultOptions)) delete defaultOptions[k];
+Object.assign(defaultOptions, saved);
 Object.prototype.polluted = 1;
 check("Object.prototype polluted", () => ({ ecmaVersion: "latest" }));
 delete Object.prototype.polluted;

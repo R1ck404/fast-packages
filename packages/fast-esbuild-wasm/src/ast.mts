@@ -2,6 +2,7 @@
 import { Path, RANGE_ZERO } from "./logger.mjs";
 import type { Range } from "./logger.mjs";
 import { utf16EqualsString } from "./helpers.mjs";
+import { GoPanic } from "./gopanic.mjs";
 
 // ImportKind
 export const ImportEntryPoint = 0;
@@ -113,6 +114,17 @@ export class ImportRecord {
   }
 }
 
+export class GlobPattern {
+  declare parts: any[]; // []helpers.GlobPart
+  declare exportAlias: string;
+  declare kind: number;
+  constructor(parts = [], exportAlias = "", kind = ImportEntryPoint) {
+    this.parts = parts;
+    this.exportAlias = exportAlias;
+    this.kind = kind;
+  }
+}
+
 // AssertOrWithKeyword
 export const AssertKeyword = 0;
 export const WithKeyword = 1;
@@ -220,19 +232,32 @@ export function symbolKindIsUnboundOrInjected(kind) {
   return kind === SymbolUnbound || kind === SymbolInjected;
 }
 
-// Ref: (sourceIndex << 24) | innerIndex, InvalidRef = -1
+// Ref: Go's {SourceIndex, InnerIndex} as a number (InvalidRef = -1).
+// JS-only: a ref is usually a small integer (a V8 "Smi"): (sourceIndex << 18)
+// | innerIndex, for up to 4096 files with up to 262143 symbols each. Refs
+// beyond that (bigger builds, or huge files) are 2^30 + sourceIndex * 2^26 +
+// innerIndex (a double). Each ref has one number either way, so refs
+// compare and hash like Go's structs; nothing orders refs by their numbers.
 export const InvalidRef = -1;
-export const REF_INNER_BITS = 24;
-export const REF_INNER_MASK = 0xffffff;
+export const REF_INNER_BITS = 18;
+export const REF_INNER_MASK = 0x3ffff;
+const REF_MAX_SOURCE_INDEX = 0xfff;
+const REF_BIG_BASE = 1073741824; // 2^30
+const REF_SMALL_MAX = 0x3fffffff; // (2^30 - 1, a Smi: comparing with it is cheaper than with 2^30)
+const REF_BIG_INNER = 67108864; // 2^26
+const REF_BIG_MAX_SOURCE_INDEX = 134217727; // (2^27 - 1: the result stays below 2^53)
 export function makeRef(sourceIndex, innerIndex) {
-  if (innerIndex > REF_INNER_MASK) throw new globalThis.Error("@r1ck404/fast-esbuild-wasm: too many symbols");
-  return (sourceIndex << REF_INNER_BITS) | innerIndex;
+  if (innerIndex <= REF_INNER_MASK && sourceIndex <= REF_MAX_SOURCE_INDEX) return (sourceIndex << REF_INNER_BITS) | innerIndex;
+  // (Go's indices are uint32; this many symbols in one file, or files, would
+  // need more memory than a JavaScript engine has)
+  if (innerIndex >= REF_BIG_INNER || sourceIndex > REF_BIG_MAX_SOURCE_INDEX) throw new GoPanic("Internal error: too many symbols");
+  return REF_BIG_BASE + sourceIndex * REF_BIG_INNER + innerIndex;
 }
 export function refSource(ref) {
-  return ref >>> REF_INNER_BITS;
+  return ref <= REF_SMALL_MAX ? ref >>> REF_INNER_BITS : Math.floor((ref - REF_BIG_BASE) / REF_BIG_INNER);
 }
 export function refInner(ref) {
-  return ref & REF_INNER_MASK;
+  return ref <= REF_SMALL_MAX ? ref & REF_INNER_MASK : (ref - REF_BIG_BASE) % REF_BIG_INNER;
 }
 
 export class LocRef {
@@ -359,7 +384,8 @@ export class SymbolMap {
     this.sharedWritten = null;
   }
   get(ref) {
-    return this.symbolsForSource[ref >>> REF_INNER_BITS][ref & REF_INNER_MASK];
+    if (ref <= REF_SMALL_MAX) return this.symbolsForSource[ref >>> REF_INNER_BITS][ref & REF_INNER_MASK];
+    return this.symbolsForSource[refSource(ref)][refInner(ref)];
   }
 }
 export function newSymbolMap(sourceCount) {
@@ -402,4 +428,100 @@ export function mergeSymbols(symbols, old, new_) {
   return new_;
 }
 
-// CharFreq / NameMinifier are minify-only and intentionally not ported.
+// This is a histogram of character frequencies for minification
+// (Go: type CharFreq [64]int32)
+export function newCharFreq(): Int32Array {
+  return new Int32Array(64);
+}
+
+// Go: func (freq *CharFreq) Scan(text string, delta int32). Go scans the
+// UTF-8 bytes; the UTF-16 code units of the same text give the same result
+// because only ASCII characters are counted.
+export function charFreqScan(freq: Int32Array, text: string, delta: number) {
+  if (delta === 0) {
+    return;
+  }
+
+  // This matches the order in "DefaultNameMinifier"
+  for (let i = 0, n = text.length; i < n; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 97 && c <= 122) {
+      freq[c - 97] += delta;
+    } else if (c >= 65 && c <= 90) {
+      freq[c - (65 - 26)] += delta;
+    } else if (c >= 48 && c <= 57) {
+      freq[c + (52 - 48)] += delta;
+    } else if (c === 95) {
+      freq[62] += delta;
+    } else if (c === 36) {
+      freq[63] += delta;
+    }
+  }
+}
+
+// Go: func (freq *CharFreq) Include(other *CharFreq)
+export function charFreqInclude(freq: Int32Array, other: Int32Array) {
+  for (let i = 0; i < 64; i++) {
+    freq[i] += other[i];
+  }
+}
+
+export class NameMinifier {
+  declare head: string;
+  declare tail: string;
+  constructor(head = "", tail = "") {
+    this.head = head;
+    this.tail = tail;
+  }
+
+  // Go: func (source NameMinifier) ShuffleByCharFreq(freq CharFreq) NameMinifier
+  shuffleByCharFreq(freq: Int32Array): NameMinifier {
+    // Sort the histogram in descending order by count
+    const array = [];
+    for (let i = 0; i < this.tail.length; i++) {
+      array.push({ char: this.tail[i], index: i, count: freq[i] });
+    }
+    // (JS arrays have no zero-valued padding entries: Go's array has 64 entries
+    // and the CSS minifier's tail only has 63 characters, so the padding entry
+    // {"", 0, 0} sorts like any other count-0 entry but adds no character)
+    // The comparison is a total order (ties are broken by index), so sort
+    // stability does not matter.
+    array.sort((ai, aj) => (ai.count > aj.count || (ai.count === aj.count && ai.index < aj.index) ? -1 : 1));
+
+    // Compute the identifier start and identifier continue sequences
+    let head = "";
+    let tail = "";
+    for (let i = 0; i < array.length; i++) {
+      const item = array[i];
+      if (item.char < "0" || item.char > "9") {
+        head += item.char;
+      }
+      tail += item.char;
+    }
+    return new NameMinifier(head, tail);
+  }
+
+  // Go: func (minifier NameMinifier) NumberToMinifiedName(i int) string
+  numberToMinifiedName(i: number): string {
+    const n_head = this.head.length;
+    const n_tail = this.tail.length;
+
+    let j = i % n_head;
+    let name = this.head[j];
+    i = Math.floor(i / n_head);
+
+    while (i > 0) {
+      i--;
+      j = i % n_tail;
+      name += this.tail[j];
+      i = Math.floor(i / n_tail);
+    }
+
+    return name;
+  }
+}
+
+export const DefaultNameMinifierJS = new NameMinifier(
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$",
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$",
+);

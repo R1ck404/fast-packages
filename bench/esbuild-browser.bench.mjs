@@ -188,16 +188,17 @@ const results = await page.evaluate(
     };
     const dirname = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
     const load = async (p) => {
-      if (!vfs.has(p)) vfs.set(p, await fetchText("/node_modules/zod" + p));
+      if (!vfs.has(p)) vfs.set(p, await fetchText("/node_modules" + p));
       return vfs.get(p);
     };
-    const build = () =>
+    const buildWith = (entry, options) => () =>
       esbuild.build({
-        entryPoints: ["/v4/classic/index.js"],
+        entryPoints: [entry],
         bundle: true,
         write: false,
         format: "esm",
         platform: "neutral",
+        ...options,
         plugins: [
           {
             name: "memfs",
@@ -212,8 +213,18 @@ const results = await page.evaluate(
           },
         ],
       });
-    await build();
-    res.push({ name: "build bundle zod (plugin fs)", ms: await measure(build) });
+    const bundles = [
+      ["build bundle zod (plugin fs)", "/zod/v4/classic/index.js", {}],
+      ["build bundle zod minified + source map (plugin fs)", "/zod/v4/classic/index.js", { minify: true, sourcemap: "external", outdir: "/out" }],
+      ["build bundle lodash-es, 640 files (plugin fs)", "/lodash-es/lodash.js", {}],
+      ["build bundle three, 1.2MB (plugin fs)", "/three/build/three.module.js", {}],
+      ["build bundle react-dom client, 1MB cjs (plugin fs)", "/react-dom/cjs/react-dom-client.development.js", { format: "cjs" }],
+    ];
+    for (const [name, entry, options] of bundles) {
+      const build = buildWith(entry, options);
+      await build();
+      res.push({ name, ms: await measure(build) });
+    }
     return res;
   },
   { files, zodCore, tsFiles, timeBudget: Number(process.env.BENCH_TIME || 1500) },

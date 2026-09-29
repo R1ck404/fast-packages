@@ -2,16 +2,34 @@
 // generateTopLevelTempRef). See CONVENTIONS.md.
 //
 // Notes:
-// - markSyntaxFeature()/markAsyncFn() calls are omitted: with target esnext
-//   (UnsupportedJSFeatures == 0) they are no-ops for every feature used in
-//   this range (none of them is TopLevelAwait).
 // - Nil JSX children are represented as `new Expr(null, loc)` (not `null`)
 //   because the printer needs their location for comments.
-import { bail, LEXER_PANIC } from "./bail.mjs";
+import { goQuote } from "./gostd.mjs";
+import { LEXER_PANIC, GoPanic } from "./gopanic.mjs";
+import {
+  jsFeatureHas,
+  Class as ClassFeature,
+  ConstAndLet,
+  Decorators,
+  DefaultArgument,
+  Destructuring,
+  ForAwait,
+  ForOf,
+  Generator,
+  ImportAssertions,
+  ImportAttributes,
+  ImportDefer,
+  ImportSource,
+  NestedRestBinding,
+  OptionalCatchBinding,
+  RestArgument,
+  AsyncAwait,
+} from "./compat.mjs";
 import {
   Error as LogError,
   Warning as LogWarning,
   Debug as LogDebug,
+  MsgID_JS_AssertToWith,
   MsgID_JS_ConfusingTypeScriptCast,
   MsgID_JS_DuplicateObjectKey,
   MsgID_JS_SemicolonAfterReturn,
@@ -20,6 +38,8 @@ import {
   RANGE_ZERO,
   mkRange,
   rangeEnd,
+  Msg,
+  MsgData,
 } from "./logger.mjs";
 import { utf16ToStringWithValidation } from "./helpers.mjs";
 import {
@@ -232,7 +252,13 @@ import {
   propertyKindIsMethodDefinition,
   scopeKindStopsHoisting,
 } from "./js_ast.mjs";
-import { TSTargetBelowES2022, TSUnusedImport_KeepValues, True, Unspecified } from "./config.mjs";
+import {
+  TSTargetBelowES2022,
+  TSUnusedImport_KeepValues,
+  True,
+  Unspecified,
+  prettyPrintTargetEnvironment,
+} from "./config.mjs";
 import {
   allowConstModifier,
   allowExpr,
@@ -268,7 +294,7 @@ import {
   tempRefNoDeclare,
   wasOriginallyDot,
 } from "./js_parser_types.mjs";
-import { assign, forEachIdentifierBindingInDecls, isPropertyAccess } from "./js_ast_helpers.mjs";
+import { assign, forEachIdentifierBindingInDecls, isPropertyAccess, toNullOrUndefinedWithSideEffects } from "./js_ast_helpers.mjs";
 import { isEvalOrArguments } from "./js_parser_visit_expr.mjs";
 import {
   NoSideEffectsCommentBefore,
@@ -391,7 +417,7 @@ export function tagOrFragmentHelpText(tag) {
   if (tag === "") {
     return "fragment tag";
   }
-  return JSON.stringify(tag) + " tag";
+  return goQuote(tag) + " tag";
 }
 
 export function textForParenthesesSuggestion(text) {
@@ -411,6 +437,8 @@ export function textForParenthesesSuggestion(text) {
   }
   return "(" + " ".repeat(count) + ")";
 }
+
+const NEWLINE = String.fromCharCode(10);
 
 export const parse2Methods = {
   parseSuffix(left, level, errors, flags) {
@@ -438,6 +466,7 @@ export const parse2Methods = {
 
       // Stop now if this token is forbidden to follow a TypeScript "as" cast
       const operatorLoc = p.lexer.loc();
+      const operatorLen = p.lexer.end - p.lexer.start; // (JS-only: Go's "operatorRange" without allocating it)
       if (operatorLoc === p.forbidSuffixAfterAsLoc) {
         return left;
       }
@@ -482,14 +511,20 @@ export const parse2Methods = {
 
         case TQuestionDot: {
           if ((flags & exprFlagIsNewTarget) !== 0) {
-            p.log.addError(); // Cannot use an unparenthesized optional chain inside the target of "new"
+            p.log.addError(p.tracker, p.lexer.range(), 'Cannot use an unparenthesized optional chain inside the target of "new"');
             flags &= ~exprFlagIsNewTarget; // Don't report this error more than once in this spot
           }
 
           p.lexer.next();
-          const optionalStart = OptionalChainStart;
+          let optionalStart = OptionalChainStart;
 
-          // Remove unnecessary optional chains (minify only)
+          // Remove unnecessary optional chains
+          if (p.options.minifySyntax) {
+            const $n = toNullOrUndefinedWithSideEffects(left.data);
+            if ($n[2] && !$n[0]) {
+              optionalStart = OptionalChainNone;
+            }
+          }
 
           switch (p.lexer.token) {
             case TOpenBracket: {
@@ -579,7 +614,7 @@ export const parse2Methods = {
 
         case TNoSubstitutionTemplateLiteral: {
           if (oldOptionalChain !== OptionalChainNone) {
-            p.log.addError(); // Template literals cannot have an optional chain as a tag
+            p.log.addError(p.tracker, p.lexer.range(), "Template literals cannot have an optional chain as a tag");
           }
           const headLoc = p.lexer.loc();
           const $d110 = p.lexer.cookedAndRawTemplateContents();
@@ -591,7 +626,7 @@ export const parse2Methods = {
 
         case TTemplateHead: {
           if (oldOptionalChain !== OptionalChainNone) {
-            p.log.addError(); // Template literals cannot have an optional chain as a tag
+            p.log.addError(p.tracker, p.lexer.range(), "Template literals cannot have an optional chain as a tag");
           }
           const headLoc = p.lexer.loc();
           const $d111 = p.lexer.cookedAndRawTemplateContents();
@@ -1088,7 +1123,18 @@ export const parse2Methods = {
             kind = LogDebug;
           }
           if (left.data.k === E_UNARY && left.data.op === UnOpNot) {
-            p.log.addMsgID(MsgID_JS_SuspiciousBooleanNot, { kind });
+            const r = mkRange(left.loc, p.source.locBeforeWhitespace(p.lexer.loc()) - left.loc);
+            const data = p.tracker.msgData(r, 'Suspicious use of the "!" operator inside the "in" operator');
+            data.location.suggestion = "(" + p.source.textForRange(r) + ")";
+            p.log.addMsgID(
+              MsgID_JS_SuspiciousBooleanNot,
+              new Msg(
+                [new MsgData(null, null, 'The code "!x in y" is parsed as "(!x) in y". ' + 'You need to insert parentheses to get "!(x in y)" instead.')],
+                "",
+                data,
+                kind,
+              ),
+            );
           }
 
           p.lexer.next();
@@ -1108,7 +1154,18 @@ export const parse2Methods = {
             kind = LogDebug;
           }
           if (left.data.k === E_UNARY && left.data.op === UnOpNot) {
-            p.log.addMsgID(MsgID_JS_SuspiciousBooleanNot, { kind });
+            const r = mkRange(left.loc, p.source.locBeforeWhitespace(p.lexer.loc()) - left.loc);
+            const data = p.tracker.msgData(r, 'Suspicious use of the "!" operator inside the "instanceof" operator');
+            data.location.suggestion = "(" + p.source.textForRange(r) + ")";
+            p.log.addMsgID(
+              MsgID_JS_SuspiciousBooleanNot,
+              new Msg(
+                [new MsgData(null, null, 'The code "!x instanceof y" is parsed as "(!x) instanceof y". ' + 'You need to insert parentheses to get "!(x instanceof y)" instead.')],
+                "",
+                data,
+                kind,
+              ),
+            );
           }
 
           p.lexer.next();
@@ -1167,7 +1224,24 @@ export const parse2Methods = {
               rightLevel++;
             }
             if (rightLevel > OpTable[binaryLeft.op].level) {
-              p.log.addIDWithNotes(MsgID_JS_ConfusingTypeScriptCast, LogWarning);
+              const operatorRange = mkRange(operatorLoc, operatorLen);
+              const start = binary.left.loc;
+              const end = p.source.locBeforeWhitespace(operatorRange.loc);
+              const wrapRange = mkRange(start, end - start);
+              let note = new MsgData(null, null, "This is a syntax error in newer versions of TypeScript because the type cast has unintuitive precedence in this case.");
+              const text = p.source.textForRange(wrapRange);
+              if (!text.includes("\n")) {
+                note = p.tracker.msgData(wrapRange, note.text + " Surround the inner expression in parentheses to silence this warning:");
+                note.location.suggestion = textForParenthesesSuggestion(text);
+              }
+              p.log.addIDWithNotes(
+                MsgID_JS_ConfusingTypeScriptCast,
+                LogWarning,
+                p.tracker,
+                operatorRange,
+                "Operator " + goQuote(OpTable[binary.op].text) + " should not directly follow a TypeScript type cast after the " + goQuote(OpTable[binaryLeft.op].text) + " operator",
+                [note],
+              );
             }
           }
         }
@@ -1220,7 +1294,7 @@ export const parse2Methods = {
         if (opts.lexicalDecl !== lexicalDeclAllowAll) {
           p.forbidLexicalDecl(tokenRange.loc);
         }
-        // p.markSyntaxFeature(compat.ConstAndLet, tokenRange): no-op (esnext)
+        p.markSyntaxFeature(ConstAndLet, tokenRange);
         const decls = p.parseAndDeclareDecls(SymbolOther, opts);
         return [null, new Stmt(new SLocal(decls, LocalLet, opts.isExport), tokenRange.loc), decls];
       }
@@ -1304,7 +1378,7 @@ export const parse2Methods = {
       const loc = p.lexer.loc();
       const isSpread = p.lexer.token === TDotDotDot;
       if (isSpread) {
-        // p.markSyntaxFeature(compat.RestArgument, ...): no-op (esnext)
+        p.markSyntaxFeature(RestArgument, p.lexer.range());
         p.lexer.next();
       }
       let arg = p.parseExpr(LComma);
@@ -1353,7 +1427,7 @@ export const parse2Methods = {
         ns += p.lexer.identifier;
         p.lexer.nextInsideJSXElement();
       } else {
-        p.log.addError(); // Expected identifier after "ns:" in namespaced JSX name
+        p.log.addError(p.tracker, mkRange(rangeEnd(nameRange), 0), "Expected identifier after " + goQuote(ns) + " in namespaced JSX name");
         throw LEXER_PANIC;
       }
       return [nameRange, ns];
@@ -1396,7 +1470,7 @@ export const parse2Methods = {
       // Dashes are not allowed in member expression chains
       const index = member.indexOf("-");
       if (index >= 0) {
-        p.log.addError(); // Unexpected "-"
+        p.log.addError(p.tracker, mkRange(memberRange.loc + index, 0), 'Unexpected "-"');
         throw LEXER_PANIC;
       }
 
@@ -1522,8 +1596,12 @@ export const parse2Methods = {
           if (property.kind !== PropertySpread) {
             if (property.key.data.k === E_STRING) {
               const key = property.key.data.value;
-              if (keys.has(key)) {
-                p.log.addIDWithNotes(MsgID_JS_DuplicateObjectKey, LogWarning); // Duplicate attribute in JSX element
+              const prevLoc = keys.get(key);
+              if (prevLoc !== undefined) {
+                const r = rangeOfIdentifier(p.source, property.key.loc);
+                p.log.addIDWithNotes(MsgID_JS_DuplicateObjectKey, LogWarning, p.tracker, r, "Duplicate " + goQuote(key) + " attribute in JSX element", [
+                  p.tracker.msgData(rangeOfIdentifier(p.source, prevLoc), "The original " + goQuote(key) + " attribute is here:"),
+                ]);
               }
               keys.set(key, property.key.loc);
             }
@@ -1539,7 +1617,31 @@ export const parse2Methods = {
     // be escaped. This code special-cases this error to provide a less obscure
     // error message.
     if (p.lexer.token === TSyntaxError && p.lexer.raw() === "\\" && previousStringWithBackslashLoc > 0) {
-      p.log.addMsg({ kind: LogError }); // Unexpected backslash in JSX element
+      const msg = new Msg(null, "", p.tracker.msgData(p.lexer.range(), "Unexpected backslash in JSX element"), LogError);
+
+      // Option 1: Suggest using an XML escape
+      const jsEscape = p.source.textForRange(p.lexer.previousBackslashQuoteInJSX);
+      let xmlEscape = "";
+      if (jsEscape === "\\\"") {
+        xmlEscape = "&quot;";
+      } else if (jsEscape === "\\'") {
+        xmlEscape = "&apos;";
+      }
+      if (xmlEscape !== "") {
+        const data = p.tracker.msgData(p.lexer.previousBackslashQuoteInJSX, "Quoted JSX attributes use XML-style escapes instead of JavaScript-style escapes:");
+        data.location.suggestion = xmlEscape;
+        msg.notes = msg.notes === null ? [data] : [...msg.notes, data];
+      }
+
+      // Option 2: Suggest using a JavaScript string
+      const stringRange = p.source.rangeOfString(previousStringWithBackslashLoc);
+      if (stringRange.len > 0) {
+        const data = p.tracker.msgData(stringRange, "Consider using a JavaScript string inside {...} instead of a quoted JSX attribute:");
+        data.location.suggestion = "{" + p.source.textForRange(stringRange) + "}";
+        msg.notes = msg.notes === null ? [data] : [...msg.notes, data];
+      }
+
+      p.log.addMsg(msg);
       throw LEXER_PANIC;
     }
 
@@ -1616,7 +1718,7 @@ export const parse2Methods = {
                 // behavior. Note that TypeScript's behavior changed in TypeScript 4.5.
                 // Before that, the "..." was omitted instead of being preserved.
                 const itemLoc = p.lexer.loc();
-                // p.markSyntaxFeature(compat.RestArgument, ...): no-op (esnext)
+                p.markSyntaxFeature(RestArgument, p.lexer.range());
                 p.lexer.next();
                 nullableChildren.push(new Expr(new ESpread(p.parseExpr(LLowest)), itemLoc));
               } else {
@@ -1647,9 +1749,19 @@ export const parse2Methods = {
 
             // This is the closing element
             p.lexer.nextInsideJSXElement();
-            const endText = p.parseJSXTag()[1];
+            const $e = p.parseJSXTag();
+            const endRange = $e[0], endText = $e[1];
             if (startText !== endText) {
-              p.log.addMsg({ kind: LogError }); // Unexpected closing tag does not match opening tag
+              const startTag = tagOrFragmentHelpText(startText);
+              const endTag = tagOrFragmentHelpText(endText);
+              const msg = new Msg(
+                [p.tracker.msgData(startRange, "The opening " + startTag + " is here:")],
+                "",
+                p.tracker.msgData(endRange, "Unexpected closing " + endTag + " does not match opening " + startTag),
+                LogError,
+              );
+              msg.data.location.suggestion = startText;
+              p.log.addMsg(msg);
             }
             if (p.lexer.token !== TGreaterThan) {
               p.lexer.expected(TGreaterThan);
@@ -1658,9 +1770,18 @@ export const parse2Methods = {
             return new Expr(new EJSXElement(startTagOrNil, properties, nullableChildren, lessThanLoc, isSingleLine), loc);
           }
 
-          case TEndOfFile:
-            p.log.addMsg({ kind: LogError }); // Unexpected end of file before a closing tag
+          case TEndOfFile: {
+            const startTag = tagOrFragmentHelpText(startText);
+            const msg = new Msg(
+              [p.tracker.msgData(startRange, "The opening " + startTag + " is here:")],
+              "",
+              p.tracker.msgData(p.lexer.range(), "Unexpected end of file before a closing " + startTag),
+              LogError,
+            );
+            msg.data.location.suggestion = "</" + startText + ">";
+            p.log.addMsg(msg);
             throw LEXER_PANIC;
+          }
 
           default:
             p.lexer.unexpected();
@@ -1718,7 +1839,7 @@ export const parse2Methods = {
     for (;;) {
       // Forbid "let let" and "const let" but not "var let"
       if ((kind === SymbolOther || kind === SymbolConst) && p.lexer.isContextualKeyword("let")) {
-        p.log.addError(); // Cannot use "let" as an identifier here:
+        p.log.addError(p.tracker, p.lexer.range(), 'Cannot use "let" as an identifier here:');
       }
 
       let valueOrNil = null;
@@ -1796,9 +1917,17 @@ export const parse2Methods = {
     const p = this;
     for (const d of decls) {
       if (d.valueOrNil === null) {
-        // "The constant/declaration %q must be initialized" or
-        // "This constant/declaration must be initialized"
-        p.log.addError();
+        let what = "constant";
+        if (kind === LocalUsing) {
+          what = "declaration";
+        }
+        const id = d.binding.data;
+        if (id instanceof BIdentifier) {
+          const r = rangeOfIdentifier(p.source, d.binding.loc);
+          p.log.addError(p.tracker, r, "The " + what + " " + goQuote(p.symbols[refInner(id.ref)].originalName) + " must be initialized");
+        } else {
+          p.log.addError(p.tracker, mkRange(d.binding.loc, 0), "This " + what + " must be initialized");
+        }
       }
     }
   },
@@ -1806,7 +1935,7 @@ export const parse2Methods = {
   forbidInitializers(decls, loopType, isVar) {
     const p = this;
     if (decls.length > 1) {
-      p.log.addError(); // for-%s loops must have a single declaration
+      p.log.addError(p.tracker, mkRange(decls[0].binding.loc, 0), "for-" + loopType + " loops must have a single declaration");
     } else if (decls.length === 1 && decls[0].valueOrNil !== null) {
       if (isVar) {
         if (decls[0].binding.data.k === B_IDENTIFIER) {
@@ -1815,7 +1944,7 @@ export const parse2Methods = {
           return;
         }
       }
-      p.log.addError(); // for-%s loop variables cannot have an initializer
+      p.log.addError(p.tracker, mkRange(decls[0].valueOrNil.loc, 0), "for-" + loopType + " loop variables cannot have an initializer");
     }
   },
 
@@ -1825,10 +1954,11 @@ export const parse2Methods = {
 
     // The alias may now be a string (see https://github.com/tc39/ecma262/pull/2154)
     if (p.lexer.token === TStringLiteral) {
+      const r = p.source.rangeOfString(loc);
       const $d118 = utf16ToStringWithValidation(p.lexer.stringLiteral());
-      const alias = $d118[0], ok = $d118[2];
+      const alias = $d118[0], problem = $d118[1], ok = $d118[2];
       if (!ok) {
-        p.log.addError(); // This alias is invalid because it contains the unpaired Unicode surrogate
+        p.log.addError(p.tracker, r, "This " + kind + " alias is invalid because it contains the unpaired Unicode surrogate U+" + problem.toString(16).toUpperCase());
       }
       return alias;
     }
@@ -1888,7 +2018,8 @@ export const parse2Methods = {
 
             // Reject forbidden names
             if (isEvalOrArguments(originalName)) {
-              p.log.addError(); // Cannot use %q as an identifier here:
+              const r = rangeOfIdentifier(p.source, name.loc);
+              p.log.addError(p.tracker, r, "Cannot use " + goQuote(originalName) + " as an identifier here:");
             }
 
             items.push(new ClauseItem(alias, originalName, aliasLoc, name));
@@ -1924,7 +2055,8 @@ export const parse2Methods = {
 
         // Reject forbidden names
         if (isEvalOrArguments(originalName)) {
-          p.log.addError(); // Cannot use %q as an identifier here:
+          const r = rangeOfIdentifier(p.source, name.loc);
+          p.log.addError(p.tracker, r, "Cannot use " + goQuote(originalName) + " as an identifier here:");
         }
 
         items.push(new ClauseItem(alias, originalName, aliasLoc, name));
@@ -2067,7 +2199,8 @@ export const parse2Methods = {
     // Throw an error here if we found a keyword earlier and this isn't an
     // "export from" statement after all
     if (firstNonIdentifierLoc !== 0 && !p.lexer.isContextualKeyword("from")) {
-      p.log.addError(); // Expected identifier but found %q
+      const r = rangeOfIdentifier(p.source, firstNonIdentifierLoc);
+      p.log.addError(p.tracker, r, "Expected identifier but found " + goQuote(p.source.textForRange(r)));
       throw LEXER_PANIC;
     }
 
@@ -2087,7 +2220,7 @@ export const parse2Methods = {
           (p.fnOrArrowDataParse.await !== allowIdent && name === "await") ||
           (p.fnOrArrowDataParse.yield !== allowIdent && name === "yield")
         ) {
-          p.log.addError(); // Cannot use %q as an identifier here:
+          p.log.addError(p.tracker, p.lexer.range(), "Cannot use " + goQuote(name) + " as an identifier here:");
         }
 
         const ref = p.storeNameInRef(name);
@@ -2099,7 +2232,7 @@ export const parse2Methods = {
         if (opts.isUsingStmt) {
           break;
         }
-        // p.markSyntaxFeature(compat.Destructuring, ...): no-op (esnext)
+        p.markSyntaxFeature(Destructuring, p.lexer.range());
         p.lexer.next();
         let isSingleLine = !p.lexer.hasNewlineBefore;
         const items = [];
@@ -2121,7 +2254,9 @@ export const parse2Methods = {
               hasSpread = true;
 
               // This was a bug in the ES2015 spec that was fixed in ES2016
-              // (p.markSyntaxFeature(compat.NestedRestBinding, ...): no-op (esnext))
+              if (p.lexer.token !== TIdentifier) {
+                p.markSyntaxFeature(NestedRestBinding, p.lexer.range());
+              }
             }
 
             p.saveExprCommentsHere();
@@ -2137,7 +2272,7 @@ export const parse2Methods = {
 
             // Commas after spread elements are not allowed
             if (hasSpread && p.lexer.token === TComma) {
-              p.log.addError(); // Unexpected "," after rest pattern
+              p.log.addError(p.tracker, p.lexer.range(), 'Unexpected "," after rest pattern');
               throw LEXER_PANIC;
             }
           }
@@ -2168,7 +2303,7 @@ export const parse2Methods = {
         if (opts.isUsingStmt) {
           break;
         }
-        // p.markSyntaxFeature(compat.Destructuring, ...): no-op (esnext)
+        p.markSyntaxFeature(Destructuring, p.lexer.range());
         p.lexer.next();
         let isSingleLine = !p.lexer.hasNewlineBefore;
         const properties = [];
@@ -2184,7 +2319,7 @@ export const parse2Methods = {
 
           // Commas after spread elements are not allowed
           if (property.isSpread && p.lexer.token === TComma) {
-            p.log.addError(); // Unexpected "," after rest pattern
+            p.log.addError(p.tracker, p.lexer.range(), 'Unexpected "," after rest pattern');
             throw LEXER_PANIC;
           }
 
@@ -2287,7 +2422,7 @@ export const parse2Methods = {
       }
 
       if (!fn.hasRestArg && p.lexer.token === TDotDotDot) {
-        // p.markSyntaxFeature(compat.RestArgument, ...): no-op (esnext)
+        p.markSyntaxFeature(RestArgument, p.lexer.range());
         p.lexer.next();
         fn.hasRestArg = true;
       }
@@ -2335,7 +2470,7 @@ export const parse2Methods = {
 
       let defaultValueOrNil = null;
       if (!fn.hasRestArg && p.lexer.token === TEquals) {
-        // p.markSyntaxFeature(compat.DefaultArgument, ...): no-op (esnext)
+        p.markSyntaxFeature(DefaultArgument, p.lexer.range());
         p.lexer.next();
         defaultValueOrNil = p.parseExpr(LComma);
       }
@@ -2400,9 +2535,9 @@ export const parse2Methods = {
     // Prevent the function name from being the same as a function-specific keyword
     if (fn.name !== null) {
       if (fn.isAsync && p.symbols[refInner(fn.name.ref)].originalName === "await") {
-        p.log.addError(); // An async function cannot be named "await"
+        p.log.addError(p.tracker, rangeOfIdentifier(p.source, fn.name.loc), 'An async function cannot be named "await"');
       } else if (fn.isGenerator && p.symbols[refInner(fn.name.ref)].originalName === "yield" && kind === fnExpr) {
-        p.log.addError(); // A generator function expression cannot be named "yield"
+        p.log.addError(p.tracker, rangeOfIdentifier(p.source, fn.name.loc), 'A generator function expression cannot be named "yield"');
       }
     }
   },
@@ -2421,7 +2556,7 @@ export const parse2Methods = {
     let name = null;
     const classKeyword = p.lexer.range();
     if (p.lexer.token === TClass) {
-      // p.markSyntaxFeature(compat.Class, classKeyword): no-op (esnext)
+      p.markSyntaxFeature(ClassFeature, classKeyword);
       p.lexer.next();
     } else {
       p.lexer.expected(TClass);
@@ -2432,7 +2567,7 @@ export const parse2Methods = {
       const nameText = p.lexer.identifier;
       p.lexer.expect(TIdentifier);
       if (p.fnOrArrowDataParse.await !== allowIdent && nameText === "await") {
-        p.log.addError(); // Cannot use "await" as an identifier here:
+        p.log.addError(p.tracker, rangeOfIdentifier(p.source, nameLoc), 'Cannot use "await" as an identifier here:');
       }
       let nameRef = InvalidRef;
       if (!opts.isTypeScriptDeclare) {
@@ -2474,7 +2609,7 @@ export const parse2Methods = {
       decorators = []; // Go: nil slice
     }
     const classKeyword = p.lexer.range();
-    // p.markSyntaxFeature(compat.Class, classKeyword): no-op (esnext)
+    p.markSyntaxFeature(ClassFeature, classKeyword);
     p.lexer.expect(TClass);
     let name = null;
 
@@ -2486,7 +2621,7 @@ export const parse2Methods = {
       const nameText = p.lexer.identifier;
       if (!p.options.ts.parse || nameText !== "implements") {
         if (p.fnOrArrowDataParse.await !== allowIdent && nameText === "await") {
-          p.log.addError(); // Cannot use "await" as an identifier here:
+          p.log.addError(p.tracker, p.lexer.range(), 'Cannot use "await" as an identifier here:');
         }
         name = new LocRef(p.lexer.loc(), p.newSymbol(SymbolOther, nameText));
         p.lexer.next();
@@ -2582,7 +2717,7 @@ export const parse2Methods = {
         const key = property.key;
         if (key !== null && key.data.k === E_STRING && key.data.value === "constructor") {
           if (opts.decorators.length > 0) {
-            p.log.addError(); // Decorators are not allowed on class constructors
+            p.log.addError(p.tracker, mkRange(firstDecoratorLoc, 0), "Decorators are not allowed on class constructors");
           }
           if (
             propertyKindIsMethodDefinition(property.kind) &&
@@ -2590,13 +2725,13 @@ export const parse2Methods = {
             (property.flags & PropertyIsComputed) === 0
           ) {
             if (hasConstructor) {
-              p.log.addError(); // Classes cannot contain more than one constructor
+              p.log.addError(p.tracker, rangeOfIdentifier(p.source, property.key.loc), "Classes cannot contain more than one constructor");
             }
             hasConstructor = true;
           }
         }
       } else if (!classOpts.isTypeScriptDeclare && opts.decorators.length > 0) {
-        p.log.addError(); // Decorators are not valid here
+        p.log.addError(p.tracker, mkRange(firstDecoratorLoc, 1), "Decorators are not valid here");
         p.discardScopesUpTo(scopeIndex);
       }
     }
@@ -2642,11 +2777,11 @@ export const parse2Methods = {
       // "useDefineForClassFields" setting is false even if the configured target
       // environment supports decorators. This setting changes the behavior of
       // class fields, and so we must lower decorators so they behave correctly.
-      // (unsupportedJSFeatures.Has(compat.Decorators) is always false here)
       (classOpts.decorators.length > 0 || hasPropertyDecorator) &&
-        p.options.ts.parse &&
-        p.options.ts.config.experimentalDecorators !== True &&
-        !useDefineForClassFields,
+        ((!p.options.ts.parse && jsFeatureHas(p.options.unsupportedJSFeatures, Decorators)) ||
+          (p.options.ts.parse &&
+            p.options.ts.config.experimentalDecorators !== True &&
+            (jsFeatureHas(p.options.unsupportedJSFeatures, Decorators) || !useDefineForClassFields))),
 
       useDefineForClassFields,
     );
@@ -2707,8 +2842,15 @@ export const parse2Methods = {
         } else {
           p.lexer.expect(TIdentifier);
         }
-        if (duplicates.has(keyText)) {
-          p.log.addErrorWithNotes(); // Duplicate import attribute/assertion %q
+        const prevRange = duplicates.get(keyText);
+        if (prevRange !== undefined) {
+          let what = "attribute";
+          if (keyword === AssertKeyword) {
+            what = "assertion";
+          }
+          p.log.addErrorWithNotes(p.tracker, p.lexer.range(), "Duplicate import " + what + " " + goQuote(keyText), [
+            p.tracker.msgData(prevRange, "The first " + goQuote(keyText) + " was here:"),
+          ]);
         }
         duplicates.set(keyText, p.lexer.range());
         p.lexer.next();
@@ -2745,18 +2887,32 @@ export const parse2Methods = {
 
   // Let people know if they probably should be using "with" instead of "assert"
   maybeWarnAboutAssertKeyword(loc) {
-    // Go: only warns if "unsupportedJSFeatures.Has(compat.ImportAssertions) &&
-    // !unsupportedJSFeatures.Has(compat.ImportAttributes)", which is always
-    // false in the fast path (target esnext), so this is a no-op.
+    const p = this;
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, ImportAssertions) && !jsFeatureHas(p.options.unsupportedJSFeatures, ImportAttributes)) {
+      const where = prettyPrintTargetEnvironment(p.options.originalTargetEnv, p.options.unsupportedJSFeatureOverridesMask);
+      const msg = new Msg(
+        [new MsgData(null, null, 'Did you mean to use "with" instead of "assert"?')],
+        "",
+        p.tracker.msgData(rangeOfIdentifier(p.source, loc), 'The "assert" keyword is not supported in ' + where),
+        LogWarning,
+      );
+      msg.data.location.suggestion = "with";
+      p.log.addMsgID(MsgID_JS_AssertToWith, msg);
+    }
   },
 
   // This assumes the "function" token has already been parsed
   parseFnStmt(loc, opts, isAsync, asyncRange) {
     const p = this;
     const isGenerator = p.lexer.token === TAsterisk;
-    // hasError = p.markAsyncFn(asyncRange, isGenerator): always false (esnext)
+    let hasError = false;
+    if (isAsync) {
+      hasError = p.markAsyncFn(asyncRange, isGenerator);
+    }
     if (isGenerator) {
-      // p.markSyntaxFeature(compat.Generator, ...): no-op (esnext)
+      if (!hasError) {
+        p.markSyntaxFeature(Generator, p.lexer.range());
+      }
       p.lexer.next();
     }
 
@@ -2782,7 +2938,7 @@ export const parse2Methods = {
       const nameLoc = p.lexer.loc();
       nameText = p.lexer.identifier;
       if (!isAsync && p.fnOrArrowDataParse.await !== allowIdent && nameText === "await") {
-        p.log.addError(); // Cannot use "await" as an identifier here:
+        p.log.addError(p.tracker, rangeOfIdentifier(p.source, nameLoc), 'Cannot use "await" as an identifier here:');
       }
       p.lexer.expect(TIdentifier);
       name = new LocRef(nameLoc, InvalidRef);
@@ -2882,18 +3038,22 @@ export const parse2Methods = {
       if (p.options.ts.parse) {
         if (p.options.ts.config.experimentalDecorators === True) {
           if ((context & decoratorInClassExpr) !== 0) {
-            p.lexer.addRangeErrorWithNotes(p.lexer.range(), "TypeScript experimental decorators can only be used with class declarations", []);
+            p.lexer.addRangeErrorWithNotes(p.lexer.range(), "TypeScript experimental decorators can only be used with class declarations", [
+              p.tracker.msgData(classKeyword, "This is a class expression, not a class declaration:"),
+            ]);
           } else if ((context & decoratorBeforeClassExpr) !== 0) {
-            p.log.addError(); // TypeScript experimental decorators cannot be used in expression position
+            p.log.addError(p.tracker, p.lexer.range(), "TypeScript experimental decorators cannot be used in expression position");
           }
         } else {
           if ((context & decoratorInFnArgs) !== 0 && p.options.ts.config.experimentalDecorators !== True) {
-            p.log.addErrorWithNotes(); // Parameter decorators only work when experimental decorators are enabled
+            p.log.addErrorWithNotes(p.tracker, p.lexer.range(), "Parameter decorators only work when experimental decorators are enabled", [
+              new MsgData(null, null, 'You can enable experimental decorators by adding "experimentalDecorators": true to your "tsconfig.json" file.'),
+            ]);
           }
         }
       } else {
         if ((context & decoratorInFnArgs) !== 0) {
-          p.log.addError(); // Parameter decorators are not allowed in JavaScript
+          p.log.addError(p.tracker, p.lexer.range(), "Parameter decorators are not allowed in JavaScript");
         }
       }
     }
@@ -2954,14 +3114,15 @@ export const parse2Methods = {
       (p.fnOrArrowDataParse.await !== allowIdent && name === "await") ||
       (p.fnOrArrowDataParse.yield !== allowIdent && name === "yield")
     ) {
-      p.log.addError(); // Cannot use %q as an identifier here:
+      p.log.addError(p.tracker, nameRange, "Cannot use " + goQuote(name) + " as an identifier here:");
     }
 
     let memberExpr = new Expr(new EIdentifier(p.storeNameInRef(name)), nameRange.loc);
 
-    // Custom error reporting for error recovery (the message itself is never
-    // materialized since errors bail)
-    let hasSyntaxError = false;
+    // Custom error reporting for error recovery
+    let syntaxError: MsgData | null = null;
+    const wrapLoc = nameRange.loc;
+    let wrapLen = nameRange.len; // ("wrapRange")
 
     loop: for (;;) {
       switch (p.lexer.token) {
@@ -2973,17 +3134,19 @@ export const parse2Methods = {
           if (!p.options.ts.parse) {
             p.lexer.unexpected();
           }
+          wrapLen = p.lexer.end - wrapLoc;
           p.lexer.next();
           break;
 
         case TDot:
         case TQuestionDot:
           // The grammar for "DecoratorMemberExpression" currently forbids "?."
-          if (p.lexer.token === TQuestionDot && !hasSyntaxError) {
-            hasSyntaxError = true; // JavaScript decorator syntax does not allow "?." here
+          if (p.lexer.token === TQuestionDot && syntaxError === null) {
+            syntaxError = p.tracker.msgData(p.lexer.range(), 'JavaScript decorator syntax does not allow "?." here');
           }
 
           p.lexer.next();
+          wrapLen = p.lexer.end - wrapLoc;
 
           if (p.lexer.token === TPrivateIdentifier) {
             const name = p.lexer.identifier;
@@ -3006,11 +3169,12 @@ export const parse2Methods = {
             new ECall(memberExpr, args, closeParenLoc, OptionalChainNone, TargetWasOriginallyPropertyAccess, isMultiLine),
             memberExpr.loc,
           );
+          wrapLen = closeParenLoc + 1 - wrapLoc;
 
           // The grammar for "DecoratorCallExpression" currently forbids anything after it
           if (p.lexer.token === TDot) {
-            if (!hasSyntaxError) {
-              hasSyntaxError = true; // JavaScript decorator syntax does not allow "." after a call expression
+            if (syntaxError === null) {
+              syntaxError = p.tracker.msgData(p.lexer.range(), 'JavaScript decorator syntax does not allow "." after a call expression');
             }
             continue loop;
           }
@@ -3027,8 +3191,16 @@ export const parse2Methods = {
     }
 
     // Suggest that non-decorator expressions be wrapped in parentheses
-    if (hasSyntaxError) {
-      p.log.addMsg({ kind: LogError });
+    if (syntaxError !== null) {
+      let notes = null;
+      const wrapRange = mkRange(wrapLoc, wrapLen);
+      const text = p.source.textForRange(wrapRange);
+      if (text.indexOf(NEWLINE) < 0) {
+        const note = p.tracker.msgData(wrapRange, "Wrap this decorator in parentheses to allow arbitrary expressions:");
+        note.location.suggestion = textForParenthesesSuggestion(text);
+        notes = [note];
+      }
+      p.log.addMsg(new Msg(notes, "", syntaxError, LogError));
     }
 
     return memberExpr;
@@ -3132,7 +3304,7 @@ export const parse2Methods = {
               const asyncRange = p.lexer.range();
               p.lexer.next();
               if (p.lexer.hasNewlineBefore) {
-                p.log.addError(); // Unexpected newline after "async"
+                p.log.addError(p.tracker, mkRange(rangeEnd(asyncRange), 0), 'Unexpected newline after "async"');
                 throw LEXER_PANIC;
               }
               p.lexer.expect(TFunction);
@@ -3148,9 +3320,10 @@ export const parse2Methods = {
               switch (p.lexer.identifier) {
                 case "type": {
                   // "export type foo = ..."
+                  const typeRange = p.lexer.range();
                   p.lexer.next();
                   if (p.lexer.hasNewlineBefore && p.lexer.token !== TOpenBrace && p.lexer.token !== TAsterisk) {
-                    p.log.addError(); // Unexpected newline after "type"
+                    p.log.addError(p.tracker, mkRange(rangeEnd(typeRange), 0), 'Unexpected newline after "type"');
                     throw LEXER_PANIC;
                   }
                   const typeOpts = new parseStmtOpts();
@@ -3303,7 +3476,7 @@ export const parse2Methods = {
                   }
                   break;
                 default:
-                  bail(); // Go: panic("Internal error")
+                  throw new GoPanic("Internal error");
               }
               return new Stmt(new SExportDefault(stmt, defaultName), loc);
             }
@@ -3440,7 +3613,7 @@ export const parse2Methods = {
 
         // "@x export @y class Foo {}"
         if (opts.deferredDecorators !== null) {
-          p.log.addError(); // Decorators are not valid here
+          p.log.addError(p.tracker, mkRange(loc, 1), "Decorators are not valid here");
           p.discardScopesUpTo(scopeIndex);
           return p.parseStmt(opts);
         }
@@ -3487,7 +3660,7 @@ export const parse2Methods = {
         }
 
         // Forbid decorators on anything other than a class statement
-        p.log.addError(); // Decorators are not valid here
+        p.log.addError(p.tracker, mkRange(loc, 1), "Decorators are not valid here");
         stmt = new Stmt(STypeScriptShared, stmt.loc);
         p.discardScopesUpTo(scopeIndex);
         return stmt;
@@ -3510,7 +3683,7 @@ export const parse2Methods = {
         if (opts.lexicalDecl !== lexicalDeclAllowAll) {
           p.forbidLexicalDecl(loc);
         }
-        // p.markSyntaxFeature(compat.ConstAndLet, ...): no-op (esnext)
+        p.markSyntaxFeature(ConstAndLet, p.lexer.range());
         p.lexer.next();
 
         if (p.options.ts.parse && p.lexer.token === TEnum) {
@@ -3609,7 +3782,7 @@ export const parse2Methods = {
 
             if (p.lexer.token === TDefault) {
               if (foundDefault) {
-                p.log.addError(); // Multiple default clauses are not allowed
+                p.log.addError(p.tracker, p.lexer.range(), "Multiple default clauses are not allowed");
                 throw LEXER_PANIC;
               }
               foundDefault = true;
@@ -3725,8 +3898,12 @@ export const parse2Methods = {
 
           // The catch binding is optional, and can be omitted
           if (p.lexer.token === TOpenBrace) {
-            // (Generating a catch binding for older browsers only happens when
-            // compat.OptionalCatchBinding is unsupported, never with esnext)
+            if (jsFeatureHas(p.options.unsupportedJSFeatures, OptionalCatchBinding)) {
+              // Generate a new symbol for the catch binding for older browsers
+              const ref = p.newSymbol(SymbolOther, "e");
+              p.currentScope.generated.push(ref);
+              bindingOrNil = new Binding(new BIdentifier(ref), p.lexer.loc());
+            }
           } else {
             p.lexer.expect(TOpenParen);
             bindingOrNil = p.parseBinding(new parseBindingOpts());
@@ -3785,14 +3962,23 @@ export const parse2Methods = {
           if (p.lexer.isContextualKeyword("await")) {
             awaitRange = p.lexer.range();
             if (p.fnOrArrowDataParse.await !== allowExpr) {
-              p.log.addError(); // Cannot use "await" outside an async function
+              p.log.addError(p.tracker, awaitRange, 'Cannot use "await" outside an async function');
               awaitRange = RANGE_ZERO;
             } else {
+              const didGenerateError = false;
               if (p.fnOrArrowDataParse.isTopLevel) {
                 p.topLevelAwaitKeyword = awaitRange;
               }
-              // (for-await lowering only matters when async/await and generators
-              // are unsupported, never with esnext)
+              if (
+                !didGenerateError &&
+                jsFeatureHas(p.options.unsupportedJSFeatures, AsyncAwait) &&
+                jsFeatureHas(p.options.unsupportedJSFeatures, Generator)
+              ) {
+                // If for-await loops aren't supported, then we only support lowering
+                // if either async/await or generators is supported. Otherwise we
+                // cannot lower for-await loops.
+                p.markSyntaxFeature(ForAwait, awaitRange);
+              }
             }
             p.lexer.next();
           }
@@ -3822,7 +4008,7 @@ export const parse2Methods = {
               break;
 
             case TConst:
-              // p.markSyntaxFeature(compat.ConstAndLet, ...): no-op (esnext)
+              p.markSyntaxFeature(ConstAndLet, p.lexer.range());
               p.lexer.next();
               decls = p.parseAndDeclareDecls(SymbolConst, new parseStmtOpts());
               initOrNil = new Stmt(new SLocal(decls, LocalConst), initLoc);
@@ -3853,7 +4039,7 @@ export const parse2Methods = {
           // Detect for-of loops
           if (p.lexer.isContextualKeyword("of") || awaitRange.len > 0) {
             if (badLetRange.len > 0) {
-              p.log.addError(); // "let" must be wrapped in parentheses to be used as an expression here:
+              p.log.addError(p.tracker, badLetRange, '"let" must be wrapped in parentheses to be used as an expression here:');
             }
             if (awaitRange.len > 0 && !p.lexer.isContextualKeyword("of")) {
               if (initOrNil !== null) {
@@ -3863,7 +4049,7 @@ export const parse2Methods = {
               }
             }
             p.forbidInitializers(decls, "of", false);
-            // p.markSyntaxFeature(compat.ForOf, ...): no-op (esnext)
+            p.markSyntaxFeature(ForOf, p.lexer.range());
             p.lexer.next();
             const value = p.parseExpr(LComma);
             p.lexer.expect(TCloseParen);
@@ -3879,9 +4065,9 @@ export const parse2Methods = {
               if (initOrNil !== null && initOrNil.data.k === S_LOCAL) {
                 const local = initOrNil.data;
                 if (local.kind === LocalUsing) {
-                  p.log.addError(); // "using" declarations are not allowed here
+                  p.log.addError(p.tracker, rangeOfIdentifier(p.source, initOrNil.loc), '"using" declarations are not allowed here');
                 } else if (local.kind === LocalAwaitUsing) {
-                  p.log.addError(); // "await using" declarations are not allowed here
+                  p.log.addError(p.tracker, rangeOfIdentifier(p.source, initOrNil.loc), '"await using" declarations are not allowed here');
                 }
               }
             }
@@ -3897,7 +4083,7 @@ export const parse2Methods = {
 
           // "await using" declarations are only allowed in for-of loops
           if (initOrNil !== null && initOrNil.data.k === S_LOCAL && initOrNil.data.kind === LocalAwaitUsing) {
-            p.log.addError(); // "await using" declarations are not allowed here
+            p.log.addError(p.tracker, rangeOfIdentifier(p.source, initOrNil.loc), '"await using" declarations are not allowed here');
           }
 
           // Only require "const" statement initializers when we know we're a normal for loop
@@ -4011,7 +4197,7 @@ export const parse2Methods = {
 
             if (isDeferName && p.lexer.token === TAsterisk) {
               // "import defer * as foo from 'bar';"
-              // p.markSyntaxFeature(compat.ImportDefer, ...): no-op (esnext)
+              p.markSyntaxFeature(ImportDefer, rangeOfIdentifier(p.source, defaultLoc));
               phase = DeferPhase;
               p.lexer.next();
               p.lexer.expectContextualKeyword("as");
@@ -4030,7 +4216,7 @@ export const parse2Methods = {
                 p.lexer.next();
                 if (p.lexer.isContextualKeyword("from")) {
                   // "import source from from 'foo';"
-                  // p.markSyntaxFeature(compat.ImportSource, ...): no-op (esnext)
+                  p.markSyntaxFeature(ImportSource, rangeOfIdentifier(p.source, defaultLoc));
                   phase = SourcePhase;
                   stmt.defaultName = new LocRef(nameLoc, p.storeNameInRef(nameSubstring));
                   p.lexer.next();
@@ -4042,7 +4228,7 @@ export const parse2Methods = {
               }
 
               // "import source foo from 'bar';"
-              // p.markSyntaxFeature(compat.ImportSource, ...): no-op (esnext)
+              p.markSyntaxFeature(ImportSource, rangeOfIdentifier(p.source, defaultLoc));
               phase = SourcePhase;
               stmt.defaultName = new LocRef(p.lexer.loc(), p.storeNameInRef(p.lexer.identifier));
               p.lexer.next();
@@ -4243,7 +4429,7 @@ export const parse2Methods = {
 
       case TReturn: {
         if (p.fnOrArrowDataParse.isReturnDisallowed) {
-          p.log.addError(); // A return statement cannot be used here:
+          p.log.addError(p.tracker, p.lexer.range(), "A return statement cannot be used here:");
         }
         p.lexer.next();
         let value = null;
@@ -4264,7 +4450,7 @@ export const parse2Methods = {
         p.lexer.next();
         if (p.lexer.hasNewlineBefore) {
           const endLoc = loc + 5;
-          p.log.addError(); // Unexpected newline after "throw"
+          p.log.addError(p.tracker, mkRange(endLoc, 0), 'Unexpected newline after "throw"');
           return new Stmt(new SThrow(new Expr(ENullShared, endLoc)), loc);
         }
         const expr = p.parseExpr(LLowest);
@@ -4376,7 +4562,7 @@ export const parse2Methods = {
                   // "interface \n Foo {}"
                   // "export interface \n Foo {}"
                   if (opts.isExport) {
-                    p.log.addError(); // Unexpected "interface"
+                    p.log.addError(p.tracker, nameRange, 'Unexpected "interface"');
                     throw LEXER_PANIC;
                   }
                   break;
@@ -4536,12 +4722,18 @@ export const parse2Methods = {
 
   forbidLexicalDecl(loc) {
     const p = this;
-    p.log.addErrorWithNotes(); // Cannot use a declaration in a single-statement context
+    const r = rangeOfIdentifier(p.source, loc);
+    p.log.addErrorWithNotes(p.tracker, r, "Cannot use a declaration in a single-statement context", [
+      new MsgData(null, null, "Wrap this declaration in a block statement to use it here."),
+    ]);
   },
 
   forbidUsingInSwitch(loc) {
     const p = this;
-    p.log.addErrorWithNotes(); // Cannot use a "using" declaration directly inside a switch case
+    const r = rangeOfIdentifier(p.source, loc);
+    p.log.addErrorWithNotes(p.tracker, r, 'Cannot use a "using" declaration directly inside a switch case', [
+      new MsgData(null, null, "Wrap this declaration in a block statement to use it here."),
+    ]);
   },
 
   parseStmtsUpTo(end, opts) {
@@ -4638,8 +4830,13 @@ export const parse2Methods = {
         } else {
           if (returnWithoutSemicolonStart !== -1) {
             if (s.k === S_EXPR) {
-              // The following expression is not returned because of an automatically-inserted semicolon
-              p.log.addID(MsgID_JS_SemicolonAfterReturn, LogWarning);
+              p.log.addID(
+                MsgID_JS_SemicolonAfterReturn,
+                LogWarning,
+                p.tracker,
+                mkRange(returnWithoutSemicolonStart + 6, 0),
+                "The following expression is not returned because of an automatically-inserted semicolon",
+              );
             }
           }
           returnWithoutSemicolonStart = -1;

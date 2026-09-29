@@ -8,13 +8,12 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-brotli = { path = "vendor/brotli" }
+brotli = { path = "vendor/brotli", features = ["fast-fixed-params"] }
 brotli-decompressor = { path = "vendor/brotli-decompressor" }
 alloc-no-stdlib = { path = "vendor/alloc-no-stdlib" }
 alloc-stdlib = { path = "vendor/alloc-stdlib" }
-# same versions as brotli-wasm 3.0.1 (compress options parsing)
-serde = { version = "=1.0.136", features = ["derive"] }
-serde_json = "=1.0.79"
+# compress() options parsing (cold code: optimized for size)
+fastbrotli-options = { path = "options" }
 
 [features]
 # the fast one-shot decoder (src/dec_api.rs, src/fastdec)
@@ -30,3 +29,6 @@ codegen-units = 1
 panic = "abort"
 debug = false
 strip = true
+
+[profile.release.package.fastbrotli-options]
+opt-level = "z"

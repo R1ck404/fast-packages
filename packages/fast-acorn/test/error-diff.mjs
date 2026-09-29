@@ -3,13 +3,14 @@
 // insertions of syntax-relevant snippets, deletions) and on JSX files parsed
 // as plain JavaScript (Nodepod's rollup parseAst tries plain acorn first):
 // the result or the error (class, message, pos, loc, raisedAt) must match.
-// Also counts how many errors the fast parser produced itself.
+// Every error must come from the fast parser itself: acorn's generic parser
+// is never loaded during the run and no error stack goes through it.
 //
 // node packages/fast-acorn/test/error-diff.mjs [--limit N] [--nodepod] [--mutations N] [--jsx N]
 import * as acorn from "acorn";
-import * as fast from "../index.mjs";
-import { errorStats, fastParse, BAIL, exactErrors } from "../parser.mjs";
-import { _getOptions } from "../vendor/acorn.mjs";
+import * as fast from "../src/index.mjs";
+import { fastParse } from "../src/parser.mjs";
+import { getOptions } from "../src/shared.mjs";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,7 +55,8 @@ function collect(dir, out, seen) {
 const rep = (k, v) => (typeof v === "bigint" ? "$big:" + v : v instanceof RegExp ? "$re:" + v : v);
 // (loc must be an instance of the library's own Position class)
 const errSer = (e, lib) => (e instanceof Error ? `${e.constructor.name}|${e.message}|${e.pos}|${e.loc ? e.loc.line + ":" + e.loc.column + ":" + (Object.getPrototypeOf(e.loc) === lib.Position.prototype) : e.loc}|${e.raisedAt}|${Object.keys(e).join(",")}` : "THROW " + String(e));
-let checks = 0, errors = 0, mismatch = 0, shown = 0;
+let checks = 0, errors = 0, mismatch = 0, shown = 0, notFast = 0;
+const genericLoaded = () => typeof Object.getOwnPropertyDescriptor(Object.getPrototypeOf(fast.Parser.prototype), "parseStatement") !== "undefined";
 function check(what, code, fn) {
   checks++;
   let a, b;
@@ -67,6 +69,11 @@ function check(what, code, fn) {
     b = "OK " + JSON.stringify(fn(fast, code), rep);
   } catch (e) {
     b = "ERR " + errSer(e, fast);
+    // raised by the fast parser (parser.mjs / regexp.mjs), not acorn's code
+    if (!(e instanceof Error) || /generic\.cjs/.test(e.stack) || !/parser\.mjs|regexp\.mjs/.test(e.stack)) {
+      notFast++;
+      if (notFast < 5) console.log("ERROR NOT FROM THE FAST PARSER", what, e && e.stack);
+    }
   }
   if (a.startsWith("ERR")) errors++;
   if (a !== b) {
@@ -142,19 +149,28 @@ for (let i = 0; i < soupCount; i++) {
   for (let k = 0; k < n; k++) code += TOKENS[Math.floor(rnd() * TOKENS.length)] + (rnd() < 0.7 ? " " : "");
   const o = OPTS[i % OPTS.length];
   check("soup " + JSON.stringify(code) + " " + JSON.stringify(o), code, (lib, c) => lib.parse(c, o));
-  // the fast parser itself must only ever return, BAIL, or throw an exact error
-  const exactBefore = errorStats.exact;
+  // the fast parser called directly: the same outcome as through the API
+  let d;
   try {
-    fastParse(code, _getOptions(o));
-    errorStats.exact = exactBefore;
+    d = "OK " + JSON.stringify(fastParse(code, getOptions(o)), rep);
   } catch (e) {
-    errorStats.exact = exactBefore;
-    if (e !== BAIL && !exactErrors.has(e)) {
-      crashes++;
-      if (crashes < 10) console.log("CRASH", JSON.stringify(code), JSON.stringify(o), e && e.stack);
-    }
+    d = "ERR " + errSer(e, fast);
+  }
+  let pub;
+  try {
+    pub = "OK " + JSON.stringify(fast.parse(code, o), rep);
+  } catch (e) {
+    pub = "ERR " + errSer(e, fast);
+  }
+  if (d !== pub) {
+    crashes++;
+    if (crashes < 10) console.log("DIRECT/API DIFFER", JSON.stringify(code), JSON.stringify(o), "\n  ", d.slice(0, 200), "\n  ", pub.slice(0, 200));
   }
   if (i % 4 === 0) check("soup-expr " + JSON.stringify(code), code, (lib, c) => lib.parseExpressionAt(c, 0, o));
 }
-console.log(`checks ${checks}, errors ${errors} (of which the fast parser produced ${errorStats.exact}), MISMATCH ${mismatch}, fast-parser crashes ${crashes}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
-process.exit(mismatch || crashes ? 1 : 0);
+if (genericLoaded()) {
+  notFast++;
+  console.log("acorn's generic parser was loaded during the run");
+}
+console.log(`checks ${checks}, errors ${errors} (all ${notFast ? "NOT " : ""}from the fast parser: ${errors - notFast}), MISMATCH ${mismatch}, NOT-FROM-FAST-PARSER ${notFast}, direct/API differences ${crashes}  (${((performance.now() - t0) / 1000).toFixed(1)}s)`);
+process.exit(mismatch || crashes || notFast ? 1 : 0);

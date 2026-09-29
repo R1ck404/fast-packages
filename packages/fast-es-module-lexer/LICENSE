@@ -1,6 +1,6 @@
 @r1ck404/fast-es-module-lexer is derived from es-module-lexer 1.7.0
 (https://github.com/guybedford/es-module-lexer): its lexer is ported to Rust
-(rust/src) and its JavaScript build is vendored (vendor/lexer.js). Its license
+(rust/src) and its JavaScript API is reimplemented (index.mts). Its license
 applies:
 
 MIT License

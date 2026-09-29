@@ -1,15 +1,25 @@
-// Every change made to @noble/hashes 1.8.0's files, as exact find/replace
-// pairs on the upstream text (ESM and the tsc CommonJS output). Each `find`
-// must occur exactly once. tools/vendor.mjs applies them; test/files.mjs
-// checks the shipped files are upstream + these patches and nothing else.
+// Every change made to @noble/hashes 1.8.0's files (ESM and the tsc
+// CommonJS output). A patch is [find, replace], `find` occurring exactly
+// once, or [[from, to], replace]: the text from `from` (exactly once)
+// through the first `to` after it. tools/vendor.mjs applies them;
+// test/files.mjs checks the shipped files are upstream + these patches and
+// nothing else.
+//
+// The compression functions of SHA-256/224, the SHA-512 family, SHA-1 and
+// MD5 (process(), with their round constants and message schedule arrays)
+// and scrypt's ROMix (XorAndSalsa, BlockMix and its loops) are replaced by
+// the wasm in _fast.js; everything else is noble's code.
 
-const MD_UPDATE = (fast, aexists, toBytes) => [
+const NOTE = "// fast-noble-hashes: ";
+const esm = { f: (name) => name, call: (name) => name, pure: "/* @__PURE__ */ " };
+const cjs = { f: (name) => `_fast_js_1.${name}`, call: (name) => `(0, _fast_js_1.${name})`, pure: "" };
+
+const MD_UPDATE = (x, aexists, toBytes) => [
   [
     `        ${aexists}(this);
         data = ${toBytes}(data);`,
     `        ${aexists}(this);
-        const k = this[${fast("FAST")}];
-        if (k !== undefined && this.constructor === k.ctor && ${fast("fastUpdate")}(this, data, k))
+        if (${x.call("fastMD")}(this, data))
             return this;
         data = ${toBytes}(data);`,
   ],
@@ -17,27 +27,13 @@ const MD_UPDATE = (fast, aexists, toBytes) => [
     `        this.finished = true;
         // Padding`,
     `        this.finished = true;
-        const k = this[${fast("FAST")}];
-        if (k !== undefined && this.constructor === k.ctor && ${fast("fastDigestInto")}(this, out, k))
+        if (${x.call("fastMD")}(this, out, 1))
             return;
         // Padding`,
   ],
 ];
 
-const SHA2_REGISTER = (fast) => [
-  `/**
- * SHA2-256 hash function from RFC 4634.`,
-  `${fast("defineFast")}(SHA256, 'sha256');
-${fast("defineFast")}(SHA224, 'sha256');
-${fast("defineFast")}(SHA512, 'sha512');
-${fast("defineFast")}(SHA384, 'sha512');
-${fast("defineFast")}(SHA512_224, 'sha512');
-${fast("defineFast")}(SHA512_256, 'sha512');
-/**
- * SHA2-256 hash function from RFC 4634.`,
-];
-
-const PBKDF2_LOOP = (fast, asyncLoop) => {
+const PBKDF2_LOOP = (x, asyncLoop) => {
   const head = `    const u = new Uint8Array(PRF.outputLen);
     // DK = T1 + T2 + ⋯ + Tdklen/hlen
     for (let ti = 1, pos = 0; pos < dkLen; ti++, pos += PRF.outputLen) {
@@ -52,71 +48,93 @@ const PBKDF2_LOOP = (fast, asyncLoop) => {
   const withFast = (call, next) =>
     head.replace(
       `    const u = new Uint8Array(PRF.outputLen);\n`,
-      `    const u = new Uint8Array(PRF.outputLen);\n    const fk = ${fast("fastPrf")}(PRF);\n`,
+      `    const u = new Uint8Array(PRF.outputLen);\n    const fk = ${x.call("fastPrf")}(PRF);\n`,
     ) +
-    `        if (fk !== undefined && c > 1 && ${fast("fastPrf")}(PRF) === fk) {
+    `        if (fk && c > 1) {
             ${call};
             continue;
         }
 ${next}`;
   return [
-    [head + `        for (let ui = 1; ui < c; ui++) {`, withFast(`${fast("fastPbkdf2")}(PRF, fk, u, Ti, c - 1)`, `        for (let ui = 1; ui < c; ui++) {`)],
+    [head + `        for (let ui = 1; ui < c; ui++) {`, withFast(`${x.call("fastPbkdf2")}(PRF, fk, u, Ti, c - 1)`, `        for (let ui = 1; ui < c; ui++) {`)],
     [
       head + `        await ${asyncLoop}(c - 1, asyncTick, () => {`,
-      withFast(`await ${fast("fastPbkdf2Async")}(PRF, fk, u, Ti, c - 1, asyncTick)`, `        await ${asyncLoop}(c - 1, asyncTick, () => {`),
+      withFast(`await ${x.call("fastPbkdf2Async")}(PRF, fk, u, Ti, c - 1, asyncTick)`, `        await ${asyncLoop}(c - 1, asyncTick, () => {`),
     ],
   ];
 };
 
-const SCRYPT = (fast, u32, swap32IfBE) => [
-  [
-    `    const B32 = ${u32}(B);
-    // Re-used between parallel iterations. Array(iterations) of B
-    const V = ${u32}(new Uint8Array(blockSize * N));
-    const tmp = ${u32}(new Uint8Array(blockSize));`,
-    `    const B32 = ${u32}(B);
-    const F = r >= 1 && p >= 1 ? ${fast("fastScrypt")}(r, N, p) : null;
-    // Re-used between parallel iterations. Array(iterations) of B
-    const V = F ? EMPTY : ${u32}(new Uint8Array(blockSize * N));
-    const tmp = F ? EMPTY : ${u32}(new Uint8Array(blockSize));`,
-  ],
-  [
-    `    return { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick };`,
-    `    return { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick, F, onProgress };`,
-  ],
-  [
-    `    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb } = scryptInit(password, salt, opts);
-    ${swap32IfBE}(B32);`,
-    `    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, F, onProgress } = scryptInit(password, salt, opts);
-    if (F) {
-        ${fast("fastScryptRun")}(F, B, N, p, onProgress);
-        return scryptOutput(password, dkLen, B, V, tmp);
+// process() of a class: the wasm of its family; roundClean() has no
+// scratch arrays left to clean
+const PROCESS = (x, family, from, setLine, clean) => [
+  [[`    process(view, offset) {\n${from}`, `        ${setLine}\n    }\n    roundClean() {\n        ${clean}\n    }`],
+    `    process(view, offset) {
+        ${x.call("fastProcess")}(this, view, offset, ${family});
     }
-    ${swap32IfBE}(B32);`,
+    roundClean() {
+    }`],
+];
+
+const SHA2 = (x, clean, hasher, fastHasher) => [
+  [[`/**\n * Round constants:\n * First 32 bits of fractional parts`, `const SHA256_W = /* @__PURE__ */ new Uint32Array(64);\n`], `${NOTE}SHA256_K and SHA256_W are in the wasm\n`],
+  ...PROCESS(x, "FAST_SHA256", `        // Extend the first 16 words into the remaining 48 words`, "this.set(A, B, C, D, E, F, G, H);", `${clean}(SHA256_W);`),
+  [[`// SHA2-512 is slower than sha256 in js because u64 operations are slow.`, `const SHA512_W_L = /* @__PURE__ */ new Uint32Array(80);\n`], `${NOTE}K512 and the SHA512_W arrays are in the wasm\n`],
+  ...PROCESS(
+    x,
+    "FAST_SHA512",
+    `        // Extend the first 16 words into the remaining 64 words`,
+    "this.set(Ah, Al, Bh, Bl, Ch, Cl, Dh, Dl, Eh, El, Fh, Fl, Gh, Gl, Hh, Hl);",
+    `${clean}(SHA512_W_H, SHA512_W_L);`,
+  ),
+  ...[["SHA256", "SHA256"], ["SHA224", "SHA256"], ["SHA512", "SHA512"], ["SHA384", "SHA512"], ["SHA512_256", "SHA512"], ["SHA512_224", "SHA512"]].map(([c, f]) => [
+    `${hasher}(() => new ${c}());`,
+    `${fastHasher}(() => new ${c}(), FAST_${f});`,
+  ]),
+];
+
+const LEGACY = (x, clean) => [
+  [`// Reusable temporary buffer\nconst SHA1_W = /* @__PURE__ */ new Uint32Array(80);\n`, `${NOTE}SHA1_W is in the wasm\n`],
+  ...PROCESS(x, "FAST_SHA1", `        for (let i = 0; i < 16; i++, offset += 4)\n            SHA1_W[i]`, "this.set(A, B, C, D, E);", `${clean}(SHA1_W);`),
+  [`// Reusable temporary buffer\nconst MD5_W = /* @__PURE__ */ new Uint32Array(16);\n`, `${NOTE}MD5_W is in the wasm\n`],
+  ...PROCESS(x, "FAST_MD5", `        for (let i = 0; i < 16; i++, offset += 4)\n            MD5_W[i]`, "this.set(A, B, C, D);", `${clean}(MD5_W);`),
+];
+
+const SCRYPT = (x, u32, clean) => [
+  [[`// The main Scrypt loop: uses Salsa extensively.`, `out, tail); // tail[i] = Salsa(blockIn[2*i+1] ^ head[i])\n    }\n}\n`], `${NOTE}XorAndSalsa and BlockMix are in the wasm\n`],
+  [`    const blockSize32 = blockSize / 4;\n`, ``],
+  [[`    const B32 = ${u32}(B);`, `    return { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick };`], `    return { N, r, p, dkLen, B, onProgress, asyncTick };`],
+  [`function scryptOutput(password, dkLen, B, V, tmp) {`, `function scryptOutput(password, dkLen, B) {`],
+  [`    ${clean}(B, V, tmp);`, `    ${clean}(B);`],
+  [
+    [`    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb } = scryptInit(password, salt, opts);`, `    return scryptOutput(password, dkLen, B, V, tmp);\n}`],
+    `    const { N, r, p, dkLen, B, onProgress } = scryptInit(password, salt, opts);
+    ${x.call("fastScrypt")}(FAST_SCRYPT, B, r, N, p, onProgress);
+    return scryptOutput(password, dkLen, B);
+}`,
   ],
   [
-    `    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick } = scryptInit(password, salt, opts);
-    ${swap32IfBE}(B32);`,
-    `    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick, F, onProgress } = scryptInit(password, salt, opts);
-    if (F) {
-        await ${fast("fastScryptRunAsync")}(F, B, N, p, onProgress, asyncTick);
-        return scryptOutput(password, dkLen, B, V, tmp);
-    }
-    ${swap32IfBE}(B32);`,
+    [`    const { N, r, p, dkLen, blockSize32, V, B32, B, tmp, blockMixCb, asyncTick } = scryptInit(password, salt, opts);`, `    return scryptOutput(password, dkLen, B, V, tmp);\n}`],
+    `    const { N, r, p, dkLen, B, onProgress, asyncTick } = scryptInit(password, salt, opts);
+    await ${x.call("fastScryptAsync")}(FAST_SCRYPT, B, r, N, p, onProgress, asyncTick);
+    return scryptOutput(password, dkLen, B);
+}`,
   ],
 ];
 
-const esm = (name) => name;
-const cjs = (name) => (/^[A-Z]+$/.test(name) ? `_fast_js_1.${name}` : `(0, _fast_js_1.${name})`);
-const NOTE = "// fast-noble-hashes: ";
+// the families (see wasmFamily in _fast.ts): a bundle keeps a family, and
+// its wasm, only when a class or hasher that uses it is kept
+const fam = (x, name, args) => `const FAST_${name} = ${x.pure}${x.call("wasmFamily")}(${x.f(`WASM_${name}`)}${args});`;
+const SHA2_FAMILIES = (x) =>
+  [fam(x, "SHA256", `, 64, 8, 8, ${x.pure}${x.call("K")}(64)`), fam(x, "SHA512", `, 128, 16, 8, ${x.pure}${x.call("K")}(80)`)].join("\n");
+const LEGACY_FAMILIES = (x) => [fam(x, "SHA1", ", 64, 8, 5"), fam(x, "MD5", `, 64, 8, 4, () => K.map(BigInt), ${x.f("MD5_X")}`)].join("\n");
 
 export const PATCHES = {
   "esm/_md.js": [
     [
       `import { Hash, abytes, aexists, aoutput, clean, createView, toBytes } from "./utils.js";`,
       `import { Hash, abytes, aexists, aoutput, clean, createView, toBytes } from "./utils.js";
-${NOTE}registered classes run their blocks in wasm (_fast.js)
-import { FAST, fastDigestInto, fastUpdate } from "./_fast.js";`,
+${NOTE}the registered classes run in wasm (_fast.js)
+import { fastMD } from "./_fast.js";`,
     ],
     ...MD_UPDATE(esm, "aexists", "toBytes"),
   ],
@@ -125,7 +143,7 @@ import { FAST, fastDigestInto, fastUpdate } from "./_fast.js";`,
       `const utils_ts_1 = require("./utils.js");
 /** Polyfill for Safari 14.`,
       `const utils_ts_1 = require("./utils.js");
-${NOTE}registered classes run their blocks in wasm (_fast.js)
+${NOTE}the registered classes run in wasm (_fast.js)
 const _fast_js_1 = require("./_fast.js");
 /** Polyfill for Safari 14.`,
     ],
@@ -133,55 +151,59 @@ const _fast_js_1 = require("./_fast.js");
   ],
   "esm/sha2.js": [
     [
-      `import { clean, createHasher, rotr } from "./utils.js";`,
-      `import { clean, createHasher, rotr } from "./utils.js";
-${NOTE}wasm block functions and one-shot hashers
-import { defineFast, fastHasher } from "./_fast.js";`,
+      `import { Chi, HashMD, Maj, SHA224_IV, SHA256_IV, SHA384_IV, SHA512_IV } from "./_md.js";
+import * as u64 from "./_u64.js";
+import { clean, createHasher, rotr } from "./utils.js";`,
+      `import { HashMD, SHA224_IV, SHA256_IV, SHA384_IV, SHA512_IV } from "./_md.js";
+import { clean } from "./utils.js";
+${NOTE}the compression functions and the one-shot hashers in wasm
+import { fastHasher, fastProcess, wasmFamily, K, WASM_SHA256, WASM_SHA512 } from "./_fast.js";
+${SHA2_FAMILIES(esm)}`,
     ],
-    SHA2_REGISTER(esm),
-    ...["SHA256", "SHA224", "SHA512", "SHA384", "SHA512_256", "SHA512_224"].map((c) => [
-      `/* @__PURE__ */ createHasher(() => new ${c}());`,
-      `/* @__PURE__ */ fastHasher(() => new ${c}());`,
-    ]),
+    ...SHA2(esm, "clean", "/* @__PURE__ */ createHasher", "/* @__PURE__ */ fastHasher"),
   ],
   "sha2.js": [
     [
-      `const utils_ts_1 = require("./utils.js");
-/**
- * Round constants:`,
-      `const utils_ts_1 = require("./utils.js");
-${NOTE}wasm block functions and one-shot hashers
+      `const _md_ts_1 = require("./_md.js");
+const u64 = require("./_u64.js");
+const utils_ts_1 = require("./utils.js");`,
+      `const _md_ts_1 = require("./_md.js");
+const utils_ts_1 = require("./utils.js");
+${NOTE}the compression functions and the one-shot hashers in wasm
 const _fast_js_1 = require("./_fast.js");
-/**
- * Round constants:`,
+${SHA2_FAMILIES(cjs)}`,
     ],
-    SHA2_REGISTER(cjs),
-    ...["SHA256", "SHA224", "SHA512", "SHA384", "SHA512_256", "SHA512_224"].map((c) => [
-      `(0, utils_ts_1.createHasher)(() => new ${c}());`,
-      `(0, _fast_js_1.fastHasher)(() => new ${c}());`,
-    ]),
+    ...SHA2(cjs, "(0, utils_ts_1.clean)", "(0, utils_ts_1.createHasher)", "(0, _fast_js_1.fastHasher)"),
   ],
   "esm/legacy.js": [
     [
-      `import { clean, createHasher, rotl } from "./utils.js";`,
-      `import { clean, createHasher, rotl } from "./utils.js";
-${NOTE}wasm block functions and one-shot hashers
-import { defineFast, fastHasher } from "./_fast.js";`,
+      `import { Chi, HashMD, Maj } from "./_md.js";
+import { clean, createHasher, rotl } from "./utils.js";`,
+      `import { HashMD } from "./_md.js";
+import { clean, createHasher, rotl } from "./utils.js";
+${NOTE}the compression functions and the one-shot hashers in wasm
+import { fastHasher, fastProcess, wasmFamily, MD5_X, WASM_MD5, WASM_SHA1 } from "./_fast.js";
+${LEGACY_FAMILIES(esm)}`,
     ],
-    [`export const sha1 = /* @__PURE__ */ createHasher(() => new SHA1());`, `defineFast(SHA1, 'sha1');\nexport const sha1 = /* @__PURE__ */ fastHasher(() => new SHA1());`],
-    [`export const md5 = /* @__PURE__ */ createHasher(() => new MD5());`, `defineFast(MD5, 'md5');\nexport const md5 = /* @__PURE__ */ fastHasher(() => new MD5());`],
+    ...LEGACY(esm, "clean"),
+    [`export const sha1 = /* @__PURE__ */ createHasher(() => new SHA1());`, `export const sha1 = /* @__PURE__ */ fastHasher(() => new SHA1(), FAST_SHA1);`],
+    [`export const md5 = /* @__PURE__ */ createHasher(() => new MD5());`, `export const md5 = /* @__PURE__ */ fastHasher(() => new MD5(), FAST_MD5);`],
   ],
   "legacy.js": [
     [
-      `const utils_ts_1 = require("./utils.js");
+      `const _md_ts_1 = require("./_md.js");
+const utils_ts_1 = require("./utils.js");
 /** Initial SHA1 state */`,
-      `const utils_ts_1 = require("./utils.js");
-${NOTE}wasm block functions and one-shot hashers
+      `const _md_ts_1 = require("./_md.js");
+const utils_ts_1 = require("./utils.js");
+${NOTE}the compression functions and the one-shot hashers in wasm
 const _fast_js_1 = require("./_fast.js");
+${LEGACY_FAMILIES(cjs)}
 /** Initial SHA1 state */`,
     ],
-    [`exports.sha1 = (0, utils_ts_1.createHasher)(() => new SHA1());`, `(0, _fast_js_1.defineFast)(SHA1, 'sha1');\nexports.sha1 = (0, _fast_js_1.fastHasher)(() => new SHA1());`],
-    [`exports.md5 = (0, utils_ts_1.createHasher)(() => new MD5());`, `(0, _fast_js_1.defineFast)(MD5, 'md5');\nexports.md5 = (0, _fast_js_1.fastHasher)(() => new MD5());`],
+    ...LEGACY(cjs, "(0, utils_ts_1.clean)"),
+    [`exports.sha1 = (0, utils_ts_1.createHasher)(() => new SHA1());`, `exports.sha1 = (0, _fast_js_1.fastHasher)(() => new SHA1(), FAST_SHA1);`],
+    [`exports.md5 = (0, utils_ts_1.createHasher)(() => new MD5());`, `exports.md5 = (0, _fast_js_1.fastHasher)(() => new MD5(), FAST_MD5);`],
   ],
   "esm/pbkdf2.js": [
     [
@@ -206,32 +228,39 @@ const _fast_js_1 = require("./_fast.js");
   "esm/scrypt.js": [
     [
       `import { anumber, asyncLoop, checkOpts, clean, rotl, swap32IfBE, u32 } from "./utils.js";`,
-      `import { anumber, asyncLoop, checkOpts, clean, rotl, swap32IfBE, u32 } from "./utils.js";
-${NOTE}ROMix in a wasm instance of its own
-import { fastScrypt, fastScryptRun, fastScryptRunAsync } from "./_fast.js";
-const EMPTY = /* @__PURE__ */ new Uint32Array(0);`,
+      `import { anumber, checkOpts, clean } from "./utils.js";
+${NOTE}ROMix in wasm
+import { fastScrypt, fastScryptAsync, wasmFamily, WASM_SCRYPT } from "./_fast.js";
+const FAST_SCRYPT = /* @__PURE__ */ wasmFamily(WASM_SCRYPT);`,
     ],
-    ...SCRYPT(esm, "u32", "swap32IfBE"),
+    ...SCRYPT(esm, "u32", "clean"),
   ],
   "scrypt.js": [
     [
       `const utils_ts_1 = require("./utils.js");
 // The main Scrypt loop`,
       `const utils_ts_1 = require("./utils.js");
-${NOTE}ROMix in a wasm instance of its own
+${NOTE}ROMix in wasm
 const _fast_js_1 = require("./_fast.js");
-const EMPTY = /* @__PURE__ */ new Uint32Array(0);
+const FAST_SCRYPT = (0, _fast_js_1.wasmFamily)(_fast_js_1.WASM_SCRYPT);
 // The main Scrypt loop`,
     ],
-    ...SCRYPT(cjs, "(0, utils_ts_1.u32)", "(0, utils_ts_1.swap32IfBE)"),
+    ...SCRYPT(cjs, "(0, utils_ts_1.u32)", "(0, utils_ts_1.clean)"),
   ],
 };
 
 export function applyPatches(rel, text) {
   for (const [find, replace] of PATCHES[rel] || []) {
-    const i = text.indexOf(find);
-    if (i < 0 || text.indexOf(find, i + 1) >= 0) throw new Error(`${rel}: patch target not found exactly once:\n${find}`);
-    text = text.slice(0, i) + replace + text.slice(i + find.length);
+    const [from, to] = Array.isArray(find) ? find : [find, null];
+    const i = text.indexOf(from);
+    if (i < 0 || text.indexOf(from, i + 1) >= 0) throw new Error(`${rel}: patch target not found exactly once:\n${from}`);
+    let end = i + from.length;
+    if (to !== null) {
+      const k = text.indexOf(to, end);
+      if (k < 0) throw new Error(`${rel}: end of patch range not found:\n${to}`);
+      end = k + to.length;
+    }
+    text = text.slice(0, i) + replace + text.slice(end);
   }
   return text;
 }

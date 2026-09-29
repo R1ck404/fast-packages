@@ -1,15 +1,49 @@
 // Port of internal/js_parser/js_parser_lower.go and
 // internal/js_parser/js_parser_lower_class.go.
 //
-// The fast path always runs with UnsupportedJSFeatures == 0 (target esnext),
-// so every "p.options.unsupportedJSFeatures.Has(compat.X)" is false. Branches
-// that only run when such a check is true are dropped (with a short note) or
-// replaced by bail() when the whole function is only reachable that way.
-// Everything that runs regardless of the target (class lowering for
-// TypeScript semantics, decorators, private members that must be lowered for
-// other reasons, super property lowering, ...) is ported faithfully.
-import { bail } from "./bail.mjs";
-import { mkRange, MsgData, LineColumnTracker } from "./logger.mjs";
+// Every lowering transform is ported for any UnsupportedJSFeatures value.
+// The functions called for every node of their kind keep a cheap early exit
+// when the target supports the feature (the esnext path must stay fast).
+import { goQuote } from "./gostd.mjs";
+import { GoPanic, goTypeName } from "./gopanic.mjs";
+import { mkRange, MsgData, LineColumnTracker, Warning, Debug, MsgID_JS_BigInt, MsgID_JS_EmptyImportMeta } from "./logger.mjs";
+import {
+  jsFeatureHas,
+  symbolFeature,
+  TopLevelAwait,
+  Bigint,
+  ImportMeta,
+  Generator,
+  AsyncAwait,
+  AsyncGenerator,
+  ObjectRestSpread,
+  OptionalChain,
+  NullishCoalescing,
+  LogicalAssignment,
+  Using,
+  ClassStaticBlocks,
+  ClassPrivateStaticField,
+  ClassPrivateField,
+  ClassStaticField,
+  ClassField,
+  Decorators,
+  DefaultArgument,
+  RestArgument,
+  ArraySpread,
+  ForOf,
+  ObjectAccessors,
+  ObjectExtensions,
+  Destructuring,
+  NewTarget,
+  ConstAndLet,
+  Class,
+  ForAwait,
+  NestedRestBinding,
+  ImportAttributes,
+  ImportDefer,
+  ImportSource,
+} from "./compat.mjs";
+                                              
 import {
   InvalidRef,
   LocRef,
@@ -29,6 +63,7 @@ import {
   SymbolPrivateStaticGetSetPair,
   PrivateSymbolMustBeLowered,
   MustNotBeRenamed,
+  DefaultNameMinifierJS,
 } from "./ast.mjs";
 import {
   Expr,
@@ -65,8 +100,10 @@ import {
   ESpread,
   EString,
   EAwait,
+  EYield,
   ENew,
   EIf,
+  EObject,
   EThisShared,
   ENullShared,
   ESuperShared,
@@ -78,6 +115,9 @@ import {
   SExportClause,
   SReturn,
   STry,
+  SFor,
+  SIf,
+  SThrow,
   B_ARRAY,
   B_OBJECT,
   B_IDENTIFIER,
@@ -101,6 +141,7 @@ import {
   E_OBJECT,
   E_SPREAD,
   E_STRING,
+  S_BLOCK,
   S_EMPTY,
   S_EXPR,
   S_LOCAL,
@@ -126,6 +167,8 @@ import {
   BinOpLogicalAnd,
   BinOpNullishCoalescing,
   UnOpDelete,
+  UnOpNot,
+  AssignTargetNone,
   OptionalChainNone,
   OptionalChainStart,
   NormalCall,
@@ -145,6 +188,7 @@ import {
   LocalVar,
   LocalLet,
   LocalConst,
+  LocalUsing,
   LocalAwaitUsing,
   localKindIsUsing,
   ScopeFunctionBody,
@@ -162,11 +206,22 @@ import {
   joinWithComma,
   joinAllWithComma,
   forEachIdentifierBindingInDecls,
+  convertBindingToExpr,
+  toNullOrUndefinedWithSideEffects,
+  CouldHaveSideEffects,
 } from "./js_ast_helpers.mjs";
-import { True, FormatESModule, ModeBundle, formatKeepESMImportExportSyntax } from "./config.mjs";
+import {
+  True,
+  FormatESModule,
+  ModeBundle,
+  formatKeepESMImportExportSyntax,
+  formatString,
+  prettyPrintTargetEnvironment,
+} from "./config.mjs";
 import {
   forInVarInit,
   objRestReturnValueIsUnused,
+  objRestMustReturnInitExpr,
   lowerUsingDeclarationContext,
   classLoweringInfo,
   classKindExpr,
@@ -177,10 +232,21 @@ import {
   propertyAnalysis,
   tempRefNeedsDeclare,
   tempRefNoDeclare,
+  stmtsFnBody,
   valueDefinitelyNotMutated,
+  valueCouldBeMutated,
   exprOut,
   EXPR_OUT_DEFAULT,
   invalidLog,
+  withStatement,
+  deleteBareName,
+  evalOrArguments,
+  reservedWord,
+  legacyOctalLiteral,
+  legacyOctalEscape,
+  ifElseFunctionStmt,
+  labelFunctionStmt,
+  duplicateLexicallyDeclaredNames,
 } from "./js_parser_types.mjs";
 
 // ---------------------------------------------------------------------------
@@ -192,25 +258,6 @@ function mapGetRef(m, k) {
   if (m === null) return 0;
   const v = m.get(k);
   return v === undefined ? 0 : v;
-}
-
-// ast.DefaultNameMinifierJS.NumberToMinifiedName (ast.mjs does not port the
-// name minifier because it is otherwise minify-only)
-const minifierHeadJS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
-const minifierTailJS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$";
-function numberToMinifiedNameJS(i) {
-  const nHead = minifierHeadJS.length;
-  const nTail = minifierTailJS.length;
-  let j = i % nHead;
-  let name = minifierHeadJS[j];
-  i = Math.floor(i / nHead);
-  while (i > 0) {
-    i--;
-    j = i % nTail;
-    name += minifierTailJS[j];
-    i = Math.floor(i / nTail);
-  }
-  return name;
 }
 
 // The private identifier used as a property key, if any
@@ -228,25 +275,104 @@ const NO_SUPER_CALL = Object.freeze([null, 0, null, null]);
 // js_parser_lower.go
 
 export const lowerMethods = {
-  // Note on "feature": compat is not ported (see CONVENTIONS.md). Callers may
-  // pass the Go feature name as a string (e.g. "TopLevelAwait") or 0. The only
-  // feature that matters when every feature is supported is TopLevelAwait. To
-  // be robust against callers passing 0, a call is also recognized as the
-  // top-level await check when "r" is exactly "p.liveTopLevelAwaitKeyword"
-  // (all four TopLevelAwait call sites in Go set that field to "r" right
-  // before calling this, and no other call site does).
-  markSyntaxFeature(feature, r) {
+  // "feature" is a compat.JSFeature (see compat.mjs). Returns didGenerateError.
+  markSyntaxFeature(feature           , r) {
     const p = this;
-    // (!p.options.unsupportedJSFeatures.Has(feature) is always true here)
-    const live = p.liveTopLevelAwaitKeyword;
-    const isTopLevelAwait =
-      feature === "TopLevelAwait" || (r !== null && r !== undefined && live.len > 0 && live.loc === r.loc && live.len === r.len);
-    if (isTopLevelAwait && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
-      // "Top-level await is currently not supported with the %q output format"
-      p.log.addError(p.tracker, r);
-      return true;
+
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, feature)) {
+      if (feature === TopLevelAwait && !formatKeepESMImportExportSyntax(p.options.outputFormat)) {
+        p.log.addError(p.tracker, r, "Top-level await is currently not supported with the " + goQuote(formatString(p.options.outputFormat)) + " output format");
+        return true;
+      }
+      return false;
     }
-    return false;
+
+    let name;
+    const where = prettyPrintTargetEnvironment(p.options.originalTargetEnv, p.options.unsupportedJSFeatureOverridesMask);
+
+    switch (feature) {
+      case DefaultArgument:
+        name = "default arguments";
+        break;
+      case RestArgument:
+        name = "rest arguments";
+        break;
+      case ArraySpread:
+        name = "array spread";
+        break;
+      case ForOf:
+        name = "for-of loops";
+        break;
+      case ObjectAccessors:
+        name = "object accessors";
+        break;
+      case ObjectExtensions:
+        name = "object literal extensions";
+        break;
+      case Destructuring:
+        name = "destructuring";
+        break;
+      case NewTarget:
+        name = "new.target";
+        break;
+      case ConstAndLet:
+        name = p.source.textForRange(r);
+        break;
+      case Class:
+        name = "class syntax";
+        break;
+      case Generator:
+        name = "generator functions";
+        break;
+      case AsyncAwait:
+        name = "async functions";
+        break;
+      case AsyncGenerator:
+        name = "async generator functions";
+        break;
+      case ForAwait:
+        name = "for-await loops";
+        break;
+      case NestedRestBinding:
+        name = "non-identifier array rest patterns";
+        break;
+      case ImportAttributes:
+        p.log.addError(p.tracker, r, 'Using an arbitrary value as the second argument to "import()" is not possible in ' + where);
+        return true;
+      case TopLevelAwait:
+        p.log.addError(p.tracker, r, "Top-level await is not available in " + where);
+        return true;
+      case ImportDefer:
+        p.log.addError(p.tracker, r, "Deferred imports are not available in " + where);
+        return true;
+      case ImportSource:
+        p.log.addError(p.tracker, r, "Source phase imports are not available in " + where);
+        return true;
+      case Bigint: {
+        // This can't be polyfilled
+        let kind = Warning;
+        if (p.suppressWarningsAboutWeirdCode || p.fnOrArrowDataVisit.tryBodyCount > 0) {
+          kind = Debug;
+        }
+        p.log.addID(MsgID_JS_BigInt, kind, p.tracker, r, "Big integer literals are not available in " + where + " and may crash at run-time");
+        return true;
+      }
+      case ImportMeta: {
+        // This can't be polyfilled
+        let kind = Warning;
+        if (p.suppressWarningsAboutWeirdCode || p.fnOrArrowDataVisit.tryBodyCount > 0) {
+          kind = Debug;
+        }
+        p.log.addID(MsgID_JS_EmptyImportMeta, kind, p.tracker, r, '"import.meta" is not available in ' + where + " and will be empty");
+        return true;
+      }
+      default:
+        p.log.addError(p.tracker, r, "This feature is not available in " + where);
+        return true;
+    }
+
+    p.log.addError(p.tracker, r, "Transforming " + name + " to " + where + " is not supported yet");
+    return true;
   },
 
   isStrictMode() {
@@ -261,19 +387,50 @@ export const lowerMethods = {
 
   markStrictModeFeature(feature, r, detail) {
     const p = this;
+    let text;
     let canBeTransformed = false;
 
-    // (the message text is not built: errors bail anyway)
-    if (feature === forInVarInit) {
-      canBeTransformed = true;
+    switch (feature) {
+      case withStatement:
+        text = "With statements";
+        break;
+      case deleteBareName:
+        text = "Delete of a bare identifier";
+        break;
+      case forInVarInit:
+        text = "Variable initializers inside for-in loops";
+        canBeTransformed = true;
+        break;
+      case evalOrArguments:
+        text = "Declarations with the name " + goQuote(detail);
+        break;
+      case reservedWord:
+        text = goQuote(detail) + " is a reserved word and";
+        break;
+      case legacyOctalLiteral:
+        text = "Legacy octal literals";
+        break;
+      case legacyOctalEscape:
+        text = "Legacy octal escape sequences";
+        break;
+      case ifElseFunctionStmt:
+        text = "Function declarations inside if statements";
+        break;
+      case labelFunctionStmt:
+        text = "Function declarations inside labels";
+        break;
+      case duplicateLexicallyDeclaredNames:
+        text = "Duplicate lexically-declared names";
+        break;
+      default:
+        text = "This feature";
     }
 
     if (p.isStrictMode()) {
-      // Go: "where, notes := p.whyStrictMode(p.currentScope)" only builds the
-      // message, and the error aborts the fast path anyway.
-      p.log.addErrorWithNotes(p.tracker, r);
+      const $w = p.whyStrictMode(p.currentScope);
+      p.log.addErrorWithNotes(p.tracker, r, text + " cannot be used " + $w[0], $w[1]);
     } else if (!canBeTransformed && p.isStrictModeOutputFormat()) {
-      p.log.addError(p.tracker, r);
+      p.log.addError(p.tracker, r, text + ' cannot be used with the "esm" output format due to strict mode');
     }
   },
 
@@ -299,6 +456,8 @@ export const lowerMethods = {
         notes = [
           p.tracker.msgData(mkRange(p.firstJSXElementLoc, 1), "This file is implicitly in strict mode due to the JSX element here:"),
           new MsgData(
+            null,
+            null,
             "When React's \"automatic\" JSX transform is enabled, using a JSX element automatically inserts " +
               "an \"import\" statement at the top of the file for the corresponding the JSX helper function. " +
               "This means the file is considered an ECMAScript module, and all ECMAScript modules use strict mode.",
@@ -320,12 +479,20 @@ export const lowerMethods = {
   },
 
   markAsyncFn(asyncRange, isGenerator) {
+    const p = this;
     // Lowered async functions are implemented in terms of generators. So if
     // generators aren't supported, async functions aren't supported either.
     // But if generators are supported, then async functions are unconditionally
     // supported because we can use generators to implement them.
-    // (compat.Generator is always supported in the fast path)
-    return false;
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, Generator)) {
+      return false;
+    }
+
+    let feature = AsyncAwait;
+    if (isGenerator) {
+      feature = AsyncGenerator;
+    }
+    return p.markSyntaxFeature(feature, asyncRange);
   },
 
   captureThis() {
@@ -354,11 +521,232 @@ export const lowerMethods = {
 
   // Go signature: (isAsync *bool, isGenerator *bool, args *[]Arg, bodyLoc,
   // bodyBlock *SBlock, preferExpr *bool, hasRestArg *bool, isArrow bool).
-  // Both transforms in here are guarded by compat checks that are always false
-  // in the fast path (compat.ObjectRestSpread for object rest arguments,
-  // compat.AsyncAwait / compat.AsyncGenerator for async functions), so this
-  // is a no-op that never touches its arguments.
-  lowerFunction(isAsync, isGenerator, args, bodyLoc, bodyBlock, preferExpr, hasRestArg, isArrow) {},
+  // Here "fnOrArrow" is the EArrow (isArrow true: Go passes isGenerator nil)
+  // or the Fn (isArrow false: Go passes preferExpr nil) whose isAsync,
+  // isGenerator, args, preferExpr and hasRestArg fields are read and written,
+  // and "bodyBlock" is the SBlock whose stmts are rewritten.
+  lowerFunction(fnOrArrow, bodyLoc, bodyBlock, isArrow) {
+    const p = this;
+    const unsupported = p.options.unsupportedJSFeatures;
+
+    // Lower object rest binding patterns in function arguments
+    if (jsFeatureHas(unsupported, ObjectRestSpread)) {
+      const prefixStmts = [];
+
+      // Lower each argument individually instead of lowering all arguments
+      // together. There is a correctness tradeoff here around default values
+      // for function arguments, with no right answer.
+      //
+      // Lowering all arguments together will preserve the order of side effects
+      // for default values, but will mess up their scope:
+      //
+      //   // Side effect order: a(), b(), c()
+      //   function foo([{[a()]: w, ...x}, y = b()], z = c()) {}
+      //
+      //   // Side effect order is correct but scope is wrong
+      //   function foo(_a, _b) {
+      //     var [[{[a()]: w, ...x}, y = b()], z = c()] = [_a, _b]
+      //   }
+      //
+      // Lowering each argument individually will preserve the scope for default
+      // values that don't contain object rest binding patterns, but will mess up
+      // the side effect order:
+      //
+      //   // Side effect order: a(), b(), c()
+      //   function foo([{[a()]: w, ...x}, y = b()], z = c()) {}
+      //
+      //   // Side effect order is wrong but scope for c() is correct
+      //   function foo(_a, z = c()) {
+      //     var [{[a()]: w, ...x}, y = b()] = _a
+      //   }
+      //
+      // This transform chooses to lower each argument individually with the
+      // thinking that perhaps scope matters more in real-world code than side
+      // effect order.
+      const args = fnOrArrow.args;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        const bindingLoc = arg.binding.loc;
+        if (bindingHasObjectRest(arg.binding)) {
+          const ref = p.generateTempRef(tempRefNoDeclare, "");
+          const target = convertBindingToExpr(arg.binding, null);
+          const init = new Expr(new EIdentifier(ref), bindingLoc);
+          p.recordUsage(ref);
+
+          const r = p.lowerObjectRestToDecls(target, init, []);
+          if (r[1]) {
+            // Replace the binding but leave the default value intact
+            args[i].binding = new Binding(new BIdentifier(ref), bindingLoc);
+
+            // Append a variable declaration to the function body
+            prefixStmts.push(new Stmt(new SLocal(r[0], LocalVar), bindingLoc));
+          }
+        }
+      }
+
+      if (prefixStmts.length > 0) {
+        bodyBlock.stmts = prefixStmts.concat(bodyBlock.stmts);
+      }
+    }
+
+    // Lower async functions and async generator functions
+    if (
+      fnOrArrow.isAsync &&
+      (jsFeatureHas(unsupported, AsyncAwait) || (!isArrow && fnOrArrow.isGenerator && jsFeatureHas(unsupported, AsyncGenerator)))
+    ) {
+      // Use the shortened form if we're an arrow function
+      if (isArrow) {
+        fnOrArrow.preferExpr = true;
+      }
+
+      // Determine the value for "this"
+      const thisResult = p.valueForThis(
+        bodyLoc,
+        false, // shouldWarn
+        AssignTargetNone,
+        false, // isCallTarget
+        false, // isDeleteTarget
+      );
+      let thisValue = thisResult[0];
+      const hasThisValue = thisResult[1];
+
+      if (isArrow && !p.fnOnlyDataVisit.hasThisUsage) {
+        thisValue = new Expr(ENullShared, bodyLoc);
+      } else if (!hasThisValue) {
+        thisValue = new Expr(EThisShared, bodyLoc);
+      }
+
+      // Move the code into a nested generator function
+      const fn = new Fn();
+      fn.isGenerator = true;
+      fn.body = new FnBody(new SBlock(bodyBlock.stmts, bodyBlock.closeBraceLoc), bodyLoc);
+      bodyBlock.stmts = [];
+
+      // Errors thrown during argument evaluation must reject the
+      // resulting promise, which needs more complex code to handle
+      let couldThrowErrors = false;
+      const outerArgs = fnOrArrow.args;
+      for (let i = 0; i < outerArgs.length; i++) {
+        const arg = outerArgs[i];
+        if (arg.binding.data.k !== B_IDENTIFIER || (arg.defaultOrNil !== null && couldPotentiallyThrow(arg.defaultOrNil.data))) {
+          couldThrowErrors = true;
+          break;
+        }
+      }
+
+      // Forward the arguments to the wrapper function
+      let usesArgumentsRef = false;
+      if (!isArrow && p.fnOnlyDataVisit.argumentsRef !== null) {
+        const use = p.currentPart.symbolUses.get(p.fnOnlyDataVisit.argumentsRef);
+        usesArgumentsRef = use !== undefined && use.countEstimate > 0;
+      }
+      let forwardedArgs;
+      if (!couldThrowErrors && !usesArgumentsRef) {
+        // Simple case: the arguments can stay on the outer function. It's
+        // worth separating out the simple case because it's the common case
+        // and it generates smaller code.
+        forwardedArgs = new Expr(ENullShared, bodyLoc);
+      } else {
+        // If code uses "arguments" then we must move the arguments to the inner
+        // function. This is because you can modify arguments by assigning to
+        // elements in the "arguments" object:
+        //
+        //   async function foo(x) {
+        //     arguments[0] = 1;
+        //     // "x" must be 1 here
+        //   }
+        //
+
+        // Complex case: the arguments must be moved to the inner function
+        fn.args = fnOrArrow.args;
+        fn.hasRestArg = fnOrArrow.hasRestArg;
+        const newArgs = [];
+        fnOrArrow.args = newArgs;
+        fnOrArrow.hasRestArg = false;
+
+        // Make sure to not change the value of the "length" property. This is
+        // done by generating dummy arguments for the outer function equal to
+        // the expected length of the function:
+        //
+        //   async function foo(a, b, c = d, ...e) {
+        //   }
+        //
+        // This turns into:
+        //
+        //   function foo(_0, _1) {
+        //     return __async(this, arguments, function* (a, b, c = d, ...e) {
+        //     });
+        //   }
+        //
+        // The "_0" and "_1" are dummy variables to ensure "foo.length" is 2.
+        for (let i = 0; i < fn.args.length; i++) {
+          const arg = fn.args[i];
+          if (arg.defaultOrNil !== null || (fn.hasRestArg && i + 1 === fn.args.length)) {
+            // Arguments from here on don't add to the "length"
+            break;
+          }
+
+          // Generate a dummy variable
+          const argRef = p.newSymbol(SymbolOther, `_${i}`);
+          p.currentScope.generated.push(argRef);
+          newArgs.push(new Arg(new Binding(new BIdentifier(argRef), arg.binding.loc)));
+        }
+
+        // Forward all arguments from the outer function to the inner function
+        if (!isArrow) {
+          // Normal functions can just use "arguments" to forward everything
+          forwardedArgs = new Expr(new EIdentifier(p.fnOnlyDataVisit.argumentsRef), bodyLoc);
+        } else {
+          // Arrow functions can't use "arguments", so we need to forward
+          // the arguments manually.
+          //
+          // Note that if the arrow function references "arguments" in its body
+          // (even if it's inside another nested arrow function), that reference
+          // to "arguments" will have to be substituted with a captured variable.
+          // This is because we're changing the arrow function into a generator
+          // function, which introduces a variable named "arguments". This is
+          // handled separately during symbol resolution instead of being handled
+          // here so we don't need to re-traverse the arrow function body.
+
+          // If we need to forward more than the current number of arguments,
+          // add a rest argument to the set of forwarding variables. This is the
+          // case if the arrow function has rest or default arguments.
+          if (newArgs.length < fn.args.length) {
+            const argRef = p.newSymbol(SymbolOther, `_${newArgs.length}`);
+            p.currentScope.generated.push(argRef);
+            newArgs.push(new Arg(new Binding(new BIdentifier(argRef), bodyLoc)));
+            fnOrArrow.hasRestArg = true;
+          }
+
+          // Forward all of the arguments
+          const items = new Array(newArgs.length);
+          for (let i = 0; i < newArgs.length; i++) {
+            const arg = newArgs[i];
+            const id = arg.binding.data;
+            let item = new Expr(new EIdentifier(id.ref), arg.binding.loc);
+            if (fnOrArrow.hasRestArg && i + 1 === newArgs.length) {
+              item = new Expr(new ESpread(item), item.loc);
+            }
+            items[i] = item;
+          }
+          forwardedArgs = new Expr(new EArray(items, 0, 0, true), bodyLoc);
+        }
+      }
+
+      let name;
+      if (!isArrow && fnOrArrow.isGenerator) {
+        // "async function* foo(a, b) { stmts }" => "function foo(a, b) { return __asyncGenerator(this, null, function* () { stmts }) }"
+        name = "__asyncGenerator";
+        fnOrArrow.isGenerator = false;
+      } else {
+        // "async function foo(a, b) { stmts }" => "function foo(a, b) { return __async(this, null, function* () { stmts }) }"
+        name = "__async";
+      }
+      fnOrArrow.isAsync = false;
+      const callAsync = p.callRuntime(bodyLoc, name, [thisValue, forwardedArgs, new Expr(new EFunction(fn), bodyLoc)]);
+      bodyBlock.stmts = [new Stmt(new SReturn(callAsync), bodyLoc)];
+    }
+  },
 
   // Returns [Expr, exprOut]
   lowerOptionalChain(expr, in_, childOut) {
@@ -421,14 +809,20 @@ export const lowerMethods = {
           break;
 
         default:
-          bail(); // panic("Internal error")
+          throw new GoPanic("Internal error");
       }
     }
 
     // Stop now if we can strip the whole chain as dead code. Since the chain is
     // lazily evaluated, it's safe to just drop the code entirely.
     if (p.options.minifySyntax) {
-      bail(); // (minify only)
+      const r = toNullOrUndefinedWithSideEffects(expr.data);
+      if (r[2] && r[0]) {
+        if (r[1] === CouldHaveSideEffects) {
+          return [joinWithComma(p.astHelpers.simplifyUnusedExpr(expr, p.options.unsupportedJSFeatures), valueWhenUndefined), EXPR_OUT_DEFAULT];
+        }
+        return [valueWhenUndefined, EXPR_OUT_DEFAULT];
+      }
     } else {
       const k = expr.data.k;
       if (k === E_NULL || k === E_UNDEFINED) {
@@ -444,8 +838,8 @@ export const lowerMethods = {
 
     // Don't lower this if we don't need to. This check must be done here instead
     // of earlier so we can do the dead code elimination above when the target is
-    // null or undefined. (compat.OptionalChain is always supported here)
-    if (!containsPrivateName) {
+    // null or undefined.
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, OptionalChain) && !containsPrivateName) {
       return [originalExpr, EXPR_OUT_DEFAULT];
     }
 
@@ -641,7 +1035,7 @@ export const lowerMethods = {
           break;
 
         default:
-          bail(); // panic("Internal error")
+          throw new GoPanic("Internal error");
       }
     }
 
@@ -751,9 +1145,14 @@ export const lowerMethods = {
     const $d77 = p.extractPrivateIndex(e.left);
     const target = $d77[0], privateLoc = $d77[1], private_ = $d77[2];
     if (private_ !== null) {
-      // (compat.NullishCoalescing is always supported in the fast path, so the
-      // "(_a = __privateGet(a, #b)) != null ? _a : __privateSet(a, #b, c)" form
-      // is never generated)
+      if (jsFeatureHas(p.options.unsupportedJSFeatures, NullishCoalescing)) {
+        // "a.#b ??= c" => "(_a = __privateGet(a, #b)) != null ? _a : __privateSet(a, #b, c)"
+        const captured = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
+        const targetFunc = captured[0], targetWrapFunc = captured[1];
+        const left = p.lowerPrivateGet(targetFunc(), privateLoc, private_);
+        const right = p.lowerPrivateSet(targetFunc(), privateLoc, private_, e.right);
+        return [targetWrapFunc(p.lowerNullishCoalescing(loc, left, right)), true];
+      }
 
       // "a.#b ??= c" => "__privateGet(a, #b) ?? __privateSet(a, #b, c)"
       const $d78 = p.captureValueWithPossibleSideEffects(loc, 2, target, valueDefinitelyNotMutated);
@@ -769,7 +1168,21 @@ export const lowerMethods = {
       ];
     }
 
-    // (compat.LogicalAssignment is always supported in the fast path)
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, LogicalAssignment)) {
+      return [
+        p.lowerAssignmentOperator(e.left, (a, b) => {
+          if (jsFeatureHas(p.options.unsupportedJSFeatures, NullishCoalescing)) {
+            // "a ??= b" => "(_a = a) != null ? _a : a = b"
+            return p.lowerNullishCoalescing(loc, a, assign(b, e.right));
+          }
+
+          // "a ??= b" => "a ?? (a = b)"
+          return new Expr(new EBinary(a, assign(b, e.right), BinOpNullishCoalescing), loc);
+        }),
+        true,
+      ];
+    }
+
     return NOT_LOWERED;
   },
 
@@ -791,7 +1204,17 @@ export const lowerMethods = {
       ];
     }
 
-    // (compat.LogicalAssignment is always supported in the fast path)
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, LogicalAssignment)) {
+      return [
+        p.lowerAssignmentOperator(e.left, (a, b) => {
+          // "a &&= b" => "a && (a = b)"
+          // "a ||= b" => "a || (a = b)"
+          return new Expr(new EBinary(a, assign(b, e.right), op), loc);
+        }),
+        true,
+      ];
+    }
+
     return NOT_LOWERED;
   },
 
@@ -806,59 +1229,437 @@ export const lowerMethods = {
 
   // Lower object spread for environments that don't support them. Non-spread
   // properties are grouped into object literals and then passed to the
-  // "__spreadValues" and "__spreadProps" functions.
+  // "__spreadValues" and "__spreadProps" functions like this:
   //
-  // (compat.ObjectRestSpread is always supported in the fast path, so
-  // "needsLowering" is always false and the object is returned unchanged.)
+  //	"{a, b, ...c, d, e}" => "__spreadProps(__spreadValues(__spreadProps({a, b}, c), {d, e})"
+  //
+  // If the object literal starts with a spread, then we pass an empty object
+  // literal to "__spreadValues" to make sure we clone the object:
+  //
+  //	"{...a, b}" => "__spreadProps(__spreadValues({}, a), {b})"
+  //
+  // It's not immediately obvious why we don't compile everything to a single
+  // call to a function that takes any number of arguments, since that would be
+  // shorter. The reason is to preserve the order of side effects. Consider
+  // this code:
+  //
+  //	let a = {
+  //	  get x() {
+  //	    b = {y: 2}
+  //	    return 1
+  //	  }
+  //	}
+  //	let b = {}
+  //	let c = {...a, ...b}
+  //
+  // Converting the above code to "let c = __spreadFn({}, a, null, b)" means "c"
+  // becomes "{x: 1}" which is incorrect. Converting the above code instead to
+  // "let c = __spreadProps(__spreadProps({}, a), b)" means "c" becomes
+  // "{x: 1, y: 2}" which is correct.
   lowerObjectSpread(loc, e) {
-    return new Expr(e, loc);
+    const p = this;
+    let needsLowering = false;
+
+    if (jsFeatureHas(p.options.unsupportedJSFeatures, ObjectRestSpread)) {
+      const props = e.properties;
+      for (let i = 0; i < props.length; i++) {
+        if (props[i].kind === PropertySpread) {
+          needsLowering = true;
+          break;
+        }
+      }
+    }
+
+    if (!needsLowering) {
+      return new Expr(e, loc);
+    }
+
+    let result = null;
+    let properties = [];
+
+    const props = e.properties;
+    for (let i = 0; i < props.length; i++) {
+      const property = props[i];
+      if (property.kind !== PropertySpread) {
+        properties.push(property);
+        continue;
+      }
+
+      if (properties.length > 0 || result === null) {
+        if (result === null) {
+          // "{a, ...b}" => "__spreadValues({a}, b)"
+          result = new Expr(new EObject(properties, 0, 0, e.isSingleLine), loc);
+        } else {
+          // "{...a, b, ...c}" => "__spreadValues(__spreadProps(__spreadValues({}, a), {b}), c)"
+          result = p.callRuntime(loc, "__spreadProps", [result, new Expr(new EObject(properties, 0, 0, e.isSingleLine), loc)]);
+        }
+        properties = [];
+      }
+
+      // "{a, ...b}" => "__spreadValues({a}, b)"
+      result = p.callRuntime(loc, "__spreadValues", [result, property.valueOrNil]);
+    }
+
+    if (properties.length > 0) {
+      // "{...a, b}" => "__spreadProps(__spreadValues({}, a), {b})"
+      result = p.callRuntime(loc, "__spreadProps", [result, new Expr(new EObject(properties, 0, e.closeBraceLoc, e.isSingleLine), loc)]);
+    }
+
+    return result;
   },
 
   maybeLowerAwait(loc, e) {
-    // "await x" turns into "yield __await(x)" when lowering async generator
-    // functions, and into "yield x" when lowering async functions. Neither
-    // happens in the fast path (compat.AsyncAwait and compat.AsyncGenerator
-    // are always supported).
+    const p = this;
+    const unsupported = p.options.unsupportedJSFeatures;
+
+    // "await x" turns into "yield __await(x)" when lowering async generator functions
+    if (p.fnOrArrowDataVisit.isGenerator && (jsFeatureHas(unsupported, AsyncAwait) || jsFeatureHas(unsupported, AsyncGenerator))) {
+      return new Expr(new EYield(new Expr(new ENew(p.importFromRuntime(loc, "__await"), [e.value]), loc)), loc);
+    }
+
+    // "await x" turns into "yield x" when lowering async functions
+    if (jsFeatureHas(unsupported, AsyncAwait)) {
+      return new Expr(new EYield(e.value), loc);
+    }
+
     return new Expr(e, loc);
   },
 
-  // Only called when compat.ForAwait is unsupported (or compat.AsyncGenerator
-  // inside a generator), which never happens in the fast path.
   lowerForAwaitLoop(loc, loop, stmts) {
-    bail();
+    const p = this;
+
+    // This code:
+    //
+    //   for await (let x of y) z()
+    //
+    // is transformed into the following code:
+    //
+    //   try {
+    //     for (var iter = __forAwait(y), more, temp, error; more = !(temp = await iter.next()).done; more = false) {
+    //       let x = temp.value;
+    //       z();
+    //     }
+    //   } catch (temp) {
+    //     error = [temp]
+    //   } finally {
+    //     try {
+    //       more && (temp = iter.return) && (await temp.call(iter))
+    //     } finally {
+    //       if (error) throw error[0]
+    //     }
+    //   }
+    //
+    // except that "yield" is used instead of "await" if await is unsupported.
+    // This mostly follows TypeScript's implementation of the syntax transform.
+
+    const iterRef = p.generateTempRef(tempRefNoDeclare, "iter");
+    const moreRef = p.generateTempRef(tempRefNoDeclare, "more");
+    const tempRef_ = p.generateTempRef(tempRefNoDeclare, "temp");
+    const errorRef = p.generateTempRef(tempRefNoDeclare, "error");
+
+    p.recordUsage(iterRef);
+    p.recordUsage(moreRef);
+    p.recordUsage(tempRef_);
+    p.recordUsage(errorRef);
+
+    const init = loop.init.data;
+    switch (init.k) {
+      case S_LOCAL:
+        if (init.decls.length === 1) {
+          init.decls[0].valueOrNil = new Expr(new EDot(new Expr(new EIdentifier(tempRef_), loc), "value", loc), loc);
+        }
+        break;
+      case S_EXPR:
+        init.value = new Expr(
+          new EBinary(init.value, new Expr(new EDot(new Expr(new EIdentifier(tempRef_), loc), "value", loc), loc), BinOpAssign),
+          init.value.loc,
+        );
+        break;
+    }
+
+    const body = [];
+    let closeBraceLoc = 0;
+    body.push(loop.init);
+
+    if (loop.body.data.k === S_BLOCK) {
+      const block = loop.body.data;
+      pushAll(body, block.stmts);
+      closeBraceLoc = block.closeBraceLoc;
+    } else {
+      body.push(loop.body);
+    }
+
+    let awaitIterNext = new Expr(
+      new ECall(new Expr(new EDot(new Expr(new EIdentifier(iterRef), loc), "next", loc), loc), [], 0, OptionalChainNone, TargetWasOriginallyPropertyAccess),
+      loc,
+    );
+    let awaitTempCallIter = new Expr(
+      new ECall(
+        new Expr(new EDot(new Expr(new EIdentifier(tempRef_), loc), "call", loc), loc),
+        [new Expr(new EIdentifier(iterRef), loc)],
+        0,
+        OptionalChainNone,
+        TargetWasOriginallyPropertyAccess,
+      ),
+      loc,
+    );
+
+    // "await" expressions turn into "yield" expressions when lowering
+    awaitIterNext = p.maybeLowerAwait(awaitIterNext.loc, new EAwait(awaitIterNext));
+    awaitTempCallIter = p.maybeLowerAwait(awaitTempCallIter.loc, new EAwait(awaitTempCallIter));
+
+    stmts.push(
+      new Stmt(
+        new STry(
+          // Catch
+          new Catch(
+            new Binding(new BIdentifier(tempRef_), loc),
+            new SBlock([
+              new Stmt(
+                new SExpr(
+                  new Expr(new EBinary(new Expr(new EIdentifier(errorRef), loc), new Expr(new EArray([new Expr(new EIdentifier(tempRef_), loc)], 0, 0, true), loc), BinOpAssign), loc),
+                ),
+                loc,
+              ),
+            ]),
+            loc,
+            0,
+          ),
+
+          // Finally
+          new Finally(
+            new SBlock([
+              new Stmt(
+                new STry(
+                  null,
+                  new Finally(
+                    new SBlock([
+                      new Stmt(
+                        new SIf(
+                          new Expr(new EIdentifier(errorRef), loc),
+                          new Stmt(new SThrow(new Expr(new EIndex(new Expr(new EIdentifier(errorRef), loc), new Expr(new ENumber(0), loc)), loc)), loc),
+                        ),
+                        loc,
+                      ),
+                    ]),
+                    loc,
+                  ),
+                  new SBlock([
+                    new Stmt(
+                      new SExpr(
+                        new Expr(
+                          new EBinary(
+                            new Expr(
+                              new EBinary(
+                                new Expr(new EIdentifier(moreRef), loc),
+                                new Expr(
+                                  new EBinary(new Expr(new EIdentifier(tempRef_), loc), new Expr(new EDot(new Expr(new EIdentifier(iterRef), loc), "return", loc), loc), BinOpAssign),
+                                  loc,
+                                ),
+                                BinOpLogicalAnd,
+                              ),
+                              loc,
+                            ),
+                            awaitTempCallIter,
+                            BinOpLogicalAnd,
+                          ),
+                          loc,
+                        ),
+                      ),
+                      loc,
+                    ),
+                  ]),
+                  loc,
+                ),
+                loc,
+              ),
+            ]),
+            loc,
+          ),
+
+          // Block
+          new SBlock([
+            new Stmt(
+              new SFor(
+                new Stmt(
+                  new SLocal(
+                    [
+                      new Decl(new Binding(new BIdentifier(iterRef), loc), p.callRuntime(loc, "__forAwait", [loop.value])),
+                      new Decl(new Binding(new BIdentifier(moreRef), loc)),
+                      new Decl(new Binding(new BIdentifier(tempRef_), loc)),
+                      new Decl(new Binding(new BIdentifier(errorRef), loc)),
+                    ],
+                    LocalVar,
+                  ),
+                  loc,
+                ),
+                new Expr(
+                  new EBinary(
+                    new Expr(new EIdentifier(moreRef), loc),
+                    new Expr(
+                      new EUnary(
+                        new Expr(
+                          new EDot(new Expr(new EBinary(new Expr(new EIdentifier(tempRef_), loc), awaitIterNext, BinOpAssign), loc), "done", loc),
+                          loc,
+                        ),
+                        UnOpNot,
+                      ),
+                      loc,
+                    ),
+                    BinOpAssign,
+                  ),
+                  loc,
+                ),
+                new Expr(new EBinary(new Expr(new EIdentifier(moreRef), loc), new Expr(new EBoolean(false), loc), BinOpAssign), loc),
+                new Stmt(new SBlock(body, closeBraceLoc), loop.body.loc),
+                false,
+                true, // isLoweredForAwait
+              ),
+              loc,
+            ),
+          ]),
+          loc, // blockLoc
+        ),
+        loc,
+      ),
+    );
+    return stmts;
   },
 
   lowerObjectRestInDecls(decls) {
-    // (compat.ObjectRestSpread is always supported in the fast path)
+    const p = this;
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, ObjectRestSpread)) {
+      return decls;
+    }
+
+    // Don't do any allocations if there are no object rest patterns. We want as
+    // little overhead as possible in the common case.
+    for (let i = 0; i < decls.length; i++) {
+      const decl = decls[i];
+      if (decl.valueOrNil !== null && bindingHasObjectRest(decl.binding)) {
+        let clone = decls.slice(0, i);
+        for (let j = i; j < decls.length; j++) {
+          const decl = decls[j];
+          if (decl.valueOrNil !== null) {
+            const target = convertBindingToExpr(decl.binding, null);
+            const r = p.lowerObjectRestToDecls(target, decl.valueOrNil, clone);
+            if (r[1]) {
+              clone = r[0];
+              continue;
+            }
+          }
+          clone.push(decl);
+        }
+
+        return clone;
+      }
+    }
+
     return decls;
   },
 
-  // Go signature: (init Stmt, body *Stmt). No-op in the fast path because
-  // compat.ObjectRestSpread is always supported.
-  lowerObjectRestInForLoopInit(init, body) {},
+  // Go signature: (init Stmt, body *Stmt). "s" is the SForIn/SForOf whose
+  // "body" field Go passes by pointer.
+  lowerObjectRestInForLoopInit(init, s) {
+    const p = this;
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, ObjectRestSpread)) {
+      return;
+    }
 
-  // No-op in the fast path because compat.ObjectRestSpread is always supported.
-  lowerObjectRestInCatchBinding(catch_) {},
+    let bodyPrefixStmt = null;
 
-  // Returns [Expr, bool]
+    const sd = init.data;
+    switch (sd.k) {
+      case S_EXPR:
+        // "for ({...x} in y) {}"
+        // "for ({...x} of y) {}"
+        if (exprHasObjectRest(sd.value)) {
+          const ref = p.generateTempRef(tempRefNeedsDeclare, "");
+          const r = p.lowerAssign(sd.value, new Expr(new EIdentifier(ref), init.loc), objRestReturnValueIsUnused);
+          if (r[1]) {
+            const expr = r[0];
+            p.recordUsage(ref);
+            sd.value = new Expr(new EIdentifier(ref), sd.value.loc);
+            bodyPrefixStmt = new Stmt(new SExpr(expr), expr.loc);
+          }
+        }
+        break;
+
+      case S_LOCAL:
+        // "for (let {...x} in y) {}"
+        // "for (let {...x} of y) {}"
+        if (sd.decls.length === 1 && bindingHasObjectRest(sd.decls[0].binding)) {
+          const ref = p.generateTempRef(tempRefNoDeclare, "");
+          const decl = new Decl(sd.decls[0].binding, new Expr(new EIdentifier(ref), init.loc));
+          p.recordUsage(ref);
+          const decls = p.lowerObjectRestInDecls([decl]);
+          sd.decls[0].binding = new Binding(new BIdentifier(ref), sd.decls[0].binding.loc);
+          bodyPrefixStmt = new Stmt(new SLocal(decls, sd.kind), init.loc);
+        }
+        break;
+    }
+
+    if (bodyPrefixStmt !== null) {
+      const body = s.body;
+      if (body.data.k === S_BLOCK) {
+        // If there's already a block, insert at the front
+        const block = body.data;
+        block.stmts = [bodyPrefixStmt].concat(block.stmts);
+      } else {
+        // Otherwise, make a block and insert at the front
+        s.body = new Stmt(new SBlock([bodyPrefixStmt, body]), body.loc);
+      }
+    }
+  },
+
+  lowerObjectRestInCatchBinding(catch_) {
+    const p = this;
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, ObjectRestSpread)) {
+      return;
+    }
+
+    if (catch_.bindingOrNil !== null && bindingHasObjectRest(catch_.bindingOrNil)) {
+      const ref = p.generateTempRef(tempRefNoDeclare, "");
+      const bindingLoc = catch_.bindingOrNil.loc;
+      const decl = new Decl(catch_.bindingOrNil, new Expr(new EIdentifier(ref), bindingLoc));
+      p.recordUsage(ref);
+      const decls = p.lowerObjectRestInDecls([decl]);
+      catch_.bindingOrNil = new Binding(new BIdentifier(ref), bindingLoc);
+      catch_.block.stmts = [new Stmt(new SLocal(decls, LocalLet), bindingLoc)].concat(catch_.block.stmts);
+    }
+  },
+
+  // Returns [Expr, bool]. (Called for every assignment expression.)
   lowerAssign(rootExpr, rootInit, mode) {
     const p = this;
+
+    // JS-only: an identifier target is never lowered by either helper below
+    // (same result without the allocations)
+    if (rootExpr.data.k === E_IDENTIFIER) {
+      return NOT_LOWERED;
+    }
+
     const lowered = p.lowerSuperPropertyOrPrivateInAssign(rootExpr);
     rootExpr = lowered[0];
     const didLower = lowered[1];
 
-    let expr = null;
-    const assignFn = (left, right) => {
-      expr = joinWithComma(expr, assign(left, right));
-    };
+    // JS-only: only allocate the "assign" closure when lowerObjectRestHelper
+    // can do something (it returns right away otherwise)
+    const rootKind = rootExpr.data.k;
+    if ((rootKind === E_ARRAY || rootKind === E_OBJECT) && jsFeatureHas(p.options.unsupportedJSFeatures, ObjectRestSpread)) {
+      let expr = null;
+      const assignFn = (left, right) => {
+        expr = joinWithComma(expr, assign(left, right));
+      };
 
-    const $d82 = p.lowerObjectRestHelper(rootExpr, rootInit, assignFn, tempRefNeedsDeclare, mode);
-    const initWrapFunc = $d82[0], ok = $d82[1];
-    if (ok) {
-      if (initWrapFunc !== null) {
-        expr = initWrapFunc(expr);
+      const $d82 = p.lowerObjectRestHelper(rootExpr, rootInit, assignFn, tempRefNeedsDeclare, mode);
+      const initWrapFunc = $d82[0], ok = $d82[1];
+      if (ok) {
+        if (initWrapFunc !== null) {
+          expr = initWrapFunc(expr);
+        }
+        return [expr, true];
       }
-      return [expr, true];
     }
 
     if (didLower) {
@@ -875,7 +1676,7 @@ export const lowerMethods = {
       const $d83 = p.convertExprToBinding(left, new invalidLog());
       const binding = $d83[0], log = $d83[1];
       if (log.invalidTokens.length > 0) {
-        bail(); // panic("Internal error")
+        throw new GoPanic("Internal error");
       }
       decls.push(new Decl(binding, right));
     };
@@ -887,11 +1688,269 @@ export const lowerMethods = {
     return [null, false];
   },
 
-  // Returns [wrapFunc, ok]. The transform is only done when
-  // compat.ObjectRestSpread is unsupported, which never happens in the fast
-  // path, so this always returns [null, false].
+  // Returns [wrapFunc, ok]
   lowerObjectRestHelper(rootExpr, rootInit, assignFn, declare, mode) {
-    return NOT_LOWERED;
+    const p = this;
+    if (!jsFeatureHas(p.options.unsupportedJSFeatures, ObjectRestSpread)) {
+      return NOT_LOWERED;
+    }
+
+    // Check if this could possibly contain an object rest binding
+    const rootKind = rootExpr.data.k;
+    if (rootKind !== E_ARRAY && rootKind !== E_OBJECT) {
+      return NOT_LOWERED;
+    }
+
+    // Scan for object rest bindings and initialize rest binding containment
+    // (Go: map[js_ast.E]bool keyed by the expression data)
+    const containsRestBinding = new Set();
+    const findRestBindings = (expr) => {
+      if (expr === null) return false;
+      let found = false;
+      const e = expr.data;
+      switch (e.k) {
+        case E_BINARY:
+          if (e.op === BinOpAssign && findRestBindings(e.left)) {
+            found = true;
+          }
+          break;
+        case E_ARRAY:
+          for (let i = 0; i < e.items.length; i++) {
+            if (findRestBindings(e.items[i])) {
+              found = true;
+            }
+          }
+          break;
+        case E_OBJECT:
+          for (let i = 0; i < e.properties.length; i++) {
+            const property = e.properties[i];
+            if (property.kind === PropertySpread || findRestBindings(property.valueOrNil)) {
+              found = true;
+            }
+          }
+          break;
+      }
+      if (found) {
+        containsRestBinding.add(e);
+      }
+      return found;
+    };
+    findRestBindings(rootExpr);
+    if (containsRestBinding.size === 0) {
+      return NOT_LOWERED;
+    }
+
+    // If there is at least one rest binding, lower the whole expression
+    let visit;
+
+    const captureIntoRef = (expr) => {
+      const ref = p.generateTempRef(declare, "");
+      assignFn(new Expr(new EIdentifier(ref), expr.loc), expr);
+      p.recordUsage(ref);
+      return ref;
+    };
+
+    const lowerObjectRestPattern = (before, binding, init, capturedKeys, isSingleLine) => {
+      // If there are properties before this one, store the initializer in a
+      // temporary so we can reference it multiple times, then create a new
+      // destructuring assignment for these properties
+      if (before.length > 0) {
+        // "let {a, ...b} = c"
+        const ref = captureIntoRef(init);
+        assignFn(new Expr(new EObject(before, 0, 0, isSingleLine), before[0].key.loc), new Expr(new EIdentifier(ref), init.loc));
+        init = new Expr(new EIdentifier(ref), init.loc);
+        p.recordUsage(ref);
+        p.recordUsage(ref);
+      }
+
+      // Call "__objRest" to clone the initializer without the keys for previous
+      // properties, then assign the result to the binding for the rest pattern
+      const n = capturedKeys === null ? 0 : capturedKeys.length;
+      const keysToExclude = new Array(n);
+      for (let i = 0; i < n; i++) {
+        keysToExclude[i] = capturedKeys[i]();
+      }
+      assignFn(binding, p.callRuntime(binding.loc, "__objRest", [init, new Expr(new EArray(keysToExclude, 0, 0, isSingleLine), binding.loc)]));
+    };
+
+    const splitArrayPattern = (before, split, after, init, isSingleLine) => {
+      // If this has a default value, skip the value to target the binding
+      // (Go keeps a pointer to either the local "split" or the "Left" field of
+      // the default value's EBinary, and replaces the binding through it)
+      const splitData = split.data;
+      const bindingIsLeft = splitData.k === E_BINARY && splitData.op === BinOpAssign;
+
+      // Swap the binding with a temporary
+      const splitRef = p.generateTempRef(declare, "");
+      let deferredBinding;
+      if (bindingIsLeft) {
+        deferredBinding = splitData.left;
+        splitData.left = new Expr(new EIdentifier(splitRef), deferredBinding.loc);
+      } else {
+        deferredBinding = split;
+        split = new Expr(new EIdentifier(splitRef), split.loc);
+      }
+      const items = before.slice();
+      items.push(split);
+
+      // If there are any items left over, defer them until later too
+      let tailExpr = null;
+      let tailInit = null;
+      if (after.length > 0) {
+        const tailRef = p.generateTempRef(declare, "");
+        const loc = after[0].loc;
+        tailExpr = new Expr(new EArray(after, 0, 0, isSingleLine), loc);
+        tailInit = new Expr(new EIdentifier(tailRef), loc);
+        items.push(new Expr(new ESpread(new Expr(new EIdentifier(tailRef), loc)), loc));
+        p.recordUsage(tailRef);
+        p.recordUsage(tailRef);
+      }
+
+      // The original destructuring assignment must come first
+      assignFn(new Expr(new EArray(items, 0, 0, isSingleLine), split.loc), init);
+
+      // Then the deferred split is evaluated
+      visit(deferredBinding, new Expr(new EIdentifier(splitRef), split.loc), null);
+      p.recordUsage(splitRef);
+
+      // Then anything after the split
+      if (after.length > 0) {
+        visit(tailExpr, tailInit, null);
+      }
+    };
+
+    const splitObjectPattern = (upToSplit, afterSplit, init, capturedKeys, isSingleLine) => {
+      // If there are properties after the split, store the initializer in a
+      // temporary so we can reference it multiple times
+      let afterSplitInit = null;
+      if (afterSplit.length > 0) {
+        const ref = captureIntoRef(init);
+        init = new Expr(new EIdentifier(ref), init.loc);
+        afterSplitInit = new Expr(new EIdentifier(ref), init.loc);
+      }
+
+      // (Go keeps a pointer to the "ValueOrNil" field of the last property)
+      const split = upToSplit[upToSplit.length - 1];
+      const bindingLoc = split.valueOrNil.loc;
+
+      // Swap the binding with a temporary
+      const splitRef = p.generateTempRef(declare, "");
+      const deferredBinding = split.valueOrNil;
+      split.valueOrNil = new Expr(new EIdentifier(splitRef), bindingLoc);
+      p.recordUsage(splitRef);
+
+      // Use a destructuring assignment to unpack everything up to and including
+      // the split point
+      assignFn(new Expr(new EObject(upToSplit, 0, 0, isSingleLine), bindingLoc), init);
+
+      // Handle any nested rest binding patterns inside the split point
+      visit(deferredBinding, new Expr(new EIdentifier(splitRef), bindingLoc), null);
+      p.recordUsage(splitRef);
+
+      // Then continue on to any properties after the split
+      if (afterSplit.length > 0) {
+        visit(new Expr(new EObject(afterSplit, 0, 0, isSingleLine), bindingLoc), afterSplitInit, capturedKeys);
+      }
+    };
+
+    // This takes an expression representing a binding pattern as input and
+    // returns that binding pattern with any object rest patterns stripped out.
+    // The object rest patterns are lowered and appended to "exprChain" along
+    // with any child binding patterns that came after the binding pattern
+    // containing the object rest pattern.
+    //
+    // This transform must be very careful to preserve the exact evaluation
+    // order of all assignments, default values, and computed property keys.
+    //
+    // Unlike the Babel and TypeScript compilers, this transform does not
+    // lower binding patterns other than object rest patterns. For example,
+    // array spread patterns are preserved.
+    //
+    // Certain patterns such as "{a: {...a}, b: {...b}, ...c}" may need to be
+    // split multiple times. In this case the "capturedKeys" argument allows
+    // the visitor to pass on captured keys to the tail-recursive call that
+    // handles the properties after the split.
+    visit = (expr, init, capturedKeys) => {
+      const e = expr.data;
+      switch (e.k) {
+        case E_ARRAY: {
+          // Split on the first binding with a nested rest binding pattern
+          const items = e.items;
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            // "let [a, {...b}, c] = d"
+            if (containsRestBinding.has(item.data)) {
+              splitArrayPattern(items.slice(0, i), item, items.slice(i + 1), init, e.isSingleLine);
+              return;
+            }
+          }
+          break;
+        }
+
+        case E_OBJECT: {
+          const props = e.properties;
+          const last = props.length - 1;
+          const endsWithRestBinding = last >= 0 && props[last].kind === PropertySpread;
+
+          // Split on the first binding with a nested rest binding pattern
+          for (let i = 0; i < props.length; i++) {
+            const property = props[i];
+
+            // "let {a, ...b} = c"
+            if (property.kind === PropertySpread) {
+              lowerObjectRestPattern(props.slice(0, i), property.valueOrNil, init, capturedKeys, e.isSingleLine);
+              return;
+            }
+
+            // Save a copy of this key so the rest binding can exclude it
+            if (endsWithRestBinding) {
+              const r = p.captureKeyForObjectRest(property.key);
+              property.key = r[0];
+              if (capturedKeys === null) capturedKeys = [];
+              capturedKeys.push(r[1]);
+            }
+
+            // "let {a: {...b}, c} = d"
+            if (property.valueOrNil !== null && containsRestBinding.has(property.valueOrNil.data)) {
+              splitObjectPattern(props.slice(0, i + 1), props.slice(i + 1), init, capturedKeys, e.isSingleLine);
+              return;
+            }
+          }
+          break;
+        }
+      }
+
+      assignFn(expr, init);
+    };
+
+    // Capture and return the value of the initializer if this is an assignment
+    // expression and the return value is used:
+    //
+    //   // Input:
+    //   console.log({...x} = x);
+    //
+    //   // Output:
+    //   var _a;
+    //   console.log((x = __objRest(_a = x, []), _a));
+    //
+    // This isn't necessary if the return value is unused:
+    //
+    //   // Input:
+    //   ({...x} = x);
+    //
+    //   // Output:
+    //   x = __objRest(x, []);
+    //
+    let wrapFunc = null;
+    if (mode === objRestMustReturnInitExpr) {
+      const captured = p.captureValueWithPossibleSideEffects(rootInit.loc, 2, rootInit, valueCouldBeMutated);
+      const initFunc = captured[0], initWrapFunc = captured[1];
+      rootInit = initFunc();
+      wrapFunc = (expr) => initWrapFunc(joinWithComma(expr, initFunc()));
+    }
+
+    visit(rootExpr, rootInit, null);
+    return [wrapFunc, true];
   },
 
   // Save a copy of the key for the call to "__objRest" later on. Certain
@@ -1056,10 +2115,25 @@ export const lowerMethods = {
   },
 
   shouldLowerUsingDeclarations(stmts) {
-    // A "using" declaration is only lowered when compat.Using is unsupported,
-    // and an "await using" declaration only when compat.Using,
-    // compat.AsyncAwait, or compat.AsyncGenerator (inside a generator) is
-    // unsupported. None of these happen in the fast path.
+    const p = this;
+    const unsupported = p.options.unsupportedJSFeatures;
+    const lowerUsing = jsFeatureHas(unsupported, Using);
+    const lowerAwaitUsing =
+      lowerUsing ||
+      jsFeatureHas(unsupported, AsyncAwait) ||
+      (jsFeatureHas(unsupported, AsyncGenerator) && p.fnOrArrowDataVisit.isGenerator);
+
+    // JS-only: skip the scan when nothing can match (same result)
+    if (!lowerAwaitUsing) {
+      return false;
+    }
+
+    for (let i = 0; i < stmts.length; i++) {
+      const local = stmts[i].data;
+      if (local.k === S_LOCAL && ((local.kind === LocalUsing && lowerUsing) || (local.kind === LocalAwaitUsing && lowerAwaitUsing))) {
+        return true;
+      }
+    }
     return false;
   },
 
@@ -1068,11 +2142,38 @@ export const lowerMethods = {
     return new lowerUsingDeclarationContext(0, p.newSymbol(SymbolOther, "_stack"), false);
   },
 
-  // Go signature: (loc, init *SLocal, body *Stmt). Every call site is guarded
-  // by a compat check (compat.Using, compat.AsyncAwait, compat.AsyncGenerator)
-  // that is always false in the fast path.
-  lowerUsingDeclarationInForOf(loc, init, body) {
-    bail();
+  // Go signature: (loc, init *SLocal, body *Stmt). "s" is the SForOf whose
+  // "body" field Go passes by pointer.
+  lowerUsingDeclarationInForOf(loc, init, s) {
+    const p = this;
+    const binding = init.decls[0].binding;
+    const id = binding.data;
+    if (id.k !== B_IDENTIFIER) {
+      throw new GoPanic("interface conversion: js_ast.B is " + goTypeName("js_ast", id) + ", not *js_ast.BIdentifier");
+    }
+    const tempRef_ = p.generateTempRef(tempRefNoDeclare, "_" + p.symbols[refInner(id.ref)].originalName);
+    let block;
+    if (s.body.data.k === S_BLOCK) {
+      block = s.body.data;
+    } else {
+      block = new SBlock();
+      if (s.body.data.k !== S_EMPTY) {
+        block.stmts.push(s.body);
+      }
+      s.body = new Stmt(block, s.body.loc);
+    }
+    const blockStmts = [
+      new Stmt(
+        new SLocal([new Decl(new Binding(new BIdentifier(id.ref), binding.loc), new Expr(new EIdentifier(tempRef_), binding.loc))], init.kind),
+        loc,
+      ),
+    ];
+    pushAll(blockStmts, block.stmts);
+    const ctx = p.lowerUsingDeclarationContext();
+    ctx.scanStmts(p, blockStmts);
+    block.stmts = ctx.finalize(p, blockStmts, p.willWrapModuleInTryCatchForUsing && p.currentScope.parent === null);
+    init.kind = LocalVar;
+    id.ref = tempRef_;
   },
 
   // -------------------------------------------------------------------------
@@ -1081,8 +2182,7 @@ export const lowerMethods = {
   privateSymbolNeedsToBeLowered(private_) {
     const p = this;
     const symbol = p.symbols[refInner(private_.ref)];
-    // (compat.SymbolFeature(symbol.Kind) is always supported in the fast path)
-    return (symbol.flags & PrivateSymbolMustBeLowered) !== 0;
+    return jsFeatureHas(p.options.unsupportedJSFeatures, symbolFeature(symbol.kind)) || (symbol.flags & PrivateSymbolMustBeLowered) !== 0;
   },
 
   lowerPrivateBrandCheck(target, loc, private_) {
@@ -1453,11 +2553,14 @@ export const lowerMethods = {
   computeClassLoweringInfo(class_) {
     const p = this;
     const result = new classLoweringInfo();
+    const unsupported = p.options.unsupportedJSFeatures;
 
     // Name keeping for classes is implemented with a static block. So we need to
     // lower all static fields if static blocks are unsupported so that the name
     // keeping comes first before other static initializers.
-    // (compat.ClassStaticBlocks is always supported in the fast path)
+    if (p.options.keepNames && jsFeatureHas(unsupported, ClassStaticBlocks)) {
+      result.lowerAllStaticFields = true;
+    }
 
     // TypeScript's "experimentalDecorators" feature replaces all references of
     // the class name with the decorated class after class decorators have run.
@@ -1536,7 +2639,9 @@ export const lowerMethods = {
     for (let $i33 = 0, $a33 = class_.properties; $i33 < $a33.length; $i33++) {
       const prop = $a33[$i33];
       if (prop.kind === PropertyClassStaticBlock) {
-        // (compat.ClassStaticBlocks is always supported in the fast path)
+        if (jsFeatureHas(unsupported, ClassStaticBlocks)) {
+          result.lowerAllStaticFields = true;
+        }
         continue;
       }
 
@@ -1581,8 +2686,16 @@ export const lowerMethods = {
       }
 
       if (prop.kind === PropertyAutoAccessor) {
-        // (compat.ClassPrivateStaticField and compat.ClassPrivateField are
-        // always supported in the fast path)
+        if ((prop.flags & PropertyIsStatic) !== 0) {
+          if (jsFeatureHas(unsupported, ClassPrivateStaticField)) {
+            result.lowerAllStaticFields = true;
+          }
+        } else {
+          if (jsFeatureHas(unsupported, ClassPrivateField)) {
+            result.lowerAllInstanceFields = true;
+            result.lowerAllStaticFields = true;
+          }
+        }
         continue;
       }
 
@@ -1631,13 +2744,21 @@ export const lowerMethods = {
 
       if ((prop.flags & PropertyIsStatic) !== 0) {
         // Static fields must be lowered if the target doesn't support them
-        // (compat.ClassStaticField is always supported in the fast path)
+        if (jsFeatureHas(unsupported, ClassStaticField)) {
+          result.lowerAllStaticFields = true;
+        }
 
         // Convert static fields to assignment statements if the TypeScript
-        // setting for this is enabled. If class static blocks are supported,
-        // then we can do this inline without needing to move the initializers
-        // outside of the class body. (compat.ClassStaticBlocks is always
-        // supported in the fast path, so nothing needs to be done here.)
+        // setting for this is enabled. I don't think this matters for private
+        // fields because there's no way for this to call a setter in the base
+        // class, so this isn't done for private fields.
+        //
+        // If class static blocks are supported, then we can do this inline
+        // without needing to move the initializers outside of the class body.
+        // Otherwise, we need to lower all static class fields.
+        if (p.options.ts.parse && !class_.useDefineForClassFields && jsFeatureHas(unsupported, ClassStaticBlocks)) {
+          result.lowerAllStaticFields = true;
+        }
       } else {
         if (p.options.ts.parse && !class_.useDefineForClassFields) {
           // Convert instance fields to assignment statements if the TypeScript
@@ -1650,8 +2771,10 @@ export const lowerMethods = {
             // "useDefineForClassFields" is false and there is no initializer.
             result.lowerAllInstanceFields = true;
           }
+        } else if (jsFeatureHas(unsupported, ClassField)) {
+          // Instance fields must be lowered if the target doesn't support them
+          result.lowerAllInstanceFields = true;
         }
-        // (else: compat.ClassField is always supported in the fast path)
       }
     }
 
@@ -1729,7 +2852,9 @@ export const lowerMethods = {
       if (ctx.class.name !== null) {
         ctx.nameToKeep = p.symbols[refInner(ctx.class.name.ref)].originalName;
       }
-      ctx.defaultName = s.defaultName;
+      // (Go copies the LocRef value: "ctx.class.Name = &ctx.defaultName" in
+      // nameFunc must not alias the statement's field)
+      ctx.defaultName = new LocRef(s.defaultName.loc, s.defaultName.ref);
       ctx.kind = classKindExportDefaultStmt;
     }
     if (stmt === null) {
@@ -1914,7 +3039,7 @@ export const lowerMethods = {
     const superCall = new Expr(new ECall(new Expr(ESuperShared, body.loc), [new Expr(new ESpread(new Expr(new EIdentifier(argsRef), body.loc)), body.loc)]), body.loc);
     stmtsToInsert = [new Stmt(new SExpr(superCall), body.loc), ...stmtsToInsert, new Stmt(new SReturn(new Expr(EThisShared, body.loc)), body.loc)];
     if (p.options.minifySyntax) {
-      bail(); // (minify only: p.mangleStmts(stmtsToInsert, stmtsFnBody))
+      stmtsToInsert = p.mangleStmts(stmtsToInsert, stmtsFnBody);
     }
     body.block.stmts = [
       new Stmt(
@@ -2250,7 +3375,7 @@ export function cloneKeyForLowerClass(key) {
     case E_PRIVATE_IDENTIFIER:
       return new Expr(new EPrivateIdentifier(k.ref), key.loc);
     default:
-      bail(); // panic("Internal error")
+      throw new GoPanic("Internal error");
   }
 }
 
@@ -2629,13 +3754,18 @@ Object.assign(lowerClassContext.prototype, {
                 const init = new Expr(new EIdentifier(id.ref), loc);
 
                 // See: https://github.com/evanw/esbuild/issues/4421
-                // (the condition "!UseDefineForClassFields || !Has(compat.ClassField)"
-                // is always true in the fast path)
-                ctx.parameterFields.push(assignStmt(new Expr(p.dotOrMangledPropVisit(target, name, loc), loc), init));
+                if (!ctx.class.useDefineForClassFields || !jsFeatureHas(p.options.unsupportedJSFeatures, ClassField)) {
+                  ctx.parameterFields.push(assignStmt(new Expr(p.dotOrMangledPropVisit(target, name, loc), loc), init));
+                }
                 if (ctx.class.useDefineForClassFields) {
                   const key = new Expr(new EString(name), loc);
-                  // (compat.ClassField is always supported in the fast path)
-                  ctx.parameterFieldProps.push(new Property(null, key, null, null, [], loc, 0, PropertyField, 0));
+                  if (jsFeatureHas(p.options.unsupportedJSFeatures, ClassField)) {
+                    ctx.parameterFields.push(
+                      new Stmt(new SExpr(new Expr(new ECall(p.importFromRuntime(loc, "__publicField"), [target, key, init]), loc)), loc),
+                    );
+                  } else {
+                    ctx.parameterFieldProps.push(new Property(null, key, null, null, [], loc, 0, PropertyField, 0));
+                  }
                 }
               }
             }
@@ -2702,8 +3832,10 @@ Object.assign(lowerClassContext.prototype, {
 
     // Note: Auto-accessors use a different transform when they are decorated.
     // This transform trades off worse run-time performance for better code size.
-    // (compat.Decorators is always supported in the fast path)
-    analysis.rewriteAutoAccessorToGetSet = analysis.propDecorators.length === 0 && prop.kind === PropertyAutoAccessor && analysis.mustLowerField;
+    analysis.rewriteAutoAccessorToGetSet =
+      analysis.propDecorators.length === 0 &&
+      prop.kind === PropertyAutoAccessor &&
+      (jsFeatureHas(p.options.unsupportedJSFeatures, Decorators) || analysis.mustLowerField);
 
     // Transform non-lowered static fields that use assign semantics into an
     // assignment in an inline static block instead of lowering them. This lets
@@ -3400,7 +4532,7 @@ Object.assign(lowerClassContext.prototype, {
         storageName = "#_" + p.symbols[refInner(k.ref)].originalName.slice(1);
         break;
       default:
-        storageName = "#" + numberToMinifiedNameJS(ctx.autoAccessorCount);
+        storageName = "#" + DefaultNameMinifierJS.numberToMinifiedName(ctx.autoAccessorCount);
         ctx.autoAccessorCount++;
     }
 
@@ -3411,6 +4543,10 @@ Object.assign(lowerClassContext.prototype, {
     const argScope = new Scope();
     argScope.kind = ScopeFunctionBody;
     argScope.generated = [argRef];
+    // Go builds this scope with a composite literal, so its "Label" is the
+    // zero ast.LocRef whose Ref is {0, 0} (not ast.InvalidRef). The renamer
+    // treats that as a label: keep the same value here.
+    argScope.label = new LocRef(0, 0);
     result.bodyScope.children.push(argScope);
 
     // Replace this accessor with other properties
@@ -3806,9 +4942,11 @@ Object.assign(lowerClassContext.prototype, {
       // inner class name was unused, we can just leave it blank.
       if (result.innerClassNameRef !== InvalidRef) {
         // "class Foo { x = Foo }" => "const Foo = class _Foo { x = _Foo }"
-        // (Go writes through the *LocRef; we replace it with a new LocRef so
-        // that LocRef objects stay immutable)
-        ctx.class.name = new LocRef(ctx.class.name.loc, result.innerClassNameRef);
+        // (Go writes through the *LocRef, which the original class statement
+        // shares: a caller that reads "s.Class.Name.Ref" afterwards, such as
+        // the export of a class from a TypeScript namespace, sees the inner
+        // class name. So this mutates the shared LocRef in place too.)
+        ctx.class.name.ref = result.innerClassNameRef;
       } else {
         // "class Foo {}" => "const Foo = class {}"
         ctx.class.name = null;

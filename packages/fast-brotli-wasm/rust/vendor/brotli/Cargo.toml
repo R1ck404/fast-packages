@@ -29,3 +29,6 @@ validation = []
 vector_scratch_space = []
 # fast-brotli-wasm: benchmark helpers (not in the release build)
 fast-bench = []
+# fast-brotli-wasm: the caller only ever sets BROTLI_PARAM_QUALITY (see
+# BrotliEncoderParams::fast_log_meta_block)
+fast-fixed-params = []

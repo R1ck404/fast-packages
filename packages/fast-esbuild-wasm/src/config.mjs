@@ -3,6 +3,8 @@
 import { EUndefinedShared, ENumber } from "./js_ast.mjs";
 import { stringArraysEqual } from "./helpers.mjs";
 import { KNOWN_GLOBALS } from "./config_globals.mjs";
+import { JSFeatureNone } from "./compat.mjs";
+                                              
 
 export class DefineExpr {
                         
@@ -281,13 +283,19 @@ export class Options {
   ;                            
   ;                        
   ;                        
+  ;                         
+  ;                         
   ;                          
   ;                  
   ;                       
   ;                         
-  ;                                     
-  ;                                             
+  ;                                        
+  ;                                                
+  ;                                                    
   ;                                                 
+  ;                                      
+  ;                                              
+  ;                                                  
   ;                     
   ;                    
   ;                                 
@@ -308,6 +316,37 @@ export class Options {
   ;                                      
   ;                                    
   ;                                       
+  // (the build API's fields)
+  ;                                     
+  ;                                       
+  ;                                   
+  ;                                   
+  ;                              
+  ;                                          
+  ;                                 
+  ;                                                  
+  ;                            
+  ;                             
+  ;                                 
+  ;                                  
+  ;                            
+  ;                                                     
+  ;                          
+  ;                             
+  ;                                         
+  ;                                         
+  ;                                         
+  ;                         
+  ;                                 
+  ;                          
+  ;                               
+  ;                            
+  ;                             
+  ;                                 
+  ;                                  
+  ;                              
+  ;                              
+  ;                              
   constructor() {
     this.moduleTypeData = null; // js_ast.ModuleTypeData
     this.defines = null; // ProcessedDefines
@@ -323,13 +362,19 @@ export class Options {
     this.injectedFiles = [];
     this.jsBanner = "";
     this.jsFooter = "";
+    this.cssBanner = "";
+    this.cssFooter = "";
     this.sourceRoot = "";
     this.stdin = null; // StdinInfo
     this.jsx = new JSXOptions();
     this.lineLimit = 0;
-    this.unsupportedJSFeatures = 0; // always 0 in the fast path (target esnext)
-    this.unsupportedJSFeatureOverrides = 0;
-    this.unsupportedJSFeatureOverridesMask = 0;
+    this.unsupportedJSFeatures = JSFeatureNone;
+    this.unsupportedJSFeatureOverrides = JSFeatureNone;
+    this.unsupportedJSFeatureOverridesMask = JSFeatureNone;
+    this.cssPrefixData = null; // map[css_ast.D]compat.CSSPrefix
+    this.unsupportedCSSFeatures = 0; // compat.CSSFeature
+    this.unsupportedCSSFeatureOverrides = 0;
+    this.unsupportedCSSFeatureOverridesMask = 0;
     this.ts = new TSOptions();
     this.mode = ModePassThrough;
     this.minifyWhitespace = false;
@@ -350,7 +395,315 @@ export class Options {
     this.excludeSourcesContent = false;
     this.omitRuntimeForTests = false;
     this.omitJSXRuntimeForTests = false;
+    this.cancelFlag = null;
+    this.extensionOrder = null;
+    this.mainFields = null;
+    this.conditions = null;
+    this.absNodePaths = [];
+    this.externalSettings = new ExternalSettings();
+    this.externalPackages = false;
+    this.packageAliases = null;
+    this.absOutputDir = "";
+    this.absOutputBase = "";
+    this.outputExtensionJS = "";
+    this.outputExtensionCSS = "";
+    this.tsConfigPath = "";
+    this.extensionToLoader = null;
+    this.publicPath = "";
+    this.injectPaths = [];
+    this.entryPathTemplate = [];
+    this.chunkPathTemplate = [];
+    this.assetPathTemplate = [];
+    this.plugins = [];
+    this.preserveSymlinks = false;
+    this.watchMode = false;
+    this.allowOverwrite = false;
+    this.logPathStyle = 0; // logger.RelPath
+    this.codePathStyle = 0;
+    this.metafilePathStyle = 0;
+    this.sourcemapPathStyle = 0;
+    this.writeToStdout = false;
+    this.metafileFormat = UnminifiedMetafile;
+    this.needsMetafile = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// config.go: the build API's types
+
+export class WildcardPattern {
+  ;                      
+  ;                      
+  constructor(prefix = "", suffix = "") {
+    this.prefix = prefix;
+    this.suffix = suffix;
+  }
+}
+
+export class ExternalMatchers {
+  ;                                   
+  ;                                   
+  constructor(exact = new Map                 (), patterns                    = []) {
+    this.exact = exact;
+    this.patterns = patterns;
+  }
+  hasMatchers() {
+    return this.exact.size > 0 || this.patterns.length > 0;
+  }
+}
+
+export class ExternalSettings {
+  ;                                    
+  ;                                     
+  constructor(preResolve = new ExternalMatchers(), postResolve = new ExternalMatchers()) {
+    this.preResolve = preResolve;
+    this.postResolve = postResolve;
+  }
+}
+
+export class CancelFlag {
+  ;                      
+  constructor() {
+    this.value = false;
+  }
+  cancel() {
+    this.value = true;
+  }
+}
+
+// This checks for null in one place so we don't have to do that everywhere
+export function cancelFlagDidCancel(flag                   ) {
+  return flag !== null && flag.value;
+}
+
+// MaybeBool: Unspecified, True, False (above)
+
+// PathPlaceholder
+export const NoPlaceholder = 0;
+export const DirPlaceholder = 1;
+export const NamePlaceholder = 2;
+export const HashPlaceholder = 3;
+export const ExtPlaceholder = 4;
+
+export class PathTemplate {
+                       
+                              
+  constructor(data = "", placeholder = NoPlaceholder) {
+    this.data = data;
+    this.placeholder = placeholder;
+  }
+}
+
+// PathPlaceholders: null means "not set" (Go: a nil *string)
+export class PathPlaceholders {
+  ;                          
+  ;                           
+  ;                           
+  ;                          
+  constructor(dir                = null, name                = null, hash                = null, ext                = null) {
+    this.dir = dir;
+    this.name = name;
+    this.hash = hash;
+    this.ext = ext;
+  }
+  get(placeholder        )                {
+    switch (placeholder) {
+      case DirPlaceholder:
+        return this.dir;
+      case NamePlaceholder:
+        return this.name;
+      case HashPlaceholder:
+        return this.hash;
+      case ExtPlaceholder:
+        return this.ext;
+    }
+    return null;
+  }
+}
+
+export function templateToString(template                )         {
+  if (template.length === 1 && template[0].placeholder === NoPlaceholder) {
+    // Avoid allocations in this case
+    return template[0].data;
+  }
+  let sb = "";
+  for (const part of template) {
+    sb += part.data;
+    switch (part.placeholder) {
+      case DirPlaceholder:
+        sb += "[dir]";
+        break;
+      case NamePlaceholder:
+        sb += "[name]";
+        break;
+      case HashPlaceholder:
+        sb += "[hash]";
+        break;
+      case ExtPlaceholder:
+        sb += "[ext]";
+        break;
+    }
+  }
+  return sb;
+}
+
+export function hasPlaceholder(template                , placeholder        )          {
+  for (const part of template) {
+    if (part.placeholder === placeholder) return true;
+  }
+  return false;
+}
+
+export function substituteTemplate(template                , placeholders                  )                 {
+  // Don't allocate if no substitution is possible and the template is already minimal
+  let shouldSubstitute = false;
+  for (let i = 0; i < template.length; i++) {
+    const part = template[i];
+    if (placeholders.get(part.placeholder) !== null || (part.placeholder === NoPlaceholder && i + 1 < template.length)) {
+      shouldSubstitute = true;
+      break;
+    }
+  }
+  if (!shouldSubstitute) return template;
+
+  // Otherwise, substitute and merge as appropriate
+  const result                 = [];
+  for (const original of template) {
+    const part = new PathTemplate(original.data, original.placeholder);
+    const sub = placeholders.get(part.placeholder);
+    if (sub !== null) {
+      part.data += sub;
+      part.placeholder = NoPlaceholder;
+    }
+    const last = result.length - 1;
+    if (last >= 0 && result[last].placeholder === NoPlaceholder) {
+      result[last].data += part.data;
+      result[last].placeholder = part.placeholder;
+    } else {
+      result.push(part);
+    }
+  }
+  return result;
+}
+
+export class InjectableExport {
+  ;                     
+  ;                   
+  constructor(alias = "", loc = 0) {
+    this.alias = alias;
+    this.loc = loc;
+  }
+}
+
+// Plugin API. "filter" is an object with Go's MatchString (see
+// build.mjs compileFilterForPlugin).
+export class Plugin {
+  ;                    
+  ;                          
+  ;                              
+  ;                        
+  constructor(name = "", onStart            = [], onResolve              = [], onLoad           = []) {
+    this.name = name;
+    this.onStart = onStart;
+    this.onResolve = onResolve;
+    this.onLoad = onLoad;
+  }
+}
+
+export class OnStart {
+  ;                     
+  ;                    
+  constructor(callback = null, name = "") {
+    this.callback = callback;
+    this.name = name;
+  }
+}
+
+export class OnResolve {
+  ;                   
+  ;                     
+  ;                    
+  ;                         
+  constructor(filter = null, callback = null, name = "", namespace = "") {
+    this.filter = filter;
+    this.callback = callback;
+    this.name = name;
+    this.namespace = namespace;
+  }
+}
+
+export class OnLoad {
+  ;                   
+  ;                     
+  ;                    
+  ;                         
+  constructor(filter = null, callback = null, name = "", namespace = "") {
+    this.filter = filter;
+    this.callback = callback;
+    this.name = name;
+    this.namespace = namespace;
+  }
+}
+
+export function pluginAppliesToPath(path                                     , filter                                     , namespace        )          {
+  return (namespace === "" || path.namespace === namespace) && filter.matchString(path.text);
+}
+
+// MetafileFormat
+export const UnminifiedMetafile = 0;
+export const MinifiedMetafile = 1;
+
+export function metafileFormatMaybeRemoveWhitespace(mf        , fmt        )         {
+  if (mf === MinifiedMetafile) {
+    let result = "";
+    for (let i = 0; i < fmt.length; i++) {
+      const c = fmt.charCodeAt(i);
+      if (c !== 32 && c !== 10) result += fmt[i];
+    }
+    return result;
+  }
+  return fmt;
+}
+
+// Loader.CanHaveSourceMap
+export function loaderCanHaveSourceMap(loader        )          {
+  switch (loader) {
+    case LoaderJS:
+    case LoaderJSX:
+    case LoaderTS:
+    case LoaderTSNoAmbiguousLessThan:
+    case LoaderTSX:
+    case LoaderCSS:
+    case LoaderGlobalCSS:
+    case LoaderLocalCSS:
+    case LoaderJSON:
+    case LoaderWithTypeJSON:
+    case LoaderText:
+      return true;
+  }
+  return false;
+}
+
+// config.LoaderFromFileExtension
+export function loaderFromFileExtension(extensionToLoader                     , base        )         {
+  // Pick the loader with the longest matching extension. So if there's an
+  // extension for ".css" and for ".module.css", we want to match the one for
+  // ".module.css" before the one for ".css".
+  let i = base.indexOf(".");
+  if (i !== -1) {
+    for (;;) {
+      const loader = extensionToLoader.get(base.slice(i));
+      if (loader !== undefined) return loader;
+      base = base.slice(i + 1);
+      i = base.indexOf(".");
+      if (i === -1) break;
+    }
+  } else {
+    // If there's no extension, explicitly check for an extensionless loader
+    const loader = extensionToLoader.get("");
+    if (loader !== undefined) return loader;
+  }
+  return LoaderNone;
 }
 
 export class InjectedDefine {
@@ -470,5 +823,20 @@ export function processDefines(userDefines) {
   // Potentially cache the result for next time
   if (!hasUserDefines && processedGlobals === null) processedGlobals = result;
   return result;
+}
+
+// config.PrettyPrintTargetEnvironment (the mask is a compat.JSFeature)
+export function prettyPrintTargetEnvironment(originalTargetEnv        , unsupportedJSFeatureOverridesMask                            )         {
+  let where = "the configured target environment";
+  let overrides = "";
+  const popcount = (x        ) => {
+    let n = 0;
+    for (x >>>= 0; x !== 0; x >>>= 1) n += x & 1;
+    return n;
+  };
+  const count = popcount(unsupportedJSFeatureOverridesMask.lo) + popcount(unsupportedJSFeatureOverridesMask.hi);
+  if (count !== 0) overrides = " + " + count + " override" + (count === 1 ? "" : "s");
+  if (originalTargetEnv !== "") where = where + " (" + originalTargetEnv + overrides + ")";
+  return where;
 }
 // generated from config.mts by tools/ts-build.mjs; edit that file

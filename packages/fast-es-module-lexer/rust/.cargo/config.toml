@@ -2,4 +2,6 @@
 target = "wasm32-unknown-unknown"
 
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+simd128,+bulk-memory,+sign-ext,+mutable-globals,+nontrapping-fptoint"]
+# 64 KB shadow stack instead of the default 1 MB (the lexer needs well under
+# 1 KB): initial memory 3 pages (with the bracket stacks) instead of 18
+rustflags = ["-C", "target-feature=+simd128,+bulk-memory,+sign-ext,+mutable-globals,+nontrapping-fptoint", "-C", "link-arg=-zstack-size=65536"]
