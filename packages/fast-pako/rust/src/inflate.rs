@@ -17,8 +17,11 @@
 // the window copies (the window is the output right before the current
 // position) and compute each member's check value at its CHECK state.
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::checksum::{adler32, crc32};
-use crate::inftrees::{code_ok, inflate_table, CODES, DISTS, LENS};
+use crate::inftrees::{code_ok, code_table, DISTS, LENS};
 
 pub const Z_NO_FLUSH: i32 = 0;
 pub const Z_FINISH: i32 = 4;
@@ -93,6 +96,25 @@ pub const M_LENGTH_CHECK: u8 = 18;
 /// code-length code table (zlib inflate_table, 7-bit root, no subtables)
 const LEN_TABLE: usize = 128;
 
+/// dictionary kinds (set_dictionary)
+pub const DICT_BYTES: u32 = 0;
+pub const DICT_POISON: u32 = 2;
+pub const DICT_THROW: u32 = 3;
+
+/// wbits standing for NaN / undefined windowBits (pako: 1 << NaN is 1, and
+/// every comparison with it is false)
+pub const NAN_WBITS: u32 = 255;
+
+/// 1 << wbits as pako computes it
+#[inline(always)]
+fn pow2(wbits: u32) -> usize {
+    if wbits > 15 {
+        1
+    } else {
+        1 << wbits
+    }
+}
+
 
 static ORDER: [u8; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
@@ -123,16 +145,29 @@ fn dneed(e: u32) -> u32 {
 pub struct Head {
     pub active: bool,
     pub text: u32,
-    pub time: u32,
+    /// pako stores the bit buffer as it is (a JS number: negative for a
+    /// high byte >= 128; with non-byte input any sum of int32 values)
+    pub time: f64,
     pub xflags: u32,
-    pub os: u32,
+    pub os: i32,
     pub extra: Option<Vec<u8>>,
-    pub extra_len: u32,
-    pub name: Option<Vec<u8>>,
-    pub comment: Option<Vec<u8>>,
+    pub extra_len: f64,
+    /// character codes (String.fromCharCode of each element)
+    pub name: Option<Vec<u16>>,
+    pub comment: Option<Vec<u16>>,
     pub hcrc: u32,
     pub done: bool,
     pub version: u32,
+}
+
+/// largest gzip extra field kept (only non-byte input can declare more than
+/// 65535 bytes; pako would allocate it)
+const EXTRA_CAP: f64 = (1u32 << 24) as f64;
+
+/// pako's `head.name += String.fromCharCode(c)` (after `head.name = null`,
+/// set by an earlier member without the field, that starts with "null")
+fn push_char(v: &mut Option<Vec<u16>>, c: u16) {
+    v.get_or_insert_with(|| [110, 117, 108, 108].to_vec()).push(c);
 }
 
 impl Head {
@@ -140,11 +175,11 @@ impl Head {
         Head {
             active: false,
             text: 0,
-            time: 0,
+            time: 0.0,
             xflags: 0,
             os: 0,
             extra: None,
-            extra_len: 0,
+            extra_len: 0.0,
             name: Some(Vec::new()),
             comment: Some(Vec::new()),
             hcrc: 0,
@@ -187,11 +222,14 @@ fn init_fixed_fast() {
     }
 }
 
+/// tests compare the fast loop against the slow path. (A mutable static,
+/// exported through fz_set_fast: as a constant the slow path compiles to
+/// code that runs ~5% slower on small inputs.)
 pub static mut FAST_ON: bool = true;
 #[no_mangle]
-pub extern "C" fn fz_set_fast(on: i32) { unsafe { FAST_ON = on != 0 } }
-#[no_mangle]
-pub static mut DBG_ITERS: u32 = 0;
+pub extern "C" fn fz_set_fast(on: i32) {
+    unsafe { FAST_ON = on != 0 }
+}
 
 pub struct Inflate {
     // z_stream
@@ -236,7 +274,6 @@ pub struct Inflate {
     ndist: u32,
     have: u32,
     lens: [u16; 320],
-    work: [u16; 288],
     lendyn: Box<[u32; LEN_TABLE]>,
     ftab: Box<[u32; crate::fasttab::TSIZE]>,
     pub contiguous: bool,
@@ -249,11 +286,27 @@ pub struct Inflate {
     sane: bool,
     back: i32,
     was: u32,
+    /// input elements are read through js_op with pako's JS semantics (not
+    /// a byte array: plain arrays, other typed arrays, strings, ...)
+    pub wide: bool,
+    /// (wide) pako's `have` is NaN (input without a numeric length): never 0,
+    /// never >= 6, never > 0
+    pub nan_have: bool,
+    /// (wide) pako's bit buffer as the JS number it is: the sum of the
+    /// int32 values added since it was last cleared (header fields)
+    raw: f64,
+    /// (wide) the gzip extra length is negative
+    xneg: bool,
+    /// pako decodes the current symbol in inflate_fast (have >= 6 and
+    /// left >= 258 at its start), which checks dmax before dropping the
+    /// distance's extra bits
+    pf: bool,
 }
 
 impl Inflate {
-    pub fn new(window_bits: i32) -> Result<Box<Inflate>, i32> {
-        let mut s = Box::new(Inflate {
+    /// An empty state; reinit() (inflateInit2) sets it up.
+    pub fn new() -> Box<Inflate> {
+        Box::new(Inflate {
             input: core::ptr::null(),
             next_in: 0,
             avail_in: 0,
@@ -294,7 +347,6 @@ impl Inflate {
             ndist: 0,
             have: 0,
             lens: [0; 320],
-            work: [0; 288],
             lendyn: Box::new([0; LEN_TABLE]),
             ftab: Box::new([0; crate::fasttab::TSIZE]),
             contiguous: false,
@@ -304,16 +356,18 @@ impl Inflate {
             sane: true,
             back: 0,
             was: 0,
-        });
-        let r = s.reset2(window_bits);
-        if r != Z_OK {
-            return Err(r);
-        }
-        Ok(s)
+            wide: false,
+            nan_have: false,
+            raw: 0.0,
+            xneg: false,
+            pf: false,
+        })
     }
 
-    /// Reuse an existing state as if freshly created by inflateInit2.
-    pub fn reinit(&mut self, window_bits: i32) -> i32 {
+    /// Reuse an existing state as if freshly created by inflateInit2 with
+    /// the given wrap and wbits (computed by the JS glue like pako's
+    /// inflateReset2; wbits NAN_WBITS stands for NaN/undefined).
+    pub fn reinit(&mut self, wrap: i32, wbits: u32) {
         self.input = core::ptr::null();
         self.next_in = 0;
         self.avail_in = 0;
@@ -324,12 +378,14 @@ impl Inflate {
         self.total_out = 0;
         self.msg = M_NONE;
         self.adler = 0;
-        self.data_type = 0;
+        self.data_type = 2; // (strm.data_type is Z_UNKNOWN until inflate() sets it)
         self.valid = true;
         self.head = Head::new();
         self.window_reset_for_init();
         self.mode = HEAD;
-        self.reset2(window_bits)
+        self.wrap = wrap;
+        self.wbits = wbits;
+        self.reset();
     }
 
     fn window_reset_for_init(&mut self) {
@@ -361,6 +417,7 @@ impl Inflate {
         self.head.active = false;
         self.hold = 0;
         self.bits = 0;
+        self.raw = 0.0;
         self.use_fixed = false;
         self.sane = true;
         self.back = -1;
@@ -375,32 +432,6 @@ impl Inflate {
         self.whave = 0;
         self.wnext = 0;
         self.reset_keep()
-    }
-
-    pub fn reset2(&mut self, mut window_bits: i32) -> i32 {
-        if !self.state_ok() {
-            return Z_STREAM_ERROR;
-        }
-        let wrap;
-        if window_bits < 0 {
-            wrap = 0;
-            window_bits = -window_bits;
-        } else {
-            wrap = (window_bits >> 4) + 5;
-            if window_bits < 48 {
-                window_bits &= 15;
-            }
-        }
-        if window_bits != 0 && (window_bits < 8 || window_bits > 15) {
-            self.valid = false;
-            return Z_STREAM_ERROR;
-        }
-        if self.win_present && self.wbits != window_bits as u32 {
-            self.win_present = false;
-        }
-        self.wrap = wrap;
-        self.wbits = window_bits as u32;
-        self.reset()
     }
 
     pub fn get_header(&mut self) -> i32 {
@@ -418,7 +449,7 @@ impl Inflate {
 
     fn updatewindow(&mut self, src: *const u8, end: usize, mut copy: usize) {
         if !self.win_present {
-            self.wsize = 1 << self.wbits;
+            self.wsize = pow2(self.wbits);
             self.wnext = 0;
             self.whave = 0;
             let need = self.wsize;
@@ -482,7 +513,12 @@ impl Inflate {
         }
     }
 
-    pub fn set_dictionary(&mut self, dictionary: &[u8]) -> i32 {
+    /// inflateSetDictionary. `ext` (DICT_*): how the JS glue prepared the
+    /// dictionary option: bytes of a Uint8Array (id computed here), or of
+    /// another typed array with the id pako computes over its raw values
+    /// (`id`), or no bytes (not a typed array: pako's updatewindow throws on
+    /// it after the check), or an id pako fails to compute (throws first).
+    pub fn set_dictionary(&mut self, dictionary: &[u8], ext: u32, id: u32) -> i32 {
         if !self.state_ok() {
             return Z_STREAM_ERROR;
         }
@@ -490,10 +526,16 @@ impl Inflate {
             return Z_STREAM_ERROR;
         }
         if self.mode == DICT {
-            let dictid = adler32(1, dictionary);
+            if ext == DICT_THROW {
+                crate::js_throw(crate::OP_DICT);
+            }
+            let dictid = if ext == DICT_BYTES { adler32(1, dictionary) } else { id };
             if dictid != self.check {
                 return Z_DATA_ERROR;
             }
+        }
+        if ext >= DICT_POISON {
+            crate::js_throw(crate::OP_DICT);
         }
         let n = dictionary.len();
         self.contiguous = false;
@@ -528,6 +570,53 @@ impl Inflate {
         self.adler = self.check;
     }
 
+    /// Copy input elements [from, from + n) to dst: bytes, or (wide) with
+    /// pako's `dst.set(input.subarray(..))` in the JS glue (dst null: only
+    /// the subarray() call).
+    #[inline(always)]
+    fn copy_in(&self, input: *const u8, from: usize, dst: *mut u8, n: usize) {
+        if self.wide {
+            crate::js_op(crate::OP_ICOPY, from, n, dst as usize);
+        } else if !dst.is_null() {
+            unsafe { core::ptr::copy_nonoverlapping(input.add(from), dst, n) };
+        }
+    }
+
+    /// header crc over input elements [from, from + n) (pako's crc32 over
+    /// `input`: each element as (value ^ crc) & 0xff)
+    fn crc_in(&mut self, input: *const u8, from: usize, n: usize) {
+        if self.wide {
+            for i in 0..n {
+                let b = crate::js_op(crate::OP_ELEM, from + i, 0, 0) as u8;
+                self.check = crc32(self.check, &[b]);
+            }
+        } else {
+            self.check = crc32(self.check, unsafe { core::slice::from_raw_parts(input.add(from), n) });
+        }
+    }
+
+    /// switch to reading input elements through js_op (for good: a stream
+    /// that had such input keeps the JS number semantics)
+    pub fn set_wide(&mut self) {
+        if !self.wide {
+            // (the bytes held so far sum up exactly)
+            self.raw = self.hold as u32 as i32 as f64;
+            self.wide = true;
+        }
+    }
+
+    /// (wide) load input element `next` into the bit buffer: pako's
+    /// `hold += input[next] << bits` (`|=` in CHECK), 32-bit like JS bit
+    /// operations, and the plain JS sum for header fields
+    #[cold]
+    #[inline(never)]
+    fn wide_load(&mut self, hold: u64, next: usize, bits: u32) -> u64 {
+        let x = (crate::js_op(crate::OP_ELEM, next, 0, 0) as u32).wrapping_shl(bits);
+        self.raw += x as i32 as f64;
+        let h = hold as u32;
+        (if self.mode == CHECK { h | x } else { h.wrapping_add(x) }) as u64
+    }
+
     fn check_update(&mut self, from: usize, len: usize) {
         let data = unsafe { core::slice::from_raw_parts(self.output.add(from), len) };
         self.check = if self.flags != 0 { crc32(self.check, data) } else { adler32(self.check, data) };
@@ -553,6 +642,12 @@ impl Inflate {
         let mut out0 = left;
         let mut ret = Z_OK;
         let mut hbuf = [0u8; 4];
+        let wide = self.wide;
+        // (wide) inside pako's inflate_fast, whose input loads we mirror:
+        // its loop bounds (next < wlast, put < wend)
+        let mut wfast = false;
+        let mut wlast = 0usize;
+        let mut wend = 0usize;
 
         'inf_leave: loop {
         macro_rules! pullbyte {
@@ -561,9 +656,31 @@ impl Inflate {
                     break 'inf_leave;
                 }
                 have -= 1;
-                hold |= (unsafe { *input.add(next) } as u64) << bits;
+                if wide {
+                    hold = self.wide_load(hold, next, bits);
+                } else {
+                    hold |= (unsafe { *input.add(next) } as u64) << bits;
+                }
                 next += 1;
                 bits += 8;
+            }};
+        }
+        // leaving pako's inflate_fast: unused whole bytes are given back
+        macro_rules! giveback {
+            () => {{
+                let n = (bits >> 3) as usize;
+                next -= n;
+                have += n;
+                bits &= 7;
+                hold &= (1u64 << bits) - 1;
+            }};
+        }
+        macro_rules! wexit {
+            () => {{
+                if wfast {
+                    giveback!();
+                    wfast = false;
+                }
             }};
         }
         macro_rules! needbits {
@@ -571,6 +688,14 @@ impl Inflate {
                 while bits < ($n) {
                     pullbyte!();
                 }
+            }};
+        }
+        // header/trailer fields (once per stream or block): an opaque bit
+        // count keeps the pull loop from being unrolled at every site
+        macro_rules! needbits_cold {
+            ($n:expr) => {{
+                let n: u32 = core::hint::black_box($n);
+                needbits!(n);
             }};
         }
         macro_rules! dropbits {
@@ -583,7 +708,20 @@ impl Inflate {
             () => {{
                 hold = 0;
                 bits = 0;
+                self.raw = 0.0;
             }};
+        }
+        // pako's `hold` where it uses it as a number (right after NEEDBITS
+        // from a cleared buffer): with byte input the held bits (as int32),
+        // otherwise the JS sum
+        macro_rules! rawhold {
+            () => {
+                if wide {
+                    self.raw
+                } else {
+                    hold as u32 as i32 as f64
+                }
+            };
         }
         macro_rules! crc2 {
             ($h:expr) => {{
@@ -612,8 +750,8 @@ impl Inflate {
                         self.mode = TYPEDO;
                         continue;
                     }
-                    needbits!(16);
-                    if (self.wrap & 2) != 0 && hold == 0x8b1f {
+                    needbits_cold!(16);
+                    if (self.wrap & 2) != 0 && rawhold!() == 35615.0 {
                         if self.wbits == 0 {
                             self.wbits = 15;
                         }
@@ -627,7 +765,9 @@ impl Inflate {
                         self.head.done = false;
                         self.head.version += 1;
                     }
-                    if (self.wrap & 1) == 0 || (((hold & 0xff) << 8) + (hold >> 8)) % 31 != 0 {
+                    // (int32 arithmetic like JS: with non-byte input the bits
+                    // above the first 16 need not be zero)
+                    if (self.wrap & 1) == 0 || (((hold as i32 & 0xff) << 8) + ((hold as u32 as i32) >> 8)) % 31 != 0 {
                         bad!(M_INCORRECT_HEADER);
                         continue;
                     }
@@ -640,11 +780,12 @@ impl Inflate {
                     if self.wbits == 0 {
                         self.wbits = len;
                     }
-                    if len > 15 || len > self.wbits {
+                    // (NAN_WBITS: len > NaN is false)
+                    if len > 15 || (len > self.wbits && self.wbits != NAN_WBITS) {
                         bad!(M_INVALID_WINDOW);
                         continue;
                     }
-                    self.dmax = 1 << self.wbits;
+                    self.dmax = pow2(self.wbits) as u32;
                     self.flags = 0;
                     self.check = 1;
                     self.adler = 1;
@@ -653,7 +794,7 @@ impl Inflate {
                     initbits!();
                 }
                 FLAGS => {
-                    needbits!(16);
+                    needbits_cold!(16);
                     self.flags = hold as i32;
                     if (self.flags & 0xff) != 8 {
                         bad!(M_UNKNOWN_METHOD);
@@ -674,9 +815,9 @@ impl Inflate {
                     self.mode = TIME;
                 }
                 TIME => {
-                    needbits!(32);
+                    needbits_cold!(32);
                     if self.head.active {
-                        self.head.time = hold as u32;
+                        self.head.time = rawhold!();
                         self.head.version += 1;
                     }
                     if (self.flags & 0x0200) != 0 && (self.wrap & 4) != 0 {
@@ -687,10 +828,10 @@ impl Inflate {
                     self.mode = OS;
                 }
                 OS => {
-                    needbits!(16);
+                    needbits_cold!(16);
                     if self.head.active {
                         self.head.xflags = (hold & 0xff) as u32;
-                        self.head.os = (hold >> 8) as u32;
+                        self.head.os = (hold as u32 as i32) >> 8;
                         self.head.version += 1;
                     }
                     if (self.flags & 0x0200) != 0 && (self.wrap & 4) != 0 {
@@ -701,10 +842,14 @@ impl Inflate {
                 }
                 EXLEN => {
                     if (self.flags & 0x0400) != 0 {
-                        needbits!(16);
-                        self.length = hold as u32;
+                        needbits_cold!(16);
+                        let r = rawhold!();
+                        // (a negative length only comes from non-byte input:
+                        // pako then fails to allocate head.extra below)
+                        self.length = if r < 0.0 { 0 } else { r as u32 };
+                        self.xneg = r < 0.0;
                         if self.head.active {
-                            self.head.extra_len = hold as u32;
+                            self.head.extra_len = r;
                             self.head.version += 1;
                         }
                         if (self.flags & 0x0200) != 0 && (self.wrap & 4) != 0 {
@@ -723,21 +868,32 @@ impl Inflate {
                         if copy > have {
                             copy = have;
                         }
+                        // pako allocates head.extra here: a negative length
+                        // (only from non-byte input) throws, and so does a
+                        // length we do not keep
+                        if self.head.active && (self.xneg || (copy != 0 && self.head.extra.is_none() && self.head.extra_len > EXTRA_CAP)) {
+                            crate::res().arg = self.head.extra_len;
+                            crate::js_throw(crate::OP_EXTRA);
+                        }
                         if copy != 0 {
-                            let src = unsafe { core::slice::from_raw_parts(input.add(next), copy) };
                             if self.head.active {
-                                let len = (self.head.extra_len - self.length) as usize;
+                                let len = (self.head.extra_len - self.length as f64) as usize;
                                 if self.head.extra.is_none() {
                                     self.head.extra = Some(vec![0u8; self.head.extra_len as usize]);
                                 }
                                 let ex = self.head.extra.as_mut().unwrap();
-                                if len + copy <= ex.len() {
-                                    ex[len..len + copy].copy_from_slice(src);
+                                // (a later gzip member reuses the extra buffer
+                                // of an earlier one: set() may overflow it)
+                                let fits = len + copy <= ex.len();
+                                let dst = if fits { unsafe { ex.as_mut_ptr().add(len) } } else { core::ptr::null_mut() };
+                                self.copy_in(input, next, dst, copy);
+                                if !fits {
+                                    crate::js_throw(crate::OP_RANGE);
                                 }
                                 self.head.version += 1;
                             }
                             if (self.flags & 0x0200) != 0 && (self.wrap & 4) != 0 {
-                                self.check = crc32(self.check, src);
+                                self.crc_in(input, next, copy);
                             }
                             have -= copy;
                             next += copy;
@@ -750,24 +906,28 @@ impl Inflate {
                     self.length = 0;
                     self.mode = NAME;
                 }
-                NAME => {
-                    if (self.flags & 0x0800) != 0 {
+                NAME | COMMENT => {
+                    let is_name = self.mode == NAME;
+                    if self.flags & (if is_name { 0x0800 } else { 0x1000 }) != 0 {
                         if have == 0 {
                             break 'inf_leave;
                         }
                         let mut copy = 0usize;
-                        let mut len;
+                        let mut c: u32;
                         loop {
-                            len = unsafe { *input.add(next + copy) };
+                            // bit 16: the element is truthy; low 16 bits:
+                            // String.fromCharCode's code for it
+                            c = if wide {
+                                crate::js_op(crate::OP_CHAR, next + copy, 0, 0) as u32
+                            } else {
+                                let b = unsafe { *input.add(next + copy) } as u32;
+                                if b != 0 { 0x10000 | b } else { 0 }
+                            };
                             copy += 1;
-                            if self.head.active && len != 0 {
-                                if let Some(n) = self.head.name.as_mut() {
-                                    n.push(len);
-                                } else {
-                                    self.head.name = Some(vec![len]);
-                                }
+                            if self.head.active && c != 0 {
+                                push_char(if is_name { &mut self.head.name } else { &mut self.head.comment }, c as u16);
                             }
-                            if !(len != 0 && copy < have) {
+                            if !(c != 0 && copy < have) {
                                 break;
                             }
                         }
@@ -775,64 +935,28 @@ impl Inflate {
                             self.head.version += 1;
                         }
                         if (self.flags & 0x0200) != 0 && (self.wrap & 4) != 0 {
-                            let src = unsafe { core::slice::from_raw_parts(input.add(next), copy) };
-                            self.check = crc32(self.check, src);
+                            self.crc_in(input, next, copy);
                         }
                         have -= copy;
                         next += copy;
-                        if len != 0 {
+                        if c != 0 {
                             break 'inf_leave;
                         }
                     } else if self.head.active {
-                        self.head.name = None;
+                        if is_name {
+                            self.head.name = None;
+                        } else {
+                            self.head.comment = None;
+                        }
                         self.head.version += 1;
                     }
                     self.length = 0;
-                    self.mode = COMMENT;
-                }
-                COMMENT => {
-                    if (self.flags & 0x1000) != 0 {
-                        if have == 0 {
-                            break 'inf_leave;
-                        }
-                        let mut copy = 0usize;
-                        let mut len;
-                        loop {
-                            len = unsafe { *input.add(next + copy) };
-                            copy += 1;
-                            if self.head.active && len != 0 {
-                                if let Some(n) = self.head.comment.as_mut() {
-                                    n.push(len);
-                                } else {
-                                    self.head.comment = Some(vec![len]);
-                                }
-                            }
-                            if !(len != 0 && copy < have) {
-                                break;
-                            }
-                        }
-                        if self.head.active {
-                            self.head.version += 1;
-                        }
-                        if (self.flags & 0x0200) != 0 && (self.wrap & 4) != 0 {
-                            let src = unsafe { core::slice::from_raw_parts(input.add(next), copy) };
-                            self.check = crc32(self.check, src);
-                        }
-                        have -= copy;
-                        next += copy;
-                        if len != 0 {
-                            break 'inf_leave;
-                        }
-                    } else if self.head.active {
-                        self.head.comment = None;
-                        self.head.version += 1;
-                    }
-                    self.mode = HCRC;
+                    self.mode = if is_name { COMMENT } else { HCRC };
                 }
                 HCRC => {
                     if (self.flags & 0x0200) != 0 {
-                        needbits!(16);
-                        if (self.wrap & 4) != 0 && hold != (self.check & 0xffff) as u64 {
+                        needbits_cold!(16);
+                        if (self.wrap & 4) != 0 && rawhold!() != (self.check & 0xffff) as f64 {
                             bad!(M_HEADER_CRC);
                             continue;
                         }
@@ -849,7 +973,7 @@ impl Inflate {
                     self.mode = TYPE;
                 }
                 DICTID => {
-                    needbits!(32);
+                    needbits_cold!(32);
                     self.check = (hold as u32).swap_bytes();
                     self.adler = self.check;
                     initbits!();
@@ -901,7 +1025,7 @@ impl Inflate {
                 }
                 STORED => {
                     dropbits!(bits & 7);
-                    needbits!(32);
+                    needbits_cold!(32);
                     if (hold & 0xffff) != ((hold >> 16) ^ 0xffff) {
                         bad!(M_INVALID_STORED);
                         continue;
@@ -928,7 +1052,7 @@ impl Inflate {
                         if copy == 0 {
                             break 'inf_leave;
                         }
-                        unsafe { core::ptr::copy_nonoverlapping(input.add(next), output.add(put), copy) };
+                        self.copy_in(input, next, unsafe { output.add(put) }, copy);
                         have -= copy;
                         next += copy;
                         left -= copy;
@@ -939,7 +1063,7 @@ impl Inflate {
                     self.mode = TYPE;
                 }
                 TABLE => {
-                    needbits!(14);
+                    needbits_cold!(14);
                     self.nlen = (hold & 0x1f) as u32 + 257;
                     dropbits!(5);
                     self.ndist = (hold & 0x1f) as u32 + 1;
@@ -965,12 +1089,13 @@ impl Inflate {
                         self.have += 1;
                     }
                     self.use_fixed = false;
-                    let mut b = 7;
-                    let r = inflate_table(CODES, &self.lens, 19, &mut self.lendyn[..], &mut self.work, &mut b);
-                    self.lenbits = b;
-                    if r != 0 {
-                        bad!(M_INVALID_CODE_LENGTHS);
-                        continue;
+                    match code_table(&self.lens, &mut self.lendyn[..]) {
+                        Some(b) => self.lenbits = b,
+                        None => {
+                            self.lenbits = 7;
+                            bad!(M_INVALID_CODE_LENGTHS);
+                            continue;
+                        }
                     }
                     self.have = 0;
                     self.mode = CODELENS;
@@ -1066,6 +1191,24 @@ impl Inflate {
                     self.mode = LEN;
                 }
                 LEN => {
+                    if wide {
+                        // pako's inflate_fast: entered when have >= 6 and
+                        // left >= 258, loads two bytes whenever fewer than 15
+                        // bits are held before a code, loops while
+                        // next < last && put < end, then returns unused bytes
+                        if wfast && !(next < wlast && put < wend) {
+                            wexit!();
+                        }
+                        if !wfast && !self.nan_have && have >= 6 && left >= 258 {
+                            wfast = true;
+                            wlast = next + have - 5;
+                            wend = put + left - 257;
+                        }
+                        if wfast && bits < 15 {
+                            pullbyte!();
+                            pullbyte!();
+                        }
+                    } else
                     // zlib inflate_fast entry assumption: < 8 bits held (after a
                     // resume mid-symbol the slow path first finishes that symbol)
                     if unsafe { FAST_ON } && bits < 8 && have > 16 && left > 258 + 40 {
@@ -1097,6 +1240,7 @@ impl Inflate {
                     // is fully determined by them, so this matches zlib's own
                     // tables), drop the code bits, then act on the symbol.
                     // Invalid entries carry the length zlib's table gives them.
+                    self.pf = if wide { wfast } else { have >= 6 && left >= 258 };
                     self.back = 0;
                     let lt = self.fast_tab();
                     let mut e;
@@ -1135,9 +1279,11 @@ impl Inflate {
                         if e & EOB_F != 0 {
                             self.back = -1;
                             self.mode = TYPE;
+                            wexit!();
                             continue;
                         }
                         bad!(M_INVALID_LITLEN_CODE);
+                        wexit!();
                         continue;
                     }
                     self.length = e >> 16;
@@ -1155,6 +1301,10 @@ impl Inflate {
                     self.mode = DIST;
                 }
                 DIST => {
+                    if wfast && bits < 15 {
+                        pullbyte!();
+                        pullbyte!();
+                    }
                     let dt = unsafe { self.fast_tab().add(crate::fasttab::LSIZE) };
                     let mut e;
                     loop {
@@ -1185,6 +1335,7 @@ impl Inflate {
                     self.back += n as i32;
                     if e & EXC_F != 0 {
                         bad!(M_INVALID_DIST_CODE);
+                        wexit!();
                         continue;
                     }
                     self.offset = e >> 16;
@@ -1195,11 +1346,19 @@ impl Inflate {
                     if self.extra != 0 {
                         needbits!(self.extra);
                         self.offset += (hold & ((1u64 << self.extra) - 1)) as u32;
+                        if self.pf && self.offset > self.dmax {
+                            // (inflate_fast: the extra bits stay unused)
+                            bad!(M_TOO_FAR);
+                            giveback!();
+                            wfast = false;
+                            continue;
+                        }
                         dropbits!(self.extra);
                         self.back += self.extra as i32;
                     }
                     if self.offset > self.dmax {
                         bad!(M_TOO_FAR);
+                        wexit!();
                         continue;
                     }
                     self.mode = MATCH;
@@ -1215,6 +1374,7 @@ impl Inflate {
                         copy = self.offset as usize - copy;
                         if copy > self.whave && self.sane {
                             bad!(M_TOO_FAR);
+                            wexit!();
                             continue;
                         }
                         if self.contiguous {
@@ -1288,7 +1448,7 @@ impl Inflate {
                 }
                 CHECK => {
                     if self.wrap != 0 {
-                        needbits!(32);
+                        needbits_cold!(32);
                         out0 -= left;
                         self.total_out += out0 as u64;
                         self.total += out0 as u64;
@@ -1316,8 +1476,8 @@ impl Inflate {
                 }
                 LENGTH => {
                     if self.wrap != 0 && self.flags != 0 {
-                        needbits!(32);
-                        if (self.wrap & 4) != 0 && hold as u32 != self.total as u32 {
+                        needbits_cold!(32);
+                        if (self.wrap & 4) != 0 && rawhold!() != (self.total as u32 as i32) as f64 {
                             bad!(M_LENGTH_CHECK);
                             continue;
                         }
@@ -1571,7 +1731,10 @@ const fn pat_tables() -> ([[u8; 16]; 16], [[u8; 16]; 16]) {
 }
 
 #[cfg(target_arch = "wasm32")]
-static PAT: ([[u8; 16]; 16], [[u8; 16]; 16]) = pat_tables();
+#[repr(C, align(16))]
+struct Pat([[u8; 16]; 16], [[u8; 16]; 16]);
+#[cfg(target_arch = "wasm32")]
+static PAT: Pat = { let (a, b) = pat_tables(); Pat(a, b) };
 
 impl Inflate {
     /// match that starts in the sliding window (zlib inffast logic); returns new out
@@ -1709,3 +1872,4 @@ unsafe fn copy_short(src: *const u8, dst: *mut u8, n: usize) {
 unsafe fn copy_short(src: *const u8, dst: *mut u8, n: usize) {
     core::ptr::copy_nonoverlapping(src, dst, n);
 }
+
