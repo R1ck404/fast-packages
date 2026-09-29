@@ -26,7 +26,8 @@
 //                  of ms).
 //
 // Everything else (build(), context(), formatMessages(), analyzeMetafile())
-// goes to the service in the page. Its file system is esbuild-wasm's: none
+// goes to the service in the page, or, with initialize({ serviceInWorker:
+// true }), to the service in the engine's worker. Its file system is esbuild-wasm's: none
 // (every call fails like Go's ENOSYS stub), or, with worker: false and a
 // "globalThis.fs" with Node's synchronous API, that one.
 //
@@ -52,11 +53,22 @@
  
 
 // Inputs up to this many characters (bytes for a Uint8Array) run in the page
-// in worker mode, once the page's engine is warm. (Tests can change it with
-// globalThis.__FAST_ESBUILD_SMALL_INPUT__ before initialize(): -1 sends every
-// transform to the worker.)
+// in worker mode, once the page's engine is warm. initialize({ smallInput })
+// changes it (-1 sends every transform to the worker); tests can also use
+// globalThis.__FAST_ESBUILD_SMALL_INPUT__ before initialize().
 const SMALL_INPUT = 64 * 1024;
 let smallInput = SMALL_INPUT;
+
+// The options this package adds to initialize() (build.mjs validates them and
+// hands them over just before start below)
+                       
+                            
+                      
+ 
+let initOptions              = {};
+export function setOptions(options             ) {
+  initOptions = options || {};
+}
 
 let threadEngine                = null;
 function engine()         {
@@ -128,6 +140,10 @@ function ensureWorker() {
 }
 let currentSession                = null; // (the started service's, until stop)
 let serviceHostFS      = null;
+let serviceInWorker = false; // (initialize({ serviceInWorker }): the service is in the engine's worker)
+let svcRead                                       = null;
+let svcCrash                                = null;
+let svcFail                      = null;
 
 // node.mjs (this build in Node): the real file system (Node's fs module)
 // and the process's working directory as the default "absWorkingDir"
@@ -155,7 +171,7 @@ export function resolveWasmURL(wasmURL        , wasmModule     ) {
 export function start(useWorker         , read                             , rejectAll                      )                                     {
   stop();
   mode = useWorker ? "worker" : "thread";
-  const small = (globalThis       ).__FAST_ESBUILD_SMALL_INPUT__;
+  const small = initOptions.smallInput !== undefined ? initOptions.smallInput : (globalThis       ).__FAST_ESBUILD_SMALL_INPUT__;
   smallInput = typeof small === "number" ? small : SMALL_INPUT;
   workerWarm = false;
 
@@ -187,11 +203,27 @@ export function start(useWorker         , read                             , rej
     }
     return s;
   };
+  // initialize({ serviceInWorker: true }): the service (build(), context(),
+  // the plugin protocol, formatMessages()...) runs in the engine's worker
+  // too, as esbuild-wasm's Go service does in its worker: the page only
+  // forwards packets, so a bundle does not occupy its thread. Plugin
+  // callbacks still run in the page (they are packets like any other).
+  const svcInWorker = useWorker && initOptions.serviceInWorker === true && nodeHost === null;
+  serviceInWorker = svcInWorker;
+  svcRead = svcInWorker ? (bytes            ) => { if (currentSession === session) read(bytes); } : null;
+  svcCrash = svcInWorker ? (error     ) => { crashed = true; printPanic(error); } : null;
+  svcFail = svcInWorker ? () => { if (currentSession === session) { crashed = true; rejectAll(new Error("esbuild engine worker failed")); } } : null;
   const stdin = {
     write(bytes            ) {
       if (currentSession !== session) return;
       if (crashed) {
         if (!useWorker) queueMicrotask(() => rejectAll(new Error("Go program has already exited")));
+        return;
+      }
+      if (svcInWorker) {
+        ensureWorker();
+        if (engineWorker !== null) engineWorker.postMessage({ svc: 1, bytes });
+        else rejectAll(new Error("esbuild engine worker failed"));
         return;
       }
       queueMicrotask(() => {
@@ -200,9 +232,11 @@ export function start(useWorker         , read                             , rej
     },
   };
   // (the engine and the service, in the background)
-  setTimeout(() => {
-    if (currentSession === session) theService();
-  }, 0);
+  if (!svcInWorker) {
+    setTimeout(() => {
+      if (currentSession === session) theService();
+    }, 0);
+  }
 
   if (!useWorker) {
     // In this thread: run the first (small) warm-up step soon after
@@ -225,9 +259,16 @@ export function start(useWorker         , read                             , rej
           if (smallInput >= 0 && !threadWarm) warmThreadWhenIdle();
         } else if (data.warm) {
           if (engineWorker === w) workerWarm = true;
+        } else if (data.svc === 2) {
+          if (engineWorker === w && svcRead !== null) svcRead(data.bytes);
+        } else if (data.svc === 3) {
+          if (engineWorker === w && svcCrash !== null) svcCrash(data.error);
         } else onWorkerMessage(w, data);
       };
-      w.onerror = () => useThread(w);
+      w.onerror = () => {
+        if (serviceInWorker && svcFail !== null) svcFail();
+        useThread(w);
+      };
       engineWorker = w;
     } catch {
       engineWorker = null;
@@ -391,7 +432,20 @@ function engineWorkerMain() {
 
   // A batch of requests: [id, flags, input, mangleCache, id, ...]. Each is
   // answered as soon as it is done.
+  let hostedService                         = null;
   self_.onmessage = ({ data }              ) => {
+    if (!Array.isArray(data)) {
+      // a packet for the service hosted in this worker (initialize({ serviceInWorker }), see start)
+      if (hostedService === null) {
+        hostedService = new engine.Service({
+          output: (bytes            ) => postMessage({ svc: 2, bytes }),
+          hostFS: null,
+          crash: (error     ) => postMessage({ svc: 3, error: { name: error && error.name, value: error && error.value, message: error && error.message, stack: error && error.stack } }),
+        });
+      }
+      hostedService.write(data.bytes);
+      return;
+    }
     for (let i = 0; i < data.length; i += 4) {
       const response = engine.fastTransform(data[i + 1], data[i + 2], data[i + 3]);
       postMessage(response !== undefined ? [data[i], response] : [data[i], undefined, statsCopy(engine.stats)]);

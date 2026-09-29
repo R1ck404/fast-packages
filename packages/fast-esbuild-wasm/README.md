@@ -139,6 +139,16 @@ property of the module object; with `node.mjs`, of its default export):
   KB, 40% of a 1.6 KB transform and 7% of an 80 KB one. If the worker cannot
   be created (e.g. a Content-Security-Policy) or fails, everything runs in the
   page. The service (builds, `formatMessages`, ...) runs in the page.
+* `initialize({ serviceInWorker: true })` (worker mode): the service runs in
+  the engine's worker too, as esbuild-wasm's Go service does in its worker:
+  `build()`, `context()`, `formatMessages()` and the plugin protocol are
+  handled there, and the page only forwards packets. A bundle then does not
+  occupy the page's thread (plugin callbacks still run in the page, like in
+  esbuild-wasm). Off by default: a small build is quicker in the page, since
+  the worker has to start its engine first.
+* `initialize({ smallInput: n })` (worker mode): the size up to which a
+  transform runs in the page instead of the worker (default 65536; `-1` sends
+  every transform to the worker).
 * `lib/main.js`: transforms in the calling thread; the service in a worker
   thread with a large stack (a transform nested too deeply for the calling
   thread goes there too).

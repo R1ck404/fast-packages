@@ -124,6 +124,37 @@ function patchTransform(glue, host) {
 function patchBrowserGlue(glue) {
   glue = patchTransform(glue, "__fastGlue");
 
+  // 1b. Two options of initialize() (worker mode): "serviceInWorker" and "smallInput" (src/glue.mts)
+  glue = patch(
+    glue,
+    `  let worker = getFlag(options, keys, "worker", mustBeBoolean);
+  checkForInvalidFlags(options, keys, "in initialize() call");
+  return {
+    wasmURL,
+    wasmModule,
+    worker
+  };`,
+    `  let worker = getFlag(options, keys, "worker", mustBeBoolean);
+  let serviceInWorker = getFlag(options, keys, "serviceInWorker", mustBeBoolean);
+  let smallInput = getFlag(options, keys, "smallInput", mustBeInteger);
+  checkForInvalidFlags(options, keys, "in initialize() call");
+  return {
+    wasmURL,
+    wasmModule,
+    worker,
+    serviceInWorker,
+    smallInput
+  };`,
+    "initialize options",
+  );
+  glue = patch(
+    glue,
+    `  initializePromise = startRunningService(wasmURL || "", wasmModule, useWorker);`,
+    `  __fastGlue.setOptions(options);
+  initializePromise = startRunningService(wasmURL || "", wasmModule, useWorker);`,
+    "initialize hand-over",
+  );
+
   // 2. The service in this thread instead of Go (lib/browser.js uses a
   // generator for async functions)
   const head = glue.includes(`var startRunningService = async (wasmURL, wasmModule, useWorker) => {\n`)
@@ -420,6 +451,42 @@ async function main() {
   }
   // unchanged upstream files
   for (const file of ["lib/main.d.ts", "lib/browser.d.ts", "esm/browser.d.ts", "LICENSE.md"]) copyFileSync(join(esbuildWasmDir, file), join(here, file));
+  // the two initialize() options this package adds (see src/glue.mts)
+  for (const file of ["lib/browser.d.ts", "esm/browser.d.ts"]) {
+    const dts = readFileSync(join(here, file), "utf8");
+    writeFileSync(
+      join(here, file),
+      patch(
+        dts,
+        `   * to false.
+   */
+  worker?: boolean
+}`,
+        `   * to false.
+   */
+  worker?: boolean
+
+  /**
+   * (@r1ck404/fast-esbuild-wasm) In worker mode, run esbuild's service in the
+   * worker as well: build(), context(), formatMessages() and the plugin
+   * protocol (plugin callbacks still run in the calling thread, as they do in
+   * esbuild-wasm) so that bundling never occupies the page's thread. By
+   * default only transforms run in the worker and the rest in the page.
+   * Ignored with "worker: false".
+   */
+  serviceInWorker?: boolean
+
+  /**
+   * (@r1ck404/fast-esbuild-wasm) In worker mode, transforms of inputs up to
+   * this many characters (bytes for a Uint8Array) run in the page instead of
+   * the worker (default 65536). Use -1 to send every transform to the worker.
+   */
+  smallInput?: number
+}`,
+        "initialize option types",
+      ),
+    );
+  }
   console.log("copied *.d.ts, LICENSE.md from esbuild-wasm " + version);
   // (no Go: remove what earlier builds of this package had)
   for (const file of ["esbuild.wasm", "esbuild.wasm.stamp", "wasm_exec.js", "wasm_exec_node.js"]) {
