@@ -6,6 +6,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname, normalize } from "node:path";
 import * as pw from "playwright-core";
 import { root, listFiles, nm } from "../../../bench/corpus.mjs";
+import { EXPORTS } from "./hooks.mjs";
 
 const names = (process.argv[2] || "chromium,firefox,webkit").split(",");
 const mime = { ".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript", ".html": "text/html" };
@@ -26,8 +27,10 @@ const urls = [
   join(nm, "rollup/dist/es/shared/node-entry.js"),
 ].map(toUrl);
 const extra = [
-  "", "import a from 'b'", "import('\\u0041')", "export { a as '\\x41' }; let a", " import x from'y'",
+  "", "import a from 'b'", "import('\\u0041')", "export { a as '\\x41' }; let a", " import x from'y'",
   "x = 'ħ'; import 'a'", "`${import('a')}`", "export {", "import a from", "'abc", "a = /re", "import.meta.url",
+  // the original reads outside its source on these
+  "export d", "import { Strin", "import 'x';export cons", "export { default } from '", "e/xport {};\n",
 ];
 let failed = false;
 for (const name of names) {
@@ -40,13 +43,18 @@ for (const name of names) {
   }
   const page = await browser.newPage();
   await page.goto(base + "/bench/browser/blank.html");
-  const r = await page.evaluate(
-    async ({ urls, extra }) => (await import("/packages/fast-es-module-lexer/test/browser-page.mjs")).run("/packages/fast-es-module-lexer/lexer.mjs", "/node_modules/es-module-lexer/dist/lexer.js", urls, extra),
-    { urls, extra },
-  );
-  console.log(`${name} [${r.mode}]: checks ${r.checks}, mismatches ${r.nfails}, fallbacks ${r.fallbacks} (differing: ${r.fbDiff})  (${r.ua.match(/(Chrome|Firefox|Version)\/[\d.]+/)?.[0]})`);
-  for (const f of r.fails) console.log("  ", JSON.stringify(f));
-  if (r.nfails) failed = true;
+  // index.mjs (what Node and direct imports load) and browser.mjs (what
+  // bundlers take for browsers)
+  for (const file of ["index.mjs", "browser.mjs"]) {
+    const r = await page.evaluate(
+      async ({ file, urls, extra, hooks }) =>
+        (await import("/packages/fast-es-module-lexer/test/browser-page.mjs")).run("/packages/fast-es-module-lexer/" + file, "/node_modules/es-module-lexer/dist/lexer.js", urls, extra, hooks, 3000),
+      { file, urls, extra, hooks: EXPORTS },
+    );
+    console.log(`${name} ${file} [${r.mode}]: checks ${r.checks}, mismatches ${r.nfails}, read outside the source ${r.outside} (checked against a fresh original)  (${r.ua.match(/(Chrome|Firefox|Version)\/[\d.]+/)?.[0]})`);
+    for (const f of r.fails) console.log("  ", JSON.stringify(f));
+    if (r.nfails) failed = true;
+  }
   await browser.close();
 }
 server.close();

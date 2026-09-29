@@ -1,38 +1,103 @@
-// Build the wasm core and embed it (base64) into lexer.wasm.mjs, together
-// with the small string-copy module (wasm JS-string builtins, see lexer.mjs).
-// usage: node packages/fast-es-module-lexer/build.mjs [--no-opt]
+// Builds the wasm core (rust/) and the small string-copy module (wasm
+// JS-string builtins, see index.mts) and embeds them: as base64 at the end
+// of index.mts (then index.mjs via tools/ts-build.mjs), and as text (see
+// encodeWasm), with their decoder (rust/decode.wat), in browser.mjs, which
+// is index.mjs with BROWSER = true. The optimised modules are also written
+// to rust/target/wasm/ (for inspection; not shipped).
+// usage: node packages/fast-es-module-lexer/build.mjs [--no-opt] [--no-cargo]
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import binaryen from "binaryen";
+import { transform } from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const crate = join(here, "rust");
-execSync("cargo build --release", { cwd: crate, stdio: "inherit" });
-let bytes = readFileSync(join(crate, "target/wasm32-unknown-unknown/release/fastlexer.wasm"));
-console.log("raw wasm:", bytes.length, "bytes");
+const out = join(crate, "target/wasm");
+mkdirSync(out, { recursive: true });
 
-const { default: binaryen } = await import("binaryen");
+// The text the modules are embedded as (denser than base64, and byte-aligned
+// for gzip/brotli): which bytes are one character (64 hex digits, byte b is
+// bit b & 3 of digit b >> 2), then every byte as one character (the 87 most
+// frequent) or two. The alphabet is printable ASCII without " $ ' < \ `, so
+// the text needs no escapes in any string literal.
+const ALPHABET = [];
+for (let c = 32; c < 127; c++) if (![34, 36, 39, 60, 92, 96].includes(c)) ALPHABET.push(String.fromCharCode(c));
+function encodeWasm(bytes) {
+  const count = new Array(256).fill(0);
+  for (const b of bytes) count[b]++;
+  const one = new Set([...count.keys()].sort((a, b) => count[b] - count[a] || a - b).slice(0, ALPHABET.length - 2));
+  let text = "";
+  for (let d = 0; d < 64; d++) {
+    let v = 0;
+    for (let j = 0; j < 4; j++) if (one.has(d * 4 + j)) v |= 1 << j;
+    text += v.toString(16);
+  }
+  // one-character bytes in ascending order after the two pair prefixes,
+  // then the pairs in ascending order
+  const code = [];
+  let n1 = 2, n2 = 0;
+  for (let b = 0; b < 256; b++) {
+    if (one.has(b)) code[b] = ALPHABET[n1++];
+    else code[b] = ALPHABET[Math.floor(n2 / ALPHABET.length)] + ALPHABET[n2++ % ALPHABET.length];
+  }
+  for (const b of bytes) text += code[b];
+  return text;
+}
+
 // only what rustc was asked for (plus its defaults): no newer encodings that
 // some browsers cannot load
 const F = binaryen.Features;
-const features =
+const LEXER_FEATURES =
   F.SIMD128 | F.BulkMemory | F.BulkMemoryOpt | F.SignExt | F.MutableGlobals | F.NontrappingFPToInt | F.Multivalue | F.ReferenceTypes;
 
-if (!process.argv.includes("--no-opt")) {
-  const mod = binaryen.readBinary(bytes);
+function optimize(mod, features, level, shrink, noInline = []) {
   mod.setFeatures(features);
-  binaryen.setOptimizeLevel(3);
-  binaryen.setShrinkLevel(0);
+  binaryen.setOptimizeLevel(level);
+  binaryen.setShrinkLevel(shrink);
+  for (const name of noInline) {
+    binaryen.setPassArgument("no-inline", name);
+    mod.runPasses(["no-inline"]);
+  }
   mod.optimize();
+  // (custom sections and the linker's __data_end / __heap_base exports are
+  // not used)
+  mod.runPasses(["strip-debug", "strip-producers", "strip-target-features"]);
+  for (const name of ["__data_end", "__heap_base"]) if (mod.getExport(name)) mod.removeExport(name);
   if (!mod.validate()) throw new Error("wasm-opt output does not validate");
-  const out = mod.emitBinary();
-  console.log("wasm-opt -O3:", out.length, "bytes");
-  bytes = Buffer.from(out);
+  const bytes = Buffer.from(mod.emitBinary());
+  mod.dispose();
+  return bytes;
 }
 
-// copy8(string, from, to, base, 255, cca): the string's UTF-16 code units
-// from..to into memory at base + index, one byte each: Latin-1 as is and
+// ---- the lexer
+// Paths that are cold on the typical first parse stay functions of their own
+// (wasm-opt would inline each into its one caller, the main loop): V8
+// compiles a function on its first call, so the first parse then compiles
+// less code (~0.1 ms less in Node) and the steady state is the same. (cargo
+// keeps the function names for this: its output is not stripped; wasm-opt
+// strips them.)
+const COLD = ["slash", "template_string", "regular_expression", "regex_character_class", "is_expression_keyword", "is_break_or_continue", "is_expression_terminator", "outside", "memeq_outside", "rpk1"];
+const rawFile = join(out, "lexer.raw.wasm");
+if (!process.argv.includes("--no-cargo")) {
+  execSync("cargo build --release", { cwd: crate, stdio: "inherit", env: { ...process.env, CARGO_PROFILE_RELEASE_STRIP: "false" } });
+  writeFileSync(rawFile, readFileSync(join(crate, "target/wasm32-unknown-unknown/release/fastlexer.wasm")));
+}
+let lexer = readFileSync(rawFile);
+console.log("lexer: cargo", lexer.length, "bytes");
+if (!process.argv.includes("--no-opt")) {
+  const mod = binaryen.readBinary(lexer);
+  const names = [];
+  for (let i = 0; i < mod.getNumFunctions(); i++) names.push(binaryen.getFunctionInfo(mod.getFunctionByIndex(i)).name);
+  const cold = COLD.map((c) => names.find((n) => n.includes(c)) ?? (() => { throw new Error(`no function ${c} in the cargo output`); })());
+  lexer = optimize(mod, LEXER_FEATURES, 3, 0, cold);
+  console.log("lexer: wasm-opt -O3", lexer.length, "bytes");
+}
+writeFileSync(join(out, "lexer.wasm"), lexer);
+
+// ---- copy8(string, from, to, base, 255, cca): the string's UTF-16 code
+// units from..to into memory at base + index, one byte each: Latin-1 as is and
 // everything above as 0xff (the lexer only tells apart ASCII and U+00A0).
 // 16 units per iteration: 4 packed per i64, 8 per v128, narrowed with SIMD.
 // Two ways to read the string, both 1.5-4x faster than TextEncoder.encodeInto
@@ -111,17 +176,52 @@ const copyWat = `(module
       (local.set $i (i32.add (local.get $i) (local.get $n)))
       (br $chunks))))
 )`;
-const cm = binaryen.parseText(copyWat);
-cm.setFeatures(F.ReferenceTypes | F.GC | F.MutableGlobals | F.SignExt | F.SIMD128);
-if (!cm.validate()) throw new Error("copy module does not validate");
-binaryen.setOptimizeLevel(3);
-cm.optimize();
-const copyBytes = Buffer.from(cm.emitBinary());
-console.log("copy8 module:", copyBytes.length, "bytes");
+const copy8 = optimize(binaryen.parseText(copyWat), F.ReferenceTypes | F.GC | F.MutableGlobals | F.SignExt | F.SIMD128, 3, 0);
+console.log("copy8:", copy8.length, "bytes");
+writeFileSync(join(out, "copy8.wasm"), copy8);
 
+// ---- the decoder of the text
+const decoderMod = binaryen.parseText(readFileSync(join(crate, "decode.wat"), "utf8"));
+const decoder = optimize(decoderMod, F.MVP, 2, 2);
+console.log("decoder:", decoder.length, "bytes");
+
+// the generated end of index.mts (everything after MARK): the modules as
+// base64 (Buffer decodes that in microseconds in Node; the decoder of the
+// text costs ~0.25 ms)
+const MARK = "// generated by build.mjs (everything below this line)\n";
+const fn = (name, doc, value) => `/** ${doc} */\nfunction ${name}(): string {\n  return ${JSON.stringify(value)};\n}\n`;
+const tsFile = join(here, "index.mts");
+const ts = readFileSync(tsFile, "utf8");
+if (!ts.includes(MARK)) throw new Error("index.mts: marker line not found");
 writeFileSync(
-  join(here, "lexer.wasm.mjs"),
-  `// generated by build.mjs — do not edit\nexport default ${JSON.stringify(bytes.toString("base64"))};\n` +
-    `export const copy8 = ${JSON.stringify(copyBytes.toString("base64"))};\n`,
+  tsFile,
+  ts.slice(0, ts.indexOf(MARK) + MARK.length) +
+    fn("WASM", "the lexer (rust/), base64 (browser.mjs: as text, see build.mjs)", lexer.toString("base64")) +
+    fn("COPY8", "the string-copy module (build.mjs), base64 (browser.mjs: as text)", copy8.toString("base64")) +
+    fn("DECODER", "browser.mjs: the decoder of the text (rust/decode.wat), base64", ""),
 );
-console.log("wrote lexer.wasm.mjs");
+execSync(`"${process.execPath}" ${JSON.stringify(join(here, "../../tools/ts-build.mjs"))}`, { stdio: "inherit" });
+
+// browser.mjs: index.mjs with BROWSER = true (esbuild folds it and drops the
+// Node.js paths) and the modules as text
+const js = readFileSync(join(here, "index.mjs"), "utf8");
+const flag = /const BROWSER\s*= false;/;
+if (!flag.test(js) || !js.includes(MARK)) throw new Error("index.mjs: BROWSER flag or marker line not found");
+const texts = { WASM: encodeWasm(lexer), COPY8: encodeWasm(copy8), DECODER: decoder.toString("base64") };
+console.log("text:", Object.entries(texts).map(([k, t]) => `${k} ${t.length}`).join(", "), "characters");
+let browser = js.slice(0, js.indexOf(MARK)).replace(flag, "const BROWSER = true;");
+browser += Object.entries(texts).map(([n, t]) => `function ${n}() {\n  return ${JSON.stringify(t)};\n}\n`).join("");
+browser = (await transform(browser, { format: "esm", minifySyntax: true, target: "es2022", legalComments: "none" })).code;
+writeFileSync(join(here, "browser.mjs"), `// generated by build.mjs from index.mts (with BROWSER = true) — do not edit\n${browser}`);
+console.log("wrote index.mts, index.mjs, browser.mjs");
+
+// both modules decode their wasm to what was built, and parse
+const { withHooks } = await import(pathToFileURL(join(here, "test/hooks.mjs")).href);
+for (const file of ["index.mjs", "browser.mjs"]) {
+  const L = await withHooks(file);
+  for (const [name, bytes] of [["WASM", lexer], ["COPY8", copy8]])
+    if (Buffer.compare(Buffer.from(file === "index.mjs" ? Buffer.from(L[name](), "base64") : L.decode(L[name]())), bytes) !== 0)
+      throw new Error(`${file}: ${name}() does not decode to the module`);
+  L.initSync();
+  if (JSON.stringify(L.parse("import 'a'")[0].map((i) => i.n)) !== '["a"]') throw new Error(`${file} does not parse`);
+}

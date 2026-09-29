@@ -27,21 +27,20 @@
   "type": "module",
   "main": "./index.mjs",
   "module": "./index.mjs",
+  "browser": "./browser.mjs",
   "types": "./types/lexer.d.ts",
   "exports": {
     ".": {
       "types": "./types/lexer.d.ts",
+      "browser": "./browser.mjs",
       "default": "./index.mjs"
     },
     "./package.json": "./package.json"
   },
   "files": [
     "index.mjs",
-    "lexer.mjs",
-    "lexer.wasm.mjs",
+    "browser.mjs",
     "types/lexer.d.ts",
-    "vendor/lexer.js",
-    "vendor/LICENSE",
     "LICENSE"
   ],
   "sideEffects": false,
@@ -50,8 +49,8 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/edge.mjs && node test/diff.mjs --quick",
-    "test:full": "node test/diff.mjs && node test/edge.mjs && node test/browser.mjs"
+    "test": "node test/edge.mjs --fuzz=5000 && node test/edge.mjs --file=browser.mjs --fuzz=2000 && node test/diff.mjs --quick && node test/bundle.mjs",
+    "test:full": "node test/diff.mjs && node test/diff.mjs --file=browser.mjs --quick && node test/edge.mjs && node test/edge.mjs --file=browser.mjs && node test/bundle.mjs && node test/browser.mjs"
   },
   "devDependencies": {
     "es-module-lexer": "1.7.0",
