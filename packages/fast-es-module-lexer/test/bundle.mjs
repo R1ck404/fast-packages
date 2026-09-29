@@ -39,6 +39,8 @@ const inputs = [
 
 let checks = 0, failures = 0;
 const fail = (msg) => (failures++, console.log("FAIL", msg));
+// (.scratch is gitignored: it does not exist in a fresh checkout)
+mkdirSync(join(root, ".scratch"), { recursive: true });
 const tmp = mkdtempSync(join(root, ".scratch", "eml-bundle-"));
 try {
   // a node_modules in which es-module-lexer is this package
