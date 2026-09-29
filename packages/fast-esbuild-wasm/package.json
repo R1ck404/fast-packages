@@ -1,6 +1,6 @@
 {
   "name": "@r1ck404/fast-esbuild-wasm",
-  "version": "0.28.2",
+  "version": "0.28.4",
   "description": "Faster drop-in replacement for esbuild-wasm 0.28.2: esbuild ported to JavaScript (transform, build, context, the CLI and every other API), with byte-identical output and no WebAssembly binary",
   "keywords": [
     "esbuild",

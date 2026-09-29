@@ -308,11 +308,20 @@ await fastWorker.initialize({ wasmModule });
   });
   const buildText = (r) => (r.res ? { res: r.res.outputFiles.map((f) => [f.path, f.text]), warnings: r.res.warnings, metafile: r.res.metafile } : r);
 
-  for (const worker of [false, true]) {
-    const mode = worker ? "worker mode" : "worker: false";
+  // (serviceInWorker: the service, and with it build() and the plugin protocol, runs in the engine's worker;
+  // smallInput: -1 sends every transform there as well)
+  const modes = [
+    { worker: false },
+    { worker: true },
+    { worker: true, serviceInWorker: true },
+    { worker: true, serviceInWorker: true, smallInput: -1 },
+  ];
+  for (const opts of modes) {
+    const { worker } = opts;
+    const mode = !worker ? "worker: false" : "worker mode" + (opts.serviceInWorker ? ", service in the worker" : "") + (opts.smallInput === -1 ? ", every transform in the worker" : "");
     const lib = await fresh();
     const stats = lib.default[STATS];
-    await lib.initialize({ wasmModule, worker });
+    await lib.initialize({ wasmModule, ...opts });
     const calls = (m) => [
       settle(m.transform("/*! legal */ x", { legalComments: "external" })),
       settle(m.transform("x", { logOverride: { "equals-nan": "error" } })),
@@ -335,14 +344,14 @@ await fastWorker.initialize({ wasmModule });
     check(stats.error === 0, `${mode}: no engine errors`, stats.lastError);
     // stop() and initialize() again
     await lib.stop();
-    await lib.initialize({ wasmModule, worker });
+    await lib.initialize({ wasmModule, ...opts });
     const c = await settle(lib.transform("/*! legal */ x", { legalComments: "external" }));
     check(same(c, want[0]), `${mode}: stop() + initialize()`, c);
     await lib.stop();
 
     // a wasm URL, which is never downloaded
     const lib2 = await fresh();
-    const init = await settle(lib2.initialize({ wasmURL: "/esbuild.wasm", worker }));
+    const init = await settle(lib2.initialize({ wasmURL: "/esbuild.wasm", ...opts }));
     check(init.err === undefined && requests === 0, `${mode}: initialize() does not download the wasm URL`, { init, requests });
     const t = await settle(lib2.transform("let a = 1", {}));
     check(t.res !== undefined && t.res.code === "let a = 1;\n", `${mode}: a transform without the binary`, t);
@@ -358,6 +367,14 @@ await fastWorker.initialize({ wasmModule });
       const a = await settle(Promise.resolve().then(() => r.initialize(opts)));
       const b = await settle(Promise.resolve().then(() => lib.initialize(opts)));
       check(a.err !== undefined && same(a, b), `initialize(${JSON.stringify(opts)}) fails like esbuild-wasm's`, { ref: a, fast: b });
+    }
+    for (const [opts, message] of [
+      [{ wasmModule, serviceInWorker: "yes" }, '"serviceInWorker" must be a boolean'],
+      [{ wasmModule, smallInput: 1.5 }, '"smallInput" must be an integer'],
+      [{ wasmModule, smallInput: "1" }, '"smallInput" must be an integer'],
+    ]) {
+      const e = await settle(Promise.resolve().then(() => lib.initialize(opts)));
+      check(e.err === message, `initialize(${JSON.stringify({ ...opts, wasmModule: "…" })}) is rejected like a wrong esbuild option`, e);
     }
     await lib.initialize({ wasmModule, worker: false });
     await r.initialize({ wasmModule: refWasmModule, worker: false });
