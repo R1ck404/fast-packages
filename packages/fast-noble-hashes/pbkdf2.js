@@ -63,7 +63,7 @@ function pbkdf2(hash, password, salt, opts) {
         // U1 = PRF(Password, Salt + INT_32_BE(i))
         (prfW = PRFSalt._cloneInto(prfW)).update(arr).digestInto(u);
         Ti.set(u.subarray(0, Ti.length));
-        if (fk !== undefined && c > 1 && (0, _fast_js_1.fastPrf)(PRF) === fk) {
+        if (fk && c > 1) {
             (0, _fast_js_1.fastPbkdf2)(PRF, fk, u, Ti, c - 1);
             continue;
         }
@@ -97,7 +97,7 @@ async function pbkdf2Async(hash, password, salt, opts) {
         // U1 = PRF(Password, Salt + INT_32_BE(i))
         (prfW = PRFSalt._cloneInto(prfW)).update(arr).digestInto(u);
         Ti.set(u.subarray(0, Ti.length));
-        if (fk !== undefined && c > 1 && (0, _fast_js_1.fastPrf)(PRF) === fk) {
+        if (fk && c > 1) {
             await (0, _fast_js_1.fastPbkdf2Async)(PRF, fk, u, Ti, c - 1, asyncTick);
             continue;
         }

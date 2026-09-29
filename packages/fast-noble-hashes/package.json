@@ -1,7 +1,7 @@
 {
   "name": "@r1ck404/fast-noble-hashes",
   "version": "1.8.0",
-  "description": "Faster drop-in replacement for @noble/hashes 1.8.0: SHA-2, SHA-1, MD5, HMAC, PBKDF2 and scrypt in Rust/WebAssembly, identical results, errors and instance state",
+  "description": "Faster drop-in replacement for @noble/hashes 1.8.0: SHA-2, SHA-1, MD5, HMAC, PBKDF2 and scrypt in WebAssembly, identical results, errors and instance state",
   "keywords": [
     "noble",
     "hashes",
@@ -237,8 +237,8 @@
   "scripts": {
     "build": "node build.mjs",
     "vendor": "node tools/vendor.mjs",
-    "test": "node test/files.mjs && node test/diff.mjs --quick && node test/diff.mjs --quick --cjs",
-    "test:full": "node test/files.mjs && node test/diff.mjs && node test/diff.mjs --cjs && node test/diff.mjs --seed 777 && node test/nowasm.mjs && node test/browser.mjs",
+    "test": "node test/files.mjs && node test/bundle.mjs && node test/diff.mjs --quick && node test/diff.mjs --quick --cjs",
+    "test:full": "node test/files.mjs && node test/bundle.mjs && node test/diff.mjs && node test/diff.mjs --cjs && node test/diff.mjs --seed 777 && node test/nowasm.mjs && node test/browser.mjs",
     "mutate": "node tools/mutate.mjs"
   },
   "devDependencies": {

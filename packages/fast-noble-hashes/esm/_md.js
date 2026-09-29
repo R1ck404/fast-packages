@@ -3,8 +3,8 @@
  * @module
  */
 import { Hash, abytes, aexists, aoutput, clean, createView, toBytes } from "./utils.js";
-// fast-noble-hashes: registered classes run their blocks in wasm (_fast.js)
-import { FAST, fastDigestInto, fastUpdate } from "./_fast.js";
+// fast-noble-hashes: the registered classes run in wasm (_fast.js)
+import { fastMD } from "./_fast.js";
 /** Polyfill for Safari 14. https://caniuse.com/mdn-javascript_builtins_dataview_setbiguint64 */
 export function setBigUint64(view, byteOffset, value, isLE) {
     if (typeof view.setBigUint64 === 'function')
@@ -46,8 +46,7 @@ export class HashMD extends Hash {
     }
     update(data) {
         aexists(this);
-        const k = this[FAST];
-        if (k !== undefined && this.constructor === k.ctor && fastUpdate(this, data, k))
+        if (fastMD(this, data))
             return this;
         data = toBytes(data);
         abytes(data);
@@ -78,8 +77,7 @@ export class HashMD extends Hash {
         aexists(this);
         aoutput(out, this);
         this.finished = true;
-        const k = this[FAST];
-        if (k !== undefined && this.constructor === k.ctor && fastDigestInto(this, out, k))
+        if (fastMD(this, out, 1))
             return;
         // Padding
         // We can avoid allocation of buffer for padding completely if it

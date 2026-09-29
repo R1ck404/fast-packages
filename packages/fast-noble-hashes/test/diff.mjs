@@ -15,16 +15,17 @@ const require = createRequire(import.meta.url);
 
 async function load(base) {
   const mods = {};
-  for (const m of ["sha2", "legacy", "hmac", "pbkdf2", "scrypt", "hkdf", "utils", "sha256", "sha512", "sha1"]) {
+  for (const m of ["sha2", "legacy", "hmac", "pbkdf2", "scrypt", "hkdf", "utils", "sha256", "sha512", "sha1", "_md"]) {
     mods[m] = cjs ? require(`${base}/${m}`) : await import(`${base}/${m}`);
   }
   return mods;
 }
 const F = await load("@r1ck404/fast-noble-hashes");
 const O = await load("@noble/hashes");
-// the fast paths must actually be in use (or, with --nowasm, not)
+// (checked at the end: every family must have loaded on its first use)
 const fastMod = cjs ? require("../_fast.js") : await import("../esm/_fast.js");
-if (fastMod.wasmActive() !== !args.includes("--nowasm")) throw new Error("wasm active: " + fastMod.wasmActive());
+// the size of the wasm input buffer: messages go through it in chunks
+const { CAP } = await import("../wasm/kernels.mjs");
 
 // deterministic PRNG (xorshift32)
 function rnd() {
@@ -125,6 +126,28 @@ function input(maxLen) {
   return [b, b];
 }
 
+// ------------------------------------------------------------ surface
+// the same exports, and nothing added to the classes' prototypes (the
+// kernels are registered outside them)
+function surface() {
+  const names = (o) => Reflect.ownKeys(o).map(String).sort().join(",");
+  for (const m of Object.keys(O)) {
+    eq(names(F[m]), names(O[m]), `exports of ${m}`);
+    for (const k of Object.keys(O[m])) {
+      const f = F[m][k], o = O[m][k];
+      eq(typeof f, typeof o, `${m}.${k} type`);
+      if (typeof o != "function") continue;
+      eq(names(f), names(o), `${m}.${k} own properties`);
+      eq(f.name + "/" + f.length, o.name + "/" + o.length, `${m}.${k} name/length`);
+      if (typeof o.create == "function") eq(f.create.name + "/" + f.create.length, o.create.name + "/" + o.create.length, `${m}.${k}.create name/length`);
+      if (o.prototype) {
+        eq(names(f.prototype), names(o.prototype), `${m}.${k}.prototype`);
+        eq(names(Object.getPrototypeOf(f.prototype)), names(Object.getPrototypeOf(o.prototype)), `${m}.${k}'s parent prototype`);
+      }
+    }
+  }
+}
+
 // ------------------------------------------------------------ streaming
 function streaming(iters) {
   for (const [name, mod, cls] of HASHES) {
@@ -221,13 +244,25 @@ function errors() {
   }
 }
 
-// streamed strings of 3-byte UTF-8 around the wasm buffer size, after
-// 0..blockLen-1 buffered bytes
+// streamed strings of 3-byte UTF-8 and byte arrays around the wasm buffer
+// size, after 0..blockLen-1 buffered bytes
 function stringEdges() {
+  const third = Math.floor(CAP / 3);
   for (const [name, mod, cls] of HASHES) {
     const bl = new F[mod][cls]().blockLen;
     for (const pre of [0, 1, bl - 1]) {
-      for (const n of [21845 - 43, 21845 - 22, 21845 - 1, 21845, 21846]) {
+      for (const len of [CAP - pre - 1, CAP - pre, CAP - pre + 1, CAP, 2 * CAP - pre + bl - 1, 2 * CAP + 1]) {
+        const d = bytes(len);
+        const a = new F[mod][cls](), b = new O[mod][cls]();
+        a.update(bytes(pre));
+        b.update(a.buffer.slice(0, pre));
+        a.update(d);
+        b.update(d);
+        eq(snap(a), snap(b), `${name} bytes edge pre=${pre} len=${len}`);
+        eq(hex(a.digest()), hex(b.digest()), `${name} bytes edge digest`);
+        clean("bytes edge");
+      }
+      for (const n of [third - 43, third - 22, third - 1, third, third + 1, third + 2]) {
         const x = "中".repeat(n);
         const a = new F[mod][cls](), b = new O[mod][cls]();
         a.update(new Uint8Array(pre));
@@ -245,15 +280,25 @@ function stringEdges() {
 // instances whose parameters were changed from outside run noble's code
 function tampered() {
   for (const [name, mod, cls] of HASHES) {
-    for (const [field, value] of [["outputLen", 16], ["outputLen", 12], ["padOffset", 20], ["isLE", true], ["blockLen", 32]]) {
-      const a = new F[mod][cls](), b = new O[mod][cls]();
-      a.update("abc");
-      b.update("abc");
-      a[field] = b[field] = value;
+    for (const [field, value] of [["outputLen", 16], ["outputLen", 12], ["outputLen", 13], ["outputLen", 68], ["padOffset", 20], ["isLE", true], ["blockLen", 32], ["length", 0.5], ["length", 0.1], ["length", -8], ["length", 2 ** 60], ["length", 1e300], ["length", "5"]]) {
       const d = bytes(ri(300));
-      eq(attempt(() => a.update(d) && 0), attempt(() => b.update(d) && 0), `${name} tampered ${field} update`);
-      eq(snap(a), snap(b), `${name} tampered ${field} fields`);
-      eq(attempt(() => a.digest()), attempt(() => b.digest()), `${name} tampered ${field} digest`);
+      // digestInto a larger array, then digest(), each on a pair tampered alike
+      for (const how of ["digestInto", "digest"]) {
+        const a = new F[mod][cls](), b = new O[mod][cls]();
+        a.update("abc");
+        b.update("abc");
+        a[field] = b[field] = value;
+        eq(attempt(() => a.update(d) && 0), attempt(() => b.update(d) && 0), `${name} tampered ${field} update`);
+        eq(snap(a), snap(b), `${name} tampered ${field} fields`);
+        if (how === "digest") eq(attempt(() => a.digest()), attempt(() => b.digest()), `${name} tampered ${field} digest`);
+        else {
+          const oa = new Uint8Array(80), ob = new Uint8Array(80);
+          eq(attempt(() => a.digestInto(oa)), attempt(() => b.digestInto(ob)), `${name} tampered ${field} digestInto`);
+          eq(hex(oa), hex(ob), `${name} tampered ${field} digestInto out`);
+        }
+        eq(snap(a), snap(b), `${name} tampered ${field} fields after ${how}`);
+        clean("tampered");
+      }
     }
   }
 }
@@ -279,12 +324,17 @@ function oneshot(iters) {
       eq(hex(da), createHash(ref).update(typeof x === "string" ? Buffer.from(x) : x).digest("hex"), `${name}() vs node:crypto`);
     }
     // strings of 3-byte UTF-8 (and lone surrogates, also 3 bytes) around
-    // the size that still fits the wasm input buffer (64 KB / 3)
-    for (let n = 21830; n <= 21860; n++) {
+    // the size that still fits the wasm input buffer (CAP / 3), and byte
+    // arrays around it
+    for (let n = Math.floor(CAP / 3) - 15; n <= Math.floor(CAP / 3) + 15; n++) {
       for (const ch of ["中", "�", "€"]) {
         const x = ch.repeat(n - 1) + "a";
         eq(hex(fa(x)), hex(fb(x)), `${name}(${n} x 3-byte chars)`);
       }
+    }
+    for (const n of [CAP - 1, CAP, CAP + 1, 2 * CAP + 1]) {
+      const d = bytes(n);
+      eq(hex(fa(d)), hex(fb(d)), `${name}(${n} bytes)`);
     }
     // every length around the block and padding boundaries
     for (let n = 0; n <= 300; n++) {
@@ -413,6 +463,12 @@ async function scrypts(iters) {
     eq(attempt(() => F.scrypt.scrypt("p", "s", { ...o, onProgress: (x) => la.push(x) })), attempt(() => O.scrypt.scrypt("p", "s", { ...o, onProgress: (x) => lb.push(x) })), `scrypt ${JSON.stringify(o)}`);
     eq(la.length + ":" + la.join(), lb.length + ":" + lb.join(), `scrypt progress ${JSON.stringify(o)}`);
   }
+  // memory that cannot be allocated: a RangeError in both (the messages
+  // differ: noble's ArrayBuffer, the wasm Memory.grow())
+  const huge = { N: 2 ** 31, r: 1, p: 1, maxmem: 2 ** 45 };
+  eq(attempt(() => F.scrypt.scrypt("p", "s", huge)).split(":")[1], attempt(() => O.scrypt.scrypt("p", "s", huge)).split(":")[1], "scrypt unallocatable");
+  eq(await attemptAsync(() => F.scrypt.scryptAsync("p", "s", huge)).then((x) => x.split(":")[1]), "RangeError", "scryptAsync unallocatable");
+  clean("scrypt unallocatable");
   // an onProgress that throws part-way
   const thrower = (log) => (x) => {
     log.push(x);
@@ -438,12 +494,18 @@ function subclasses() {
         this.E ^= 2;
       }
     }
-    return { Weird256, Weird1, w256: M.utils.createHasher(() => new Weird256()), w1: M.utils.createHasher(() => new Weird1()) };
+    // get() of its own (digestInto and _cloneInto use it; process() does not)
+    class Weird512 extends M.sha2.SHA512 {
+      get() {
+        return super.get().map((x) => x ^ 5);
+      }
+    }
+    return { Weird256, Weird1, w256: M.utils.createHasher(() => new Weird256()), w1: M.utils.createHasher(() => new Weird1()), w512: M.utils.createHasher(() => new Weird512()) };
   };
   const a = make(F), b = make(O);
   for (let it = 0; it < 20; it++) {
     const d = bytes(ri(3) ? ri(300) : ri(5000));
-    for (const h of ["w256", "w1"]) {
+    for (const h of ["w256", "w1", "w512"]) {
       eq(hex(a[h](d)), hex(b[h](d)), `subclass ${h}`);
       const x = a[h].create(), y = b[h].create();
       x.update(d.subarray(0, 10)).update(d.subarray(10));
@@ -456,8 +518,33 @@ function subclasses() {
   }
 }
 
+// process() called directly (a subclass may): the block at offset of a
+// DataView, read as noble reads it (same errors, fields unchanged on error)
+function processCalls() {
+  for (const [name, mod, cls] of HASHES) {
+    for (let it = 0; it < 10; it++) {
+      const a = new F[mod][cls](), b = new O[mod][cls]();
+      a.update("xyz");
+      b.update("xyz");
+      const buf = bytes(300);
+      const bl = a.blockLen;
+      for (const [view, off] of [
+        [new DataView(buf.buffer), 0], [new DataView(buf.buffer), 3], [new DataView(buf.buffer, 7), 300 - 7 - bl], [new DataView(buf.buffer), 300 - bl + 1],
+        [new DataView(buf.buffer), -1], [new DataView(buf.buffer), 1.5], [buf, 0], [undefined, 0], [new DataView(buf.buffer), "8"],
+        [new DataView(bytes(70000).buffer), "1"], [new DataView(bytes(70000).buffer), "2"],
+      ]) {
+        eq(attempt(() => a.process(view, off)), attempt(() => b.process(view, off)), `${name} process(${view?.constructor?.name}, ${off})`);
+        eq(snap(a), snap(b), `${name} fields after process`);
+        clean("process");
+      }
+      eq(hex(a.digest()), hex(b.digest()), `${name} digest after process`);
+    }
+  }
+}
+
 const t0 = Date.now();
 const n = quick ? 1 : 10;
+surface();
 streaming(40 * n);
 errors();
 tampered();
@@ -465,7 +552,13 @@ stringEdges();
 oneshot(40 * n);
 hmacs(10 * n);
 subclasses();
+processCalls();
 await pbkdf2s(6 * n);
 await scrypts(quick ? 6 : 40);
-console.log(`${cjs ? "cjs" : "esm"}${args.includes("--nowasm") ? " (no wasm)" : ""}: ${checks} checks, ${fails} failures (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+checks++;
+if (!fastMod.wasmLoaded()) {
+  fails++;
+  console.log("FAIL wasm modules loaded on first use:", fastMod.wasmLoaded());
+}
+console.log(`${cjs ? "cjs" : "esm"}: ${checks} checks, ${fails} failures (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
 process.exit(fails ? 1 : 0);
