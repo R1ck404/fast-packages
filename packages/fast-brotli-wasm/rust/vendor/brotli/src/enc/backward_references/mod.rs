@@ -6,7 +6,7 @@ mod test;
 
 use super::super::alloc::{Allocator, SliceWrapper, SliceWrapperMut};
 use super::command::{BrotliDistanceParams, Command, ComputeDistanceCode, InitCommand};
-use super::dictionary_hash::kStaticDictionaryHash;
+use super::dictionary_hash::static_dictionary_hash;
 use super::hash_to_binary_tree::{H10Buckets, H10DefaultParams, ZopfliNode, H10};
 use super::static_dict::BrotliDictionary;
 use super::static_dict::{
@@ -105,6 +105,17 @@ pub struct BrotliEncoderParams {
 impl Default for BrotliEncoderParams {
     fn default() -> BrotliEncoderParams {
         super::encode::BrotliEncoderInitParams()
+    }
+}
+
+impl BrotliEncoderParams {
+    /// fast-brotli-wasm: brotli-wasm never sets BROTLI_PARAM_LOG_META_BLOCK
+    /// (it only sets the quality), so with feature "fast-fixed-params" the
+    /// metablock IR logging, and the stride / prior / CDF evaluators that only
+    /// it runs, are compiled out.
+    #[inline(always)]
+    pub fn fast_log_meta_block(&self) -> bool {
+        !cfg!(feature = "fast-fixed-params") && self.log_meta_block
     }
 }
 
@@ -2595,7 +2606,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2614,7 +2625,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2633,7 +2644,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2652,7 +2663,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2671,7 +2682,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2690,7 +2701,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2709,7 +2720,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2728,7 +2739,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,
@@ -2747,7 +2758,7 @@ pub fn BrotliCreateBackwardReferences<
             } else {
                 None
             },
-            &kStaticDictionaryHash[..],
+            &static_dictionary_hash()[..],
             num_bytes,
             position,
             ringbuffer,

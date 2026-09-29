@@ -1,12 +1,16 @@
 @r1ck404/fast-brotli-wasm is derived from brotli-wasm 3.0.1
 (https://github.com/httptoolkit/brotli-wasm, Apache-2.0, see LICENSE).
 fastbrotli.wasm is compiled from the following Rust crates (vendored and
-modified in rust/vendor; serde and serde_json from crates.io):
+modified in rust/vendor):
 
   brotli 5.0.0               BSD-3-Clause OR MIT
   brotli-decompressor 4.0.0  BSD-3-Clause OR MIT
   alloc-no-stdlib 2.0.3      BSD-3-Clause
   alloc-stdlib 0.2.1         BSD-3-Clause
+
+The compress() options parser (rust/options) follows the parsing and
+error messages of these crates, which brotli-wasm uses for its options:
+
   serde 1.0.136              MIT OR Apache-2.0
   serde_json 1.0.79          MIT OR Apache-2.0
 

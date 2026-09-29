@@ -59,8 +59,8 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/api.mjs && node test/stream-equiv.mjs && node test/decode-equiv.mjs --quick",
-    "test:full": "node test/api.mjs && node test/compress-equiv.mjs && node test/compress-stress.mjs && node test/decode-equiv.mjs && node test/stream-equiv.mjs"
+    "test": "node test/api.mjs && node test/options.mjs --quick && node test/tables.mjs && node test/stream-equiv.mjs && node test/decode-equiv.mjs --quick",
+    "test:full": "node test/api.mjs && node test/options.mjs && node test/tables.mjs && node test/compress-equiv.mjs && node test/compress-stress.mjs && node test/decode-equiv.mjs && node test/stream-equiv.mjs"
   },
   "devDependencies": {
     "brotli-wasm": "3.0.1",
