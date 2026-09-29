@@ -1,0 +1,176 @@
+<!--{"title":"fast-brotli-wasm: brotli compression in WebAssembly","description":"A drop-in replacement for brotli-wasm 3.0.1 that compresses about 3x faster at quality 11 and returns the same bytes. Race them in your browser."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>fast-brotli-wasm</h1>
+    <p class="lede">The same Rust brotli encoder as brotli-wasm, with its hot paths rewritten so that the compressed bytes come out identical. A new decoder handles <code>decompress()</code>, and the wasm file is a third smaller.</p>
+    <p class="swap"><code>"brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@{{fastversion:brotli}}"</code> in your package.json is the whole migration.</p>
+    <ul class="facts">
+      <li><strong>3x</strong>compress at quality 11, 51 KB to 536 KB</li>
+      <li><strong>13x</strong>compress of a 70-byte input</li>
+      <li><strong>2x</strong>decompress</li>
+      <li><strong>33-46%</strong>smaller wasm</li>
+    </ul>
+  </header>
+
+  <section class="lab" id="try" aria-labelledby="try-h">
+    <div class="lab-bar"><h2 id="try-h">Race brotli-wasm against fast-brotli-wasm</h2></div>
+    <div class="lab-body">
+      <div class="controls">
+        <label class="field"><span>Input</span>
+          <select id="input"></select>
+        </label>
+        <label class="field"><span>Quality <output id="q-out" for="q">11</output><small id="q-def"> (the default)</small></span>
+          <input type="range" id="q" min="0" max="11" step="1" value="11">
+        </label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="file" aria-label="Use your own file"></label>
+        <button class="btn" id="run" type="button">Run</button>
+      </div>
+      <label class="field text-field" id="text-field" hidden><span>Text to compress</span>
+        <textarea id="text" rows="3" spellcheck="false" aria-label="Text to compress"></textarea>
+      </label>
+
+      <h3 class="sub">Compress</h3>
+      <div id="lanes-c"></div>
+      <h3 class="sub">Decompress the result</h3>
+      <div id="lanes-d"></div>
+      <dl class="stats" id="stats" hidden>
+        <div><dt>Input</dt><dd id="st-in"></dd></div>
+        <div><dt>Compressed, both libraries</dt><dd id="st-out"></dd></div>
+        <div><dt>The browser's own gzip</dt><dd id="st-gz"></dd></div>
+      </dl>
+      <p class="note-line" id="info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Both libraries run in this tab, one after the other in short batches, and each keeps its best batch. Runs that take a few hundred milliseconds are repeated fewer times. The two compressed outputs are compared byte for byte, then the result is decompressed with both libraries and compared with the input. Files and text you enter stay in your browser.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Why quality 11 was the slow part</h2>
+    <p>Calling brotli-wasm's <code>compress()</code> without options means quality 11, the highest setting, so that is what a caller gets by default. <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>'s zlib polyfill takes the default. Qualities 10 and 11 work differently from the rest. They use a binary-tree match finder and then search for the cheapest way to write each block, in the manner of Zopfli: for every position they gather candidate matches, price each choice in bits with a cost model, and keep the cheapest path through the block. Quality 11 tries more start positions and longer matches than quality 10. Lower qualities skip most of that work, so the time per byte rises steeply near the top. The quality sweep below shows where.</p>
+    <p>Decompression has no such search. There is one correct output and the decoder only has to produce it, so it is already fast, and there is less to gain.</p>
+  </div>
+
+  <h2 style="margin-top: 56px">What runs where</h2>
+  <div class="layers">
+    <div class="layer you"><b>Your code</b><span><code>compress(bytes, { quality })</code>, <code>decompress(bytes)</code>, <code>CompressStream</code> and <code>DecompressStream</code>, exactly as before.</span></div>
+    <div class="layer kept"><b>JavaScript layer</b><span><code>core.mjs</code> does what wasm-bindgen's generated code does: it copies inputs the same way, throws strings from <code>compress</code> and <code>decompress</code> and Errors from the streams, and hands options to Rust as JSON.</span></div>
+    <div class="layer new"><b>Options parser</b><span>serde_json's parsing of brotli-wasm's options, written without serde. It accepts the same inputs and produces the same panic messages.</span></div>
+    <div class="layer new"><b>Encoder in Rust</b><span>The brotli 5.0.0 encoder that brotli-wasm is built from, vendored, with its hot paths rewritten and the same output.</span></div>
+    <div class="layer new"><b>One-shot decoder</b><span>A new decoder for <code>decompress()</code>. Streams, and any input it does not accept, go to the reference decoder, so errors come from the original code.</span></div>
+    <div class="layer new"><b>Wasm module</b><span><code>fastbrotli.wasm</code>, {{size:assets/impl/fastbrotli.wasm}}. The encoder's big lookup tables are stored packed and rebuilt at first use.</span></div>
+  </div>
+  <p class="key"><span><i class="k-kept"></i>behaves as brotli-wasm's own code does</span><span><i class="k-new"></i>new machinery</span></p>
+
+  <div class="prose">
+    <h2>One rule: the same bytes</h2>
+    <p>Making an optimizer faster usually means letting it decide differently. That is not allowed here. Code that hashes compressed output, keys a cache on it, or compares it with a fixture would notice a different, if valid, file. So the encoder keeps every decision it makes, including the tie-breaks between equal costs and the floating-point arithmetic that produces those costs. What changed is how the numbers are computed and how much of the work is skipped, and work is skipped only where the source shows it cannot change the result.</p>
+  </div>
+
+  <div class="beside">
+    <div class="prose">
+      <h2>Zopfli relaxation</h2>
+      <p>This is where quality 10 and 11 spend their time, and where most of the rewrite went. For each position the search keeps a few of the cheapest start positions and, from each, relaxes the cost of every later position a candidate match can reach. Several parts of that are now cheaper.</p>
+      <ul>
+        <li>The cost of a copy command depends on its insert length code and its copy length code. The rewrite builds one row of command costs per insert code and relaxes four copy lengths at a time, with the same float operations.</li>
+        <li>The original keeps eight start positions in a ring but only ever reads the first few. The new queue holds only those, and they are the same entries.</li>
+        <li>Probing the 16 recent distances depends only on a start position's distance cache, and start positions often share one. The hits are found once and replayed with each entry's own costs.</li>
+        <li>The second start position is skipped when its base cost is not lower and every command cost for its insert code is at least as high as the best one's. Float addition never makes a sum smaller, so none of its candidates could have won.</li>
+      </ul>
+    </div>
+    <aside><strong>Why keep the floats?</strong> Two costs that differ in the last bit can flip which path wins, and a different path is a different file. The rewrite reorders the work, never the arithmetic behind a single comparison.</aside>
+  </div>
+
+  <div class="prose">
+    <h3>Finding matches, splitting blocks, grouping histograms</h3>
+    <p>The match finder compares bytes 16 at a time with WebAssembly SIMD and visits candidates in the same order with the same checks. The static dictionary lookup does the same. Block splitting evaluates its per-symbol costs with SIMD, following the scalar loop's rule for which histogram wins. Histogram clustering tracks which bins are nonzero, computes the cost of a merged pair without building the merged histogram, and stops as soon as it knows the pair is not below the limit.</p>
+    <h3>Work that never needed doing</h3>
+    <p>The encoder's ring buffer is 8.3 MB at the default window, and at quality 10 and 11 the match finder allocates a forest of 32 MB. The original clears both. The rewrite does not, because every byte that is read has already been written, and it zeroes only the few bytes past the data that can be read early. When the caller passes the whole input, as <code>compress()</code> does, the forest is sized to the input instead of the window. That cost does not depend on the input size, so it is the likely reason the smallest inputs gain the most. Two pieces of code are compiled out because brotli-wasm only ever sets the quality: the per-metablock logging, and the stride and prior evaluators that only that logging runs.</p>
+  </div>
+
+  <section class="lab" id="sweep" aria-labelledby="sweep-h" style="margin-top: 40px">
+    <div class="lab-bar">
+      <h3 id="sweep-h">Quality against time and size</h3>
+      <span class="spacer"></span>
+      <label class="field inline"><span>Input</span>
+        <select id="sweep-input">
+          <option value="three.module.js">three.module.js, first 200 KB</option>
+          <option value="react-dom-client.js">react-dom, first 200 KB</option>
+          <option value="schemas.ts">schemas.ts, 100 KB</option>
+        </select>
+      </label>
+      <button class="btn" id="sweep-run" type="button">Run all twelve qualities</button>
+    </div>
+    <div class="lab-body">
+      <div id="sweep-out" class="qsweep"><p class="note-line" style="margin:0">Compresses the chosen input at every quality with both libraries and compares the outputs. Takes several seconds, most of it at qualities 10 and 11.</p></div>
+      <div class="verdict" id="sweep-verdict" hidden></div>
+      <div class="note-line sweep-notes" id="sweep-note"></div>
+    </div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <h2>What the sweep shows</h2>
+    <p>Look at two columns. On the default input, time stays within a small range up to quality 9 and then jumps at 10 and 11, where the Zopfli-style search starts. Size keeps shrinking past 9, but by a few percent, not by anything like the factor that time grows. That is the trade quality 11 makes, and it suits data that is compressed once and read many times. Try the other inputs: the numbers move, the shape should not.</p>
+    <p>The speedup is not confined to the top. Faster match finding and less clearing of memory help every quality, and the speedup column shows it. The recorded results below say the same: 2.7x at quality 1 and 2.4x at quality 5 on 1 MB, and about 3x at quality 11.</p>
+  </div>
+
+  <div class="prose">
+    <h2>A new decoder</h2>
+    <p><code>decompress()</code> runs a decoder written for wasm. It writes straight into one output buffer, and since that buffer holds the whole history, there is no ring buffer and no wrap handling. A 64-bit bit reader refills without branches from an 8-byte load. The tables it builds are fused: one lookup returns the symbol and its decoding information together, such as command lengths and distance parameters. Matches are copied in 16-byte SIMD chunks.</p>
+    <p>Its contract is narrow. It returns a result only for inputs on which the reference decoder returns the same bytes. Every error, and the few legal streams whose reference behaviour depends on its internal 4 KB chunking or that use large windows, go to the reference decoder, so error messages come from the original code path. It also mirrors the reference decoder's quirks, such as ignoring bytes after the last meta-block. Streams (<code>DecompressStream</code>) still use the reference decoder, which is why they gain 1.5x where <code>decompress()</code> gains about 2x.</p>
+  </div>
+
+  <div class="beside">
+    <div class="prose">
+      <h2>Faithful down to the odd calls</h2>
+      <p>brotli-wasm's behaviour includes a lot that is not compression. It reads options as JSON through serde_json, so a quality of <code>"5"</code> (a string) or <code>5.5</code> (a float) is not coerced but panics with serde's error message, printed to the console by a panic hook, and throws <code>RuntimeError: unreachable</code>. The hook prints only the first two panics of an instance. Failed compressions and decompressions throw strings, while the stream classes throw Errors.</p>
+      <p>fast-brotli-wasm has no serde. Its options parser and its JavaScript layer reproduce those results, including the float formatting inside the message. The panel below runs a set of these calls through both libraries and compares what comes back and what reaches the console.</p>
+    </div>
+    <aside><strong>Why bother?</strong> A replacement that is only right for well-formed calls fails in whatever code sits between your app and brotli, far from where you installed it.</aside>
+  </div>
+
+  <section class="lab" id="odd" aria-labelledby="odd-h">
+    <div class="lab-bar">
+      <h3 id="odd-h">Odd calls, same answers</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="odd-run" type="button">Run the calls</button>
+    </div>
+    <div class="lab-body">
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="odd-table">
+          <thead><tr><th scope="col">Call</th><th scope="col">brotli-wasm</th><th scope="col">fast-brotli-wasm</th><th scope="col">Match</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="verdict" id="odd-verdict"></div>
+    </div>
+  </section>
+
+  <div class="prose">
+    <h2>Why the wasm is smaller</h2>
+    <p>{{size:assets/impl/fastbrotli.wasm}} against {{size:assets/impl/brotli_wasm_bg.wasm}}, a third smaller as it sits on disk and roughly 40 to 46 percent smaller after brotli or gzip. Three changes account for it.</p>
+    <ul>
+      <li>No serde and no float formatting code. Options are parsed by a small parser built for size, and the one place that needs a formatted float leaves it to JavaScript.</li>
+      <li>No metablock logging or its evaluators, as above.</li>
+      <li>The encoder's four big lookup tables, 518 KB in all, are not stored. They are kept packed in 115 KB and rebuilt the first time an encoder is created. <code>test/tables.mjs</code> checks the rebuilt tables against brotli-wasm's own, entry by entry. The rebuild is part of first-call time: in Node, <code>require()</code> plus the first <code>compress()</code> takes 12.7 ms against 22.8 ms for brotli-wasm.</li>
+    </ul>
+  </div>
+
+  <section class="lab" id="size" aria-labelledby="size-h" style="margin-top: 32px">
+    <div class="lab-bar"><h3 id="size-h">What a page downloads</h3></div>
+    <div class="lab-body">
+      <div id="size-out" class="meter" aria-live="polite"></div>
+      <p class="note-line">The wasm file plus the JavaScript that loads it, as measured for this site: raw, gzip level 9, and brotli. Both bars in a group share one scale.</p>
+    </div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <h2>Where the speedup stops</h2>
+    <p>At quality 11 the gain settles near 3x from a few tens of kilobytes upward. A native x86 build of the same encoder is no faster than the wasm, so the remaining time is the algorithm itself, not the platform. Faster versions exist, such as reordering relaxations across queue entries, but they can change tie-breaks and so the output, which this package does not allow. Other attempts gained nothing: probing the distance cache out of line, 16-byte queue entries, prefix tables for the dictionary, and prefetching. <a href="../method/#dead-ends">The dead ends are written down</a>, and <a href="../pako/">fast-pako's deflate</a> stops near 2x for the same reason.</p>
+    <h2>What is different</h2>
+    <p>The wasm is built with SIMD (<code>simd128</code>), so it needs an engine that supports it; current Chrome, Firefox and Safari do. In browsers it is fetched from next to the JavaScript, as brotli-wasm's is. In Node, <code>require()</code> is synchronous and needs Node 20.19 or later. Stack traces inside panic reports differ from brotli-wasm's, since the frames are different code; the messages are the same.</p>
+    <p>The claim that the output is identical rests on tests rather than on the source alone. The compressor was compared with brotli-wasm at qualities 0 to 11 on 4,892 and 18,116 files from the pnpm store, the decoder in 290,446 checks that include corrupt streams and their errors, and the options parser in 25,655. <a href="../method/">How we check</a> lists them all.</p>
+  </div>
+
+  <h2 id="results" style="margin-top: 56px">Recorded results</h2>
+  <p class="section-lede" style="margin-bottom: 20px">Measured on a Ryzen 7 7800X3D with Node 24.16, one call per row: brotli-wasm's time, fast-brotli-wasm's time, and the ratio. Best of three rounds in fresh processes.</p>
+  {{results:brotli}}
+</div>

@@ -2,7 +2,7 @@
   "name": "fast-packages",
   "private": true,
   "type": "module",
-  "description": "Faster drop-in replacements for the packages Nodepod uses, published as @r1ck404/fast-<original name>: pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm, @noble/hashes. Workspace with shared tests, benchmarks and verification.",
+  "description": "Faster drop-in replacements, made for Nodepod and usable anywhere the originals are, published as @r1ck404/fast-<original name>: pako, acorn, acorn-jsx, esbuild-wasm, es-module-lexer, brotli-wasm, @noble/hashes. Workspace with shared tests, benchmarks and verification.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -20,7 +20,9 @@
     "build:wasm": "npm run build -w @r1ck404/fast-pako -w @r1ck404/fast-es-module-lexer -w @r1ck404/fast-brotli-wasm -w @r1ck404/fast-noble-hashes",
     "test": "node tools/ts-build.mjs --check && tsc -p tsconfig.json && npm test --workspaces --if-present",
     "test:full": "sh verify/suites.sh",
-    "verify": "sh verify/all.sh"
+    "verify": "sh verify/all.sh",
+    "site": "node site/build.mjs",
+    "site:dev": "node site/build.mjs --serve"
   },
   "devDependencies": {
     "acorn": "8.18.0",

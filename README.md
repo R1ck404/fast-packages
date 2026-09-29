@@ -2,12 +2,22 @@
 
 [![CI](https://github.com/R1ck404/fast-packages/actions/workflows/ci.yml/badge.svg)](https://github.com/R1ck404/fast-packages/actions/workflows/ci.yml)
 
-Faster drop-in replacements for the packages Nodepod uses, published as
-`@r1ck404/fast-<name of the package it replaces>` with the **same version**
-as the original. Each is verified to produce **identical results**
-(byte-identical output, identical ASTs, errors and callbacks) against the
-original on large real-world corpora, and none ships a copy of the original
-as a fallback (see [Size](#size)). Nothing here is wired into Nodepod yet.
+Faster drop-in replacements for pako, acorn, acorn-jsx, esbuild-wasm,
+es-module-lexer, brotli-wasm and @noble/hashes, for Node and for the browser,
+published as `@r1ck404/fast-<name of the package it replaces>` with the
+**same major and minor version** as the original. Each is verified to produce
+**identical results** (byte-identical output, identical ASTs, errors and
+callbacks) against the original on large real-world corpora, and none ships a
+copy of the original as a fallback (see [Size](#size)).
+
+They were made to speed up [Nodepod](https://r1ck404.github.io/Nodepod/), a
+Node.js runtime that runs in the browser, but nothing about them is specific to
+it: they keep the originals' APIs, so any project that depends on the originals
+can use them. Nothing here is wired into Nodepod yet.
+
+Documentation, explanations of how each one got faster, and live comparisons
+against the originals that run in your browser:
+<https://r1ck404.github.io/fast-packages/>.
 
 | package | npm | replaces | typical speedup | approach |
 |---|---|---|---|---|
@@ -137,8 +147,8 @@ on first use), on top of the faster tokenizer.
 
 ### fast-brotli-wasm vs brotli-wasm 3.0.1
 
-`compress()` without options uses quality 11, which is what Nodepod's zlib
-polyfill calls.
+`compress()` without options uses quality 11, the highest setting, so it is
+what a caller gets by default (it is what Nodepod's zlib polyfill calls).
 
 | call | input | brotli-wasm | fast-brotli-wasm | speedup |
 |---|---|---|---|---|
@@ -156,8 +166,9 @@ polyfill calls.
 
 ### fast-noble-hashes vs @noble/hashes 1.8.0
 
-Nodepod's crypto polyfill uses the one-shot hashers for lockfile integrity
-and `pbkdf2Sync`, and `create()`/`update()`/`digest()` for `createHash`.
+The calls are the ones a crypto polyfill makes (Nodepod's does): the one-shot
+hashers for lockfile integrity and `pbkdf2Sync`, and
+`create()`/`update()`/`digest()` for `createHash`.
 The Chromium column is the same call in headless Chromium.
 
 | call | input | noble | fast-noble-hashes | speedup | speedup in Chromium |
@@ -184,7 +195,8 @@ The Chromium column is the same call in headless Chromium.
 ### fast-esbuild-wasm vs esbuild-wasm 0.28.2
 
 In the browser (headless Chromium, the browser build in its default worker
-mode, the way Nodepod runs it; the page timer resolves 0.1 ms):
+mode, which is how esbuild-wasm runs in a page; the page timer resolves
+0.1 ms):
 
 | call | input | esbuild-wasm | fast-esbuild-wasm | speedup |
 |---|---|---|---|---|
@@ -256,8 +268,8 @@ paid back after a few KB of input.
 
 ## Size
 
-What an app ships: the browser bundle of the imports Nodepod uses (esbuild,
-minified; min / gzip / brotli), plus the wasm files fetched at run time for
+What an app ships: the browser bundle of the imports the benchmarks use, which
+are the ones Nodepod uses (esbuild, minified; min / gzip / brotli), plus the wasm files fetched at run time for
 brotli-wasm and esbuild-wasm; and what npm downloads and installs.
 `node bench/size.mjs [--pack]` measures it. None of the packages ships a copy
 of the original any more.
@@ -378,7 +390,23 @@ bundle for the browser.
     bench/                  benchmark suites + harness (interleave.mjs, compare.mjs, corpus.mjs)
     verify/                 independent verification, pack/install smoke test, full-suite runner
     results/                benchmark tables
+    site/                   the GitHub Pages site: live demos, explanations (built by site/build.mjs)
     corpus/                 npm tarballs for the pako bench (gitignored; `npm pack` into it)
+
+## Site
+
+The documentation site (how each package got faster, and live in-browser
+comparisons against the originals) is built from `site/` and deployed to
+GitHub Pages by `.github/workflows/pages.yml` on every push to main. Its
+result tables are read from this README, so the numbers cannot drift.
+
+    npm run site            # build into site/dist
+    npm run site:dev        # build, then serve on http://localhost:4173
+    node site/build.mjs --pages   # rebuild only pages, styles and scripts (after a first full build)
+
+Each demo bundles the original and the fast package twice through the same
+adapter (`site/adapters/`), so both sides make identical calls. Enable Pages once
+under Settings > Pages > Source: GitHub Actions.
 
 ## Development
 

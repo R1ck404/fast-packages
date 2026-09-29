@@ -1,0 +1,206 @@
+<!--{"title":"fast-noble-hashes: SHA-2, MD5, PBKDF2 and scrypt in WebAssembly","description":"A drop-in replacement for @noble/hashes 1.8.0 that hashes SHA-512 about 5x faster and returns the same digests. Race it against noble in your browser."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>fast-noble-hashes</h1>
+    <p class="lede">noble's own SHA-2, SHA-1, MD5, PBKDF2 and scrypt code, with the loops that do the work running in WebAssembly. Digests, errors, callbacks and instance state stay noble's.</p>
+    <p class="swap"><code>"@noble/hashes": "npm:@r1ck404/fast-noble-hashes@{{fastversion:noble-hashes}}"</code> in your package.json is the whole migration.</p>
+    <ul class="facts">
+      <li><strong>5-6x</strong>sha512 and sha384</li>
+      <li><strong>5-8x</strong>md5</li>
+      <li><strong>3-8x</strong>pbkdf2</li>
+      <li><strong>2.3x</strong>scrypt</li>
+      <li><strong>1.7-2.3x</strong>sha256</li>
+    </ul>
+  </header>
+
+  <section class="lab" id="try" aria-labelledby="try-h">
+    <div class="lab-bar"><h2 id="try-h">Race noble against fast-noble-hashes</h2></div>
+    <div class="lab-body">
+      <div class="controls">
+        <label class="field"><span>Function</span>
+          <select id="alg">
+            <optgroup label="Hashes">
+              <option value="sha256">sha256</option>
+              <option value="sha384">sha384</option>
+              <option value="sha512">sha512</option>
+              <option value="sha1">sha1</option>
+              <option value="md5">md5</option>
+            </optgroup>
+            <optgroup label="Keyed hash">
+              <option value="hmac-sha256">hmac with sha256</option>
+            </optgroup>
+            <optgroup label="Key derivation">
+              <option value="pbkdf2-sha256">pbkdf2 with sha256</option>
+              <option value="pbkdf2-sha512">pbkdf2 with sha512</option>
+              <option value="scrypt">scrypt</option>
+            </optgroup>
+          </select>
+        </label>
+        <label class="field" id="param-field" hidden><span id="param-label">Iterations</span>
+          <select id="param"></select>
+        </label>
+        <label class="field"><span>Input</span>
+          <select id="input"></select>
+        </label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="file" aria-label="Use your own file"></label>
+        <button class="btn" id="run" type="button">Run</button>
+      </div>
+      <div class="controls" id="text-row" style="margin-top: -6px">
+        <label class="field text-field" id="text-field"><span>Text to hash, or the password for a key derivation</span>
+          <input type="text" id="text" value="npm lockfile integrity is a SHA-512 of the tarball" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+      <div id="lanes"></div>
+      <div class="digest">
+        <span class="digest-label" id="digest-label">Digest, hex</span>
+        <code class="digest-hex" id="digest" aria-labelledby="digest-label"></code>
+      </div>
+      <p class="note-line" id="info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Both libraries run in this tab, one after the other in short batches of the same call, and each keeps its best batch. Every output is compared byte for byte. Where your browser's WebCrypto has the function (the SHA-2 family, sha1, HMAC and PBKDF2, not md5 or scrypt), its answer is compared too. It only checks, because WebCrypto returns promises and cannot take part in a timing of synchronous calls. Text and files you choose stay in your browser.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Why hashing shows up in an install</h2>
+    <p>An npm lockfile records the integrity of every tarball as a SHA-512, so anything that installs or verifies packages hashes every tarball. A crypto polyfill, such as the one <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a> offers to the code it runs, needs <code>createHash</code>, <code>pbkdf2Sync</code> and <code>scrypt</code> as well. @noble/hashes, a JavaScript implementation with no dependencies, can provide all of those. For the 4.4 MB typescript tarball noble takes 30.5 ms to compute the SHA-512 in Node, and fast-noble-hashes takes 5.7 ms.</p>
+    <p>A hash function is a compression function run over the message one block at a time: 64 bytes at a time for SHA-256, SHA-1 and MD5, 128 for SHA-512. Each block goes through 64 or 80 rounds of rotates, xors and additions. That function is the part that was rewritten. Everything around it, meaning the classes, the buffering, the padding rules and the errors, is noble's.</p>
+    <h2>Why SHA-512 gains the most</h2>
+    <p>JavaScript has no 64-bit integer that an engine handles quickly. Its bitwise operators work on 32 bits, and noble's <code>_u64.js</code> says in its header that <code>BigUint64Array</code> is too slow, so it stores every 64-bit word as two 32-bit numbers, a high half and a low half. A rotate becomes shifts and ors across the pair, and an addition has to recover the carry out of the low half with a division. noble's own comment in <code>sha2.js</code> says the same thing: SHA-512 is slower than SHA-256 in JavaScript because 64-bit operations are slow.</p>
+    <p>WebAssembly has 64-bit rotate and add as single instructions. The SHA-512 kernel is written the way the algorithm reads, on <code>i64</code> values, and it runs about 5 times as fast as noble's pairs. That is why the headline numbers are for SHA-512 and SHA-384, which are the same code with a different start value and a shorter output.</p>
+  </div>
+
+  <section class="lab" id="sweep" aria-labelledby="sweep-h" style="margin-top: 40px">
+    <div class="lab-bar">
+      <h3 id="sweep-h">Message length against speedup</h3>
+      <span class="spacer"></span>
+      <label class="field" style="flex-direction: row; align-items: center; gap: 8px"><span>Function</span>
+        <select id="sweep-alg">
+          <option value="sha256">sha256</option>
+          <option value="sha512">sha512</option>
+          <option value="sha1">sha1</option>
+          <option value="md5">md5</option>
+        </select>
+      </label>
+      <button class="btn" id="sweep-run" type="button">Run nine lengths</button>
+    </div>
+    <div class="lab-body">
+      <div id="sweep-out" class="sweep"><p class="note-line" style="margin:0">Hashes byte arrays from 16 bytes to 1 MB with both libraries. Each row is scaled to noble's time, so a shorter cobalt bar is a faster fast-noble-hashes. Takes a few seconds.</p></div>
+    </div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <h2>Why SHA-256 gains least, and short inputs gain more</h2>
+    <p>SHA-256 is the case where JavaScript is best off. Its words are 32 bits wide, which is what the engine's integer operations are, and the JIT compiles 32-bit rotates well. The WebAssembly version is scalar as well, so in the recorded results it gains 1.7-1.9x in Node and about 2.3x in Chromium. Engines differ here more than for the other hashes, because the JIT is what SHA-256 is competing with, so the sweep above shows what your browser does today. More work on the kernel did not change the recorded figures. A precomputed message schedule ran about 30% slower than keeping the schedule in locals, and <code>wasm-opt -O3</code> changed nothing. <a href="../method/#dead-ends">The dead ends are written down</a>.</p>
+    <p>Short messages gain more because less happens around them. noble's one-shot <code>sha256(message)</code> creates a hash object, with its buffer, on every call. The fast one never creates an instance, and it encodes a string straight into WebAssembly memory. So a 56-character string is 4.0x faster for SHA-256 and 7.0x for MD5 in Node, while a megabyte of SHA-256 is 1.7x. Hashing through <code>.create().update(...).digest()</code> gains less, 1.7-2.3x on a short string, because noble's constructor allocates a buffer for each instance and that stays.</p>
+  </div>
+
+  <h2 style="margin-top: 56px">What runs where</h2>
+  <div class="layers">
+    <div class="layer you"><b>Your code</b><span><code>sha512(bytes)</code>, <code>createHash</code> in a polyfill, <code>pbkdf2(...)</code>, <code>scrypt(...)</code>, exactly as before.</span></div>
+    <div class="layer kept"><b>noble's modules</b><span>Every file is noble's, byte for byte, except five: <code>_md.js</code>, <code>sha2.js</code>, <code>legacy.js</code>, <code>pbkdf2.js</code> and <code>scrypt.js</code>. Those are noble's files with find-and-replace patches. HMAC, HKDF, SHA-3, BLAKE and the rest are untouched.</span></div>
+    <div class="layer new"><b>Glue</b><span><code>_fast.js</code> moves the state words between noble's instance fields and WebAssembly memory, encodes strings into it, and slices PBKDF2 and scrypt so progress callbacks and <code>asyncTick</code> keep working.</span></div>
+    <div class="layer new"><b>WebAssembly</b><span>One module per hash family, built on first use: SHA-256, SHA-512, SHA-1, MD5. PBKDF2's iteration loop is part of each. scrypt has a module of its own, instantiated afresh for every call.</span></div>
+    <div class="layer new"><b>Templates</b><span>The modules ship as templates, a few hundred bytes of printable text each, that <code>expand()</code> turns into unrolled code when a family is first used.</span></div>
+  </div>
+  <p class="key"><span><i class="k-kept"></i>noble's code</span><span><i class="k-new"></i>new machinery</span></p>
+
+  <div class="prose">
+    <h2>Templates that expand on first use</h2>
+    <p>Unrolled, the 64 rounds of SHA-256 are 8.8 KB of WebAssembly and the 80 rounds of SHA-512 are 11.3 KB. Shipping that costs bytes. Rolling the rounds into a loop costs speed: it ran at 0.79-0.97 of the unrolled speed. Templates avoid both. Each family ships a description of its rounds, a few hundred bytes long, with commands for the parts that change from round to round, and <code>expand()</code> in <code>_fast.js</code> writes out the full module the first time the family is used. The module is compiled synchronously, in the same call.</p>
+    <p>A build-time assembler, <code>wasm/asm.mjs</code>, writes the templates, and this is how SHA-256's is written in <code>wasm/kernels.mjs</code>:</p>
+<pre><code>export const SHA256 = A.cat(
+  A.func([[24, T.i32], [1, T.v128]], A.loop, loadBE32(27), load32(8),
+    repeat(64, when(16, SCHED256), ROUND256), store32(8), next(64)),
+  OUT_BE,
+  W_BE,
+);</code></pre>
+    <p>The commands are few:</p>
+    <ul>
+      <li><code>repeat</code> writes a body out n times, with the round number j available inside it. That is the 64 rounds of SHA-256 and the 80 of SHA-512.</li>
+      <li><code>when</code> keeps a body only from a given round. The message schedule starts at round 16, and SHA-1 switches its round function every 20 rounds.</li>
+      <li>A rotating local: the state variables a to h move one place each round, so a round names them relative to j and <code>expand()</code> picks the local.</li>
+      <li>Memory offsets that grow with j, such as the load of round constant j, and the family's own constants, such as its block length.</li>
+    </ul>
+  </div>
+
+  <section class="lab" id="expand" aria-labelledby="expand-h" style="margin-top: 32px">
+    <div class="lab-bar">
+      <h3 id="expand-h">What ships and what it becomes</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="tpl-run" type="button">Expand and time each family</button>
+    </div>
+    <div class="lab-body">
+      <p class="tpl-key"><span><i class="f"></i>shipped in the JavaScript</span><span><i></i>built in memory on first use</span></p>
+      <div class="meter" id="tpl-bars" aria-label="Sizes in bytes of the shipped templates and the modules they expand to"><p class="note-line" style="margin:0">Loading the package's templates.</p></div>
+      <p class="tpl-sum" id="tpl-sum"></p>
+      <div class="table-wrap" style="margin-top: 22px">
+        <table class="results" id="tpl-table">
+          <thead><tr><th scope="col">First use of</th><th scope="col">Expand</th><th scope="col">Compile</th><th scope="col">Instantiate</th><th scope="col">Round constants</th><th scope="col">One first use</th></tr></thead>
+          <tbody><tr><td colspan="6" style="color: var(--ink-3)">Press the button to expand, compile and instantiate each family in this tab.</td></tr></tbody>
+        </table>
+      </div>
+      <p class="note-line" id="tpl-note"></p>
+    </div>
+    <div class="lab-foot"><strong>What this runs.</strong> The page loads the package's own <code>_fast.js</code> and performs the steps its first use does: expand the template, compile the module, instantiate it, and for SHA-2 compute the round constants, which are exact integer cube roots of the first primes. The sizes are of the real templates and the real expansions. The demos above use the bundled build, which does the same work when it first sees a family.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <p>The template travels as text that bundlers and minifiers leave alone: printable ASCII without <code>"</code> and backslash. The most frequent opcodes and immediates, bytes 0x00-0x54 and 0xfa-0xff, take one character, and the other bytes take two. That compresses almost like the binary does. Base64 came out about 30% larger after compression, and a table of the most frequent bytes was larger even with the table counted.</p>
+    <p>Each family's template is referenced only by the module that defines its hashers, so a bundle carries only the families its imports reach. Importing <code>sha256</code> alone brings the common template and SHA-256's, and nothing for SHA-512 or MD5. Once used, a family keeps its instance, 64 KiB of memory that is wiped after every call.</p>
+    <p>Expanding is not free. In Node, the first <code>sha256()</code> call takes 1.2 ms with fast-noble-hashes and 0.3 ms with noble. The table above breaks the first use of each family into its steps in your browser. Each step takes on the order of 0.1 ms.</p>
+
+    <h2>State stays noble's</h2>
+    <p>Code that inspects or clones a hash object keeps working. noble's classes keep their state in fields (<code>A</code> to <code>H</code>, <code>buffer</code>, <code>pos</code>, <code>length</code>), and after every call those fields hold what noble's JavaScript would have left in them. To get there, <code>update</code> and <code>digestInto</code> copy the state words into WebAssembly memory, run the compression, copy them back, and write the buffer the way noble's loop does. Each call ends by zeroing the scratch memory, so WebAssembly memory holds no message bytes and no state between calls.</p>
+    <p>If an object could behave differently from noble's, noble's code runs instead. That covers a subclass, which may override <code>process()</code>, and an instance whose <code>blockLen</code>, <code>outputLen</code>, <code>padOffset</code> or <code>isLE</code> was changed. The result is the same and it is slower.</p>
+    <p>Type anything below. Both libraries hash it as you type, and the digests are compared with each other and, for SHA-2, with the browser's WebCrypto.</p>
+  </div>
+
+  <section class="lab" id="live-lab" aria-labelledby="live-h" style="margin-top: 24px">
+    <div class="lab-bar"><h3 id="live-h">Digests as you type</h3></div>
+    <div class="lab-body">
+      <div class="live-tools">
+        <label class="field"><span>Text</span>
+          <input type="text" id="live-in" value="hello, nodepod" autocomplete="off" spellcheck="false">
+        </label>
+        <span class="note-line" id="live-bytes" style="margin: 0 0 8px"></span>
+      </div>
+      <div class="live" id="live"></div>
+    </div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <h2>PBKDF2 and scrypt</h2>
+    <p>PBKDF2 runs HMAC once per iteration, and every HMAC is two passes of the hash. noble's loop clones an HMAC object and calls <code>update</code> and <code>digestInto</code> on it for each iteration, then xors the result into the total. In fast-noble-hashes, iterations 2 to c run inside a single WebAssembly function that keeps HMAC's inner and outer states in memory. JavaScript is not called between iterations. Long runs are cut into slices, because the counter in WebAssembly is 32 bits and so that the async version can yield to the event loop as noble's does. In the recorded results that comes to 3.4x for SHA-256 and about 7x for SHA-512 in Node, and 4x and 8x in Chromium: figures that combine the faster hash with the JavaScript work per iteration that no longer happens.</p>
+    <p>scrypt's cost is ROMix, which fills N blocks of data and then reads them back in an order that depends on the data, running salsa20/8 at each step. The module is 694 bytes. It keeps the 16 words of a block in four SIMD registers, runs each quarter-round on four columns at once with vector adds, shifts and xors, and rotates lanes and swaps two registers so that the row rounds run the same code as the column rounds. The glue permutes the words on the way in and out so they sit in the order the vector rounds need. Each <code>scrypt()</code> call gets a fresh instance whose memory is grown to fit its N, r and p and wiped at the end, so a large N leaves no large memory behind. scrypt runs 2.3x as fast.</p>
+
+    <h2>How we know the results are noble's</h2>
+    <p>Most of the package is noble's own files, and the design keeps it that way. The five patched modules, in ESM and CommonJS, are noble's files plus the find-and-replace pairs in <code>tools/patches.mjs</code>. A pair must match exactly once or the build fails. <code>test/files.mjs</code> checks that every shipped file is noble's plus those patches and nothing else, and that the rest are noble's byte for byte.</p>
+    <p>The differential suite, <code>test/diff.mjs</code>, ran 113,334 checks for each of ESM and CommonJS, and 113,120 with a second seed. It compares digests and every instance field after every call, against noble and against <code>node:crypto</code>, and it covers errors, HMAC, HKDF, PBKDF2 and scrypt in sync and async form with progress callbacks, subclasses, tampered instances and the public surface. A separate set of checks, written apart from the package's tests, ran 17,308 checks of the calls a real consumer, <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>, makes, such as lockfile integrity of npm tarballs, and found no difference. The same differential check runs in Chromium, Firefox and WebKit, on the main thread and in a worker.</p>
+    <p>Tests can also be too weak, so <code>npm run mutate</code> plants deliberate bugs in the glue, in <code>_md.js</code> and in the WebAssembly, and the suite must fail on each one. It catches all 41.</p>
+  </div>
+
+  <div class="prose">
+    <h2>What is different</h2>
+    <p>The package needs WebAssembly with SIMD: Node 16.4 or later, Chrome and Edge 91, Firefox 89, Safari 16.4. Without WebAssembly, the SHA-2, SHA-1 and MD5 hashers, and HMAC, HKDF and PBKDF2 over them, and scrypt, throw <code>Error("fast-noble-hashes needs WebAssembly")</code> when first used, though noble's input errors still come first. With WebAssembly but a content security policy that blocks compiling it, or without SIMD, the engine's <code>CompileError</code> is thrown instead. SHA-3, BLAKE, RIPEMD-160, Argon2 and the rest are noble's code and run at noble's speed.</p>
+    <p>scrypt's memory is WebAssembly memory. <code>128 * r * (N + p + 1)</code> bytes plus 64 KiB must fit in 4 GiB, which only a raised <code>maxmem</code> can reach, since the default limit is 1 GiB. Past that, or when the memory cannot be allocated, scrypt throws the <code>RangeError</code> of <code>Memory.grow()</code>. The module-private constant tables and scratch arrays are gone, along with the salsa20 functions. None of them was exported, and the exports of every module are noble's. <code>pbkdf2Async</code> and <code>scryptAsync</code> yield every <code>asyncTick</code> milliseconds like noble's, but slice the work differently, so the number of event-loop turns differs. The <code>onProgress</code> values and their order are noble's.</p>
+    <p>Size is mixed. The bundle these demos load is {{size:assets/impl/noble-hashes.fast.js}} against {{size:assets/impl/noble-hashes.orig.js}} for noble. The full set that <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a> imports (scrypt, sha384, sha512, sha256, sha1, md5, hmac, pbkdf2) comes to 6,197 bytes brotli against 6,237. A single hash import is another matter, because the glue and the common template come with it. For <code>sha256</code> alone, they add about 1.9 KB brotli where noble's SHA-256 function and its constants are about 0.6 KB.</p>
+  </div>
+
+  <div class="table-wrap" style="max-width: 760px; margin-top: 8px">
+    <table class="compare">
+      <thead><tr><th scope="col">Import, minified</th><th scope="col">@noble/hashes</th><th scope="col">fast-noble-hashes</th></tr></thead>
+      <tbody>
+        <tr><td><code>sha256</code></td><td>4,705 bytes, 2,010 brotli</td><td>7,574 bytes, 3,275 brotli</td></tr>
+        <tr><td><code>sha512</code></td><td>7,535 bytes, 3,094 brotli</td><td>7,994 bytes, 3,438 brotli</td></tr>
+        <tr><td><code>md5</code></td><td>3,767 bytes, 1,617 brotli</td><td>7,196 bytes, 3,135 brotli</td></tr>
+        <tr><td>All eight imports together (the set <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a> uses)</td><td>17,311 bytes, 6,237 brotli</td><td>16,859 bytes, 6,197 brotli</td></tr>
+        <tr><td>npm package, packed and unpacked</td><td>155.3 KB, 1.15 MB</td><td>74.9 KB, 469.8 KB</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note" style="margin-bottom: 8px">Bundle sizes are from <code>bench/size.mjs</code>, built with esbuild. Where the fast package is larger, the glue outweighs noble's short SHA-256 and MD5 functions, and shrinking it further cost more speed than the project allows. <a href="../method/#dead-ends">The attempts are written down</a>. <a href="../pako/">fast-pako</a> has the same kind of trade for a different reason: compiled WebAssembly compresses worse than JavaScript.</p>
+
+  <h2 id="results" style="margin-top: 56px">Recorded results</h2>
+  <p class="section-lede" style="margin-bottom: 20px">Measured on a Ryzen 7 7800X3D with Node 24.16 and Chromium 149. The two implementations alternate in fresh processes, and each row keeps the best of three rounds.</p>
+  {{results:noble}}
+</div>

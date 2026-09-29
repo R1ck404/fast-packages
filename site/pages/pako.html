@@ -1,0 +1,117 @@
+<!--{"title":"fast-pako: gzip and deflate in WebAssembly","description":"A drop-in replacement for pako 2.1.0 that ungzips 5-6x faster and produces the same bytes. Try it against pako in your browser."}-->
+<div class="wrap">
+  <header class="doc-head">
+    <h1>fast-pako</h1>
+    <p class="lede">pako's zlib, ported to Rust and compiled to WebAssembly. It returns the same bytes, the same errors and the same streaming callbacks, in a fraction of the time.</p>
+    <p class="swap"><code>"pako": "npm:@r1ck404/fast-pako@{{fastversion:pako}}"</code> in your package.json is the whole migration.</p>
+    <ul class="facts">
+      <li><strong>5-6x</strong>ungzip of npm tarballs</li>
+      <li><strong>4x</strong>inflate</li>
+      <li><strong>~2x</strong>deflate at levels 6 and 9</li>
+      <li><strong>9.5x</strong>smaller npm tarball</li>
+    </ul>
+  </header>
+
+  <section class="lab" id="try" aria-labelledby="try-h">
+    <div class="lab-bar"><h2 id="try-h">Race pako against fast-pako</h2></div>
+    <div class="lab-body">
+      <div class="controls">
+        <label class="field"><span>Operation</span>
+          <select id="op">
+            <option value="ungzip">ungzip (unpack a .gz)</option>
+            <option value="inflate">inflate (zlib stream)</option>
+            <option value="gzip">gzip, level 6</option>
+            <option value="deflate1">deflate, level 1</option>
+            <option value="deflate6">deflate, level 6 (default)</option>
+            <option value="deflate9">deflate, level 9</option>
+          </select>
+        </label>
+        <label class="field"><span>Input</span>
+          <select id="input"></select>
+        </label>
+        <label class="btn quiet file-btn">Use your own file<input type="file" id="file" aria-label="Use your own file"></label>
+        <button class="btn" id="run" type="button">Run</button>
+      </div>
+      <div id="lanes"></div>
+      <p class="note-line" id="info"></p>
+    </div>
+    <div class="lab-foot"><strong>How this is measured.</strong> Both libraries run in this tab, one after the other in short batches, and each keeps its best batch. Decompression inputs are made from the chosen file with pako itself. Files you choose stay in your browser.</div>
+  </section>
+
+  <div class="prose" style="margin-top: 72px">
+    <h2 style="margin-top: 0">Why unzipping was the slow part</h2>
+    <p>npm tarballs are gzip files, so anything that installs, inspects or serves packages has to unpack them, and any app that handles <code>.gz</code> downloads or writes archives does the same work in one direction or the other. <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>, which installs npm packages inside a browser tab, does it for every dependency. pako is a widely used JavaScript implementation of zlib, and gzip decoding is where most of a big install's decompression time goes: a 4.4 MB tarball takes pako 100 ms and fast-pako 17 ms.</p>
+    <p>Inflate is a tight loop. It refills a bit buffer, looks up a Huffman code in a table, and either writes a byte or copies a run from earlier output. A JavaScript engine runs that loop well, but it has to guard its type guesses, and pako keeps its bit buffer in a JavaScript number, which follows JavaScript's rules for integers. WebAssembly is typed ahead of time, so there are no guesses to guard, and it gives direct access to 64-bit integers and SIMD.</p>
+  </div>
+
+  <h2 style="margin-top: 56px">What runs where</h2>
+  <div class="layers">
+    <div class="layer you"><b>Your code</b><span><code>pako.ungzip(bytes)</code>, exactly as before.</span></div>
+    <div class="layer kept"><b>JavaScript layer</b><span><code>index.mjs</code> reproduces pako's option handling, chunking, <code>onData</code> and <code>onEnd</code>, string output and error messages.</span></div>
+    <div class="layer new"><b>Engine in Rust</b><span>pako's zlib ported function by function: inflate, deflate, trees, <code>crc32</code>, <code>adler32</code>. Compiled to WebAssembly.</span></div>
+    <div class="layer new"><b>Embedded module</b><span>The wasm ships inside the JavaScript as compressed text and is unpacked on first use by a 2 KB wasm decoder, about half a millisecond.</span></div>
+  </div>
+  <p class="key"><span><i class="k-kept"></i>behaves as pako's own code does</span><span><i class="k-new"></i>new machinery</span></p>
+
+  <div class="prose">
+    <h2>What makes the inflate loop fast</h2>
+    <p>The state machine around the loop is pako's, case for case, so everything you can observe from outside stays the same. The loop itself is new, in the style of libdeflate: one decode table per code, a 64-bit bit buffer that refills without branching, the next table entry loaded ahead of time, and matches copied 16 bytes at a time.</p>
+    <p>The two checksums that come with a stream get the same care. <code>adler32</code> uses SIMD, adding up 16 bytes per step. <code>crc32</code> has a table-free path for big buffers: the CRC-32 polynomial divides a sparse polynomial with only five terms, so a long message can be reduced with plain XORs of 64-bit words instead of table lookups. Small buffers use slice-by-8 tables. That is where the 4x on plain inflate comes from, and why tarballs, which pay for the checksum too, gain a little more.</p>
+    <h2>Why tiny inputs gain even more</h2>
+    <p>Compressing 75 bytes is 20 times faster, and that has little to do with the engine. pako allocates its window and hash tables anew for every call, and for a few hundred bytes that allocation is most of the time. fast-pako pools its streaming sessions and builds its larger tables the first time they are needed.</p>
+  </div>
+
+  <section class="lab" id="sweep" aria-labelledby="sweep-h" style="margin-top: 40px">
+    <div class="lab-bar">
+      <h3 id="sweep-h">Compression level against speedup</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="sweep-run" type="button">Run all nine levels</button>
+    </div>
+    <div class="lab-body">
+      <div id="sweep-out" class="sweep"><p class="note-line" style="margin:0">Compresses 300 KB of JavaScript at each level with both libraries. Takes a few seconds.</p></div>
+    </div>
+  </section>
+
+  <div class="prose" style="margin-top: 40px">
+    <h2>Why compression stops near 2x</h2>
+    <p>Level 1 is the fast, shallow setting, and there the speedup is about 3x. At levels 6 to 9, zlib searches harder for matches, and the speedup settles around 2x. The reason is that fast-pako's output must match pako's bytes exactly. zlib decides what to emit by walking the same candidate matches in the same order, so a faster search that looks at fewer candidates, or looks at them in another order, would produce a different, if valid, file. Code that hashes compressed output, or compares it to a fixture, would notice. So the match finder is a faithful port and the remaining speed comes from everything around it. At that point it is running at about the speed of native zlib.</p>
+    <p>Decompression has no such ceiling, because there is only one correct output, so the decoder is free to be as clever as it likes.</p>
+  </div>
+
+  <div class="beside">
+    <div class="prose">
+      <h2>Faithful down to the odd calls</h2>
+      <p>A drop-in replacement has to match on more than the happy path. pako has a lot of small behaviours that come from how JavaScript coerces values: a <code>level</code> of <code>"5"</code> selects a row of its parameter table but is not equal to <code>5</code>, so it takes a different code path. Anything pako's own code throws, such as <code>TypeError</code> messages from calling a method that is not there, is produced by the same expressions in fast-pako, so the messages are the same.</p>
+      <p>The panel below runs a handful of these calls through both libraries and compares what comes back.</p>
+    </div>
+    <aside><strong>Why bother?</strong> Other libraries call pako with whatever their users pass in. If the replacement is only right for well-formed input, it breaks somewhere far from where it was installed.</aside>
+  </div>
+
+  <section class="lab" id="odd" aria-labelledby="odd-h">
+    <div class="lab-bar">
+      <h3 id="odd-h">Odd calls, same answers</h3>
+      <span class="spacer"></span>
+      <button class="btn" id="odd-run" type="button">Run the calls</button>
+    </div>
+    <div class="lab-body">
+      <div class="table-wrap" style="border-top: 0">
+        <table class="results" id="odd-table">
+          <thead><tr><th scope="col">Call</th><th scope="col">pako</th><th scope="col">fast-pako</th><th scope="col">Match</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="verdict" id="odd-verdict"></div>
+    </div>
+  </section>
+
+  <div class="prose">
+    <h2>What is different</h2>
+    <p>Where pako never returns, or hands back corrupt data, fast-pako throws an error that starts with <code>fast-pako:</code>. Examples are a <code>chunkSize</code> of 0, which makes pako loop forever, or a window smaller than 512 bytes, which makes pako write garbage. Each case is pinned by a test.</p>
+    <p>It also needs WebAssembly. Without it the first call throws a clear error. And pako's <code>pako/lib/*</code> and <code>pako/dist/*</code> subpaths are not provided, only the package's main entry.</p>
+    <p>On size, the picture is mixed and worth knowing. The npm tarball is 43.5 KB against pako's 412.5 KB, because nothing of pako is bundled. A browser bundle is 45.6 KB minified against 47.3 KB, but compresses less well: 30.6 KB gzipped against 15.1 KB, because compiled wasm compresses worse than JavaScript. Making it smaller cost more speed than the project's rules allow, and <a href="../method/#dead-ends">the attempts are written down</a>.</p>
+  </div>
+
+  <h2 id="results" style="margin-top: 56px">Recorded results</h2>
+  <p class="section-lede" style="margin-bottom: 20px">Measured on a Ryzen 7 7800X3D with Node 24.16, one call per row: pako's time, fast-pako's time, and the ratio. Best of three rounds in fresh processes.</p>
+  {{results:pako}}
+</div>

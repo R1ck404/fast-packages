@@ -1,5 +1,6 @@
 * text=auto eol=lf
 *.wasm binary
+*.woff2 binary
 # written by packages/*/build.mjs
 packages/fast-noble-hashes/_fast.js linguist-generated=true
 packages/fast-pako/fastzlib.wasm.mjs linguist-generated=true

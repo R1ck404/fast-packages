@@ -1,0 +1,45 @@
+/* fast-acorn page: the option rows, the playground and the "which parser runs" table */
+
+.opts { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: end; }
+.opts .check-field { padding-bottom: 8px; }
+.controls + .controls { margin-top: -6px; }
+
+.pg-code { min-height: 190px; }
+.pg-out { margin: 16px 0 0; max-height: 340px; overflow: auto; font-size: 12.5px; }
+.pg-out:empty { display: none; }
+.pg-table { margin: 16px 0 0; }
+.pg-table td.ok { color: var(--ok); font-weight: 700; }
+.pg-table td.bad { color: var(--bad); font-weight: 700; }
+.pg-table td code { white-space: pre; }
+.pg-tokens { max-height: 340px; overflow: auto; margin-top: 4px; border-top: 1px dashed var(--rule); }
+.pg-tokens .pg-table { margin-top: 0; }
+#pg-verdict { min-height: 0; margin-top: 16px; }
+
+.which .results td { vertical-align: top; }
+.which .results td:first-child { min-width: 200px; }
+.which .results td:nth-child(5) { min-width: 200px; }
+.case-ok { color: var(--ok); font-weight: 700; }
+.case-bad { color: var(--bad); font-weight: 700; }
+.case-warn { color: var(--warn); font-weight: 700; }
+.case-slow { color: var(--warn); font-weight: 750; }
+
+.size-table td:not(:first-child), .size-table th:not(:first-child) { white-space: nowrap; }
+.size-table-wrap { overflow-x: auto; max-width: 100%; margin-bottom: 1.4em; }
+.size-table-wrap table { min-width: 560px; margin: 0; }
+
+@media (max-width: 640px) {
+  .opts { gap: 6px 16px; }
+}
+
+.pg-scroll { overflow-x: auto; max-width: 100%; }
+.pg-table td { overflow-wrap: anywhere; }
+.pg-table td code { white-space: pre-wrap; }
+.pg-table { min-width: 440px; }
+.pg-table td:last-child { white-space: nowrap; }
+.pg-tokens .pg-table { min-width: 0; }
+.pg-out.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .which .results td:first-child { min-width: 150px; }
+  .which .results td:nth-child(5) { min-width: 170px; }
+}
+.pg-table td:first-child { white-space: nowrap; overflow-wrap: normal; }

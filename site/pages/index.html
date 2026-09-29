@@ -1,0 +1,125 @@
+<!--{"title":"fast-packages: faster drop-ins that return the same results","description":"Seven npm packages rebuilt to run faster and return byte-identical results: pako, acorn, esbuild-wasm, es-module-lexer, brotli-wasm and @noble/hashes. Race them live in your browser."}-->
+<section class="hero">
+  <div class="wrap">
+    <h1>Drop-in packages that give the same answers, sooner.</h1>
+    <p class="lede">Seven npm packages, including pako, acorn and esbuild, rebuilt to return byte-identical results in a fraction of the time, in Node and in the browser. They were made for <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>, a Node.js runtime that runs in the browser, and work anywhere the originals do. Every comparison here runs live in your browser.</p>
+
+    <div class="hero-stage">
+      <section class="lab" aria-labelledby="race-h">
+        <div class="lab-bar">
+          <h2 id="race-h">Race</h2>
+          <ul class="tabs" id="race-tabs"></ul>
+          <span class="spacer"></span>
+          <button class="btn" id="race-run" type="button">Run again</button>
+        </div>
+        <div class="lab-body">
+          <div id="race-lanes"></div>
+          <p class="note-line" id="race-info" aria-live="polite"></p>
+        </div>
+        <div class="lab-foot"><strong>Not on this list: esbuild.</strong> A fair race needs the original's 14 MB download, so <a href="esbuild/">its page</a> asks first. Each timing here is the best of several short interleaved rounds on your machine, so expect your own numbers to differ from the tables below.</div>
+      </section>
+    </div>
+    <div style="height: 64px"></div>
+  </div>
+</section>
+
+<div class="wrap">
+  <h2>Three rules every package follows</h2>
+  <div class="rules">
+    <div>
+      <h3>The same results</h3>
+      <p>Byte-identical output, identical syntax trees, identical errors and callbacks. Each package is checked against the original on real code: 126,258 esbuild outputs, 93,841 acorn parses, 290,446 Brotli streams, and more, listed under <a href="method/#verification">how we check</a>.</p>
+    </div>
+    <div>
+      <h3>Faster on the benchmarks</h3>
+      <p>A change only stays if the calls it touches still beat the original and none gets more than 10% slower than the previous version of the package. Size savings that broke this rule were rejected, even when they saved bytes.</p>
+    </div>
+    <div>
+      <h3>No original inside</h3>
+      <p>None of the packages ships the original as a fallback. What you install is the replacement alone, which is also why most of the npm downloads are smaller: pako's, for one, is 43.5 KB instead of 412.5 KB.</p>
+    </div>
+  </div>
+
+  <h2>How much faster</h2>
+  <p class="section-lede">Recorded on a Ryzen 7 7800X3D, in Node and Chromium, best of three rounds in fresh processes. Each row of every table is on its package's page.</p>
+  {{rangechart}}
+
+  <h2>The packages</h2>
+  <p class="section-lede">Each page has a live comparison, an explanation of what made it faster, and where the limits are.</p>
+  <nav class="pkg-list" aria-label="Packages">
+{{pkgcards}}
+  </nav>
+
+  <h2>How they got faster</h2>
+  <p class="section-lede">Five ideas account for nearly all of it. Each package uses a few of them.</p>
+  <div class="approaches">
+    <div class="approach">
+      <div>
+        <h3>Move the hot loop into WebAssembly</h3>
+        <p class="used">Used in <a href="pako/">pako</a>, <a href="es-module-lexer/">es-module-lexer</a>, <a href="brotli/">brotli</a> and <a href="noble-hashes/">noble-hashes</a></p>
+      </div>
+      <div>
+        <p>A JavaScript engine has to guess types and guard those guesses. WebAssembly is typed and compiled ahead of time, has real 64-bit integers, and offers SIMD, which processes 16 bytes per instruction.</p>
+        <p>That is why SHA-512 gains about 5x, since JavaScript has to build 64-bit arithmetic from pairs of 32-bit numbers, while SHA-256, which a JIT already handles well, gains about 1.7x.</p>
+      </div>
+    </div>
+    <div class="approach">
+      <div>
+        <h3>Rewrite for what the JIT is good at</h3>
+        <p class="used">Used in <a href="acorn/">acorn</a> and <a href="esbuild/">esbuild</a></p>
+      </div>
+      <div>
+        <p>Engines run code fastest when objects have one consistent shape and values keep one type. fast-acorn gives every syntax-tree node type its own constructor and uses integers for token types, but keeps acorn's exact output.</p>
+        <p>esbuild-wasm is Go compiled to WebAssembly, which carries Go's runtime and a 14 MB download. Porting esbuild itself to JavaScript removes both.</p>
+      </div>
+    </div>
+    <div class="approach">
+      <div>
+        <h3>Pay only for what you use</h3>
+        <p class="used">Used in every package</p>
+      </div>
+      <div>
+        <p>Tables are built the first time something needs them: pako's checksum and tree tables, Brotli's 518 KB of encoder lookup tables, each hash family's WebAssembly kernel. Modules that most callers never touch, such as acorn's generic parser for unusual plugins, load on demand.</p>
+        <p>The result is a smaller download and a start-up that costs close to what the original's did.</p>
+      </div>
+    </div>
+    <div class="approach">
+      <div>
+        <h3>Copy the behaviour, then prove it</h3>
+        <p class="used">Used in every package</p>
+      </div>
+      <div>
+        <p>The ports follow the originals function by function, including their quirks, so decisions such as which match zlib emits next come out the same. Then differential tests feed the same inputs to both implementations and compare everything observable: outputs, errors, even the state of instances.</p>
+        <p>fast-noble-hashes is also mutation tested: deliberate bugs are planted in it, and the suite must catch all 41. See <a href="method/#verification">how we check</a>.</p>
+      </div>
+    </div>
+    <div class="approach">
+      <div>
+        <h3>Measure honestly, keep the failures</h3>
+        <p class="used">Used in every package</p>
+      </div>
+      <div>
+        <p>Benchmarks alternate the two implementations in fresh processes and keep the best of several rounds, so background load hits both alike. Ideas that did not work are written down instead of deleted: <a href="method/#dead-ends">the dead ends</a> explain, for example, why deflate cannot go much past 2x without changing its output.</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>Using them</h2>
+  <div class="beside">
+    <div class="prose">
+      <p>Install each replacement under the name of the package it replaces, so every import, including those inside your other dependencies, gets the fast version. The major and minor versions match the originals, and the APIs and results are the originals', so this works the same in a bundler config, a Node project, a command-line tool or a browser app.</p>
+<pre><code>"dependencies": {
+  "pako": "npm:@r1ck404/fast-pako@{{fastversion:pako}}",
+  "acorn": "npm:@r1ck404/fast-acorn@{{fastversion:acorn}}",
+  "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@{{fastversion:acorn-jsx}}",
+  "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@{{fastversion:esbuild}}",
+  "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@{{fastversion:es-module-lexer}}",
+  "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@{{fastversion:brotli}}",
+  "@noble/hashes": "npm:@r1ck404/fast-noble-hashes@{{fastversion:noble-hashes}}"
+}</code></pre>
+      <p>pnpm can apply the same specs under <code>pnpm.overrides</code> to redirect transitive dependencies, and a bundler alias such as Vite's <code>resolve.alias</code> works too.</p>
+    </div>
+    <aside><strong>Alias a few together.</strong> Alias <code>acorn-jsx</code> together with <code>acorn</code>. And install <code>fast-noble-hashes</code> as <code>@noble/hashes</code>, because noble's own files import <code>@noble/hashes/crypto</code> by name.</aside>
+  </div>
+  <p class="table-note" style="max-width: 66ch">The packages were made for <a href="https://r1ck404.github.io/Nodepod/">Nodepod</a>, which does not use them yet. Versions follow the original's major and minor, so peer dependency ranges such as acorn-jsx's <code>acorn ^8</code> keep working; the patch number is this project's own.</p>
+</div>
