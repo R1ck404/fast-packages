@@ -1,6 +1,6 @@
 {
   "name": "@r1ck404/fast-brotli-wasm",
-  "version": "3.0.1",
+  "version": "3.0.3",
   "description": "Faster drop-in replacement for brotli-wasm 3.0.1: the same Rust brotli crates with a rewritten encoder hot path and a new decoder, byte-identical output (q11 3-4.5x faster)",
   "keywords": [
     "brotli",

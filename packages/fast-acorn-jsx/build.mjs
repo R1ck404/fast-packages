@@ -1,10 +1,12 @@
 // Builds @r1ck404/fast-acorn-jsx from acorn-jsx 5.3.2 (node_modules):
 //
-//   index.js    = acorn-jsx's index.js with one change: the plugin hands every
+//   index.js    = acorn-jsx's index.js with registration and entity scanning:
+//                 entity names use one slice instead of per-character concatenation.
+//                 The plugin hands every
 //                 class it creates to the Parser's registration hook, if the
 //                 Parser has one (@r1ck404/fast-acorn's does; see its index.mjs), so
 //                 @r1ck404/fast-acorn parses with its native JSX mode. On any other
-//                 Parser (e.g. the real acorn) nothing changes.
+//                 Parser (e.g. the real acorn) the API and results stay the same.
 //   xhtml.js, index.d.ts, LICENSE = copied unchanged
 //
 // Registration is by identity, so it keeps working after bundling and
@@ -42,7 +44,7 @@ src = replaceOnce(
   `module.exports = function(options) {
   options = options || {};
   return function(Parser) {
-    // @r1ck404/fast-acorn-jsx: the class is registered with fast-acorn (the only change)
+    // @r1ck404/fast-acorn-jsx: the class is registered with fast-acorn
     const o = {
       allowNamespaces: options.allowNamespaces !== false,
       allowNamespacedObjects: !!options.allowNamespacedObjects
@@ -52,6 +54,12 @@ src = replaceOnce(
   };
 };`,
 );
+// Build an entity name with one slice instead of a string concatenation per
+// character. Keep the original path for non-string method stand-ins.
+src = replaceOnce(src,
+  "        if (ch === ';') {\n          if (str[0] === '#') {",
+  "        if (ch === ';') {\n          if (typeof this.input === 'string') str = this.input.slice(startPos, this.pos - 1);\n          if (str[0] === '#') {");
+src = replaceOnce(src, "        str += ch;", "        if (typeof this.input !== 'string') str += ch;");
 writeFileSync(join(here, "index.js"), src);
 for (const f of ["xhtml.js", "index.d.ts", "LICENSE"]) copyFileSync(join(upstream, f), join(here, f));
 console.log("wrote index.js (+ xhtml.js, index.d.ts, LICENSE) from acorn-jsx " + version);

@@ -6,10 +6,10 @@
 //   * a browser bundle (esbuild, platform=browser) of all seven resolves and
 //     builds (browser fields / export conditions, no Node builtins)
 // With --registry the published versions are installed from npm instead.
-// usage: node verify/pack-smoke.mjs [--registry]
+// usage: node verify/pack-smoke.mjs [--registry | --tarball-dir PATH]
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync, copyFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { root } from "./corpus.mjs";
@@ -26,6 +26,8 @@ const pkgs = ["pako", "acorn", "acorn-jsx", "esbuild-wasm", "es-module-lexer", "
 // @r1ck404/fast-<name>@<version>), installed as <name> (a scoped original
 // like @noble/hashes is fast-noble-hashes)
 const fromRegistry = process.argv.includes("--registry");
+const tarballArg = process.argv.indexOf("--tarball-dir");
+const tarballDir = tarballArg < 0 ? null : resolve(process.argv[tarballArg + 1]);
 const deps = {};
 for (const p of pkgs) {
   const flat = p.replace(/^@/, "").replace("/", "-");
@@ -35,7 +37,8 @@ for (const p of pkgs) {
     deps[p] = `npm:@r1ck404/fast-${flat}@${version}`;
     continue;
   }
-  run(npm, ["pack", "--silent", "--pack-destination", join(work, "tgz")], dir);
+  if (tarballDir) copyFileSync(join(tarballDir, `r1ck404-fast-${flat}-${version}.tgz`), join(work, "tgz", `r1ck404-fast-${flat}-${version}.tgz`));
+  else run(npm, ["pack", "--silent", "--pack-destination", join(work, "tgz")], dir);
   deps[p] = `file:./tgz/r1ck404-fast-${flat}-${version}.tgz`;
 }
 console.log(fromRegistry ? "from npm: " + Object.values(deps).join(" ") : "packed: " + readdirSync(join(work, "tgz")).join(" "));

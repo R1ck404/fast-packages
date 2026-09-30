@@ -1,12 +1,14 @@
 # @r1ck404/fast-es-module-lexer
 
+Repeated parsing of the same source of 4,096–1,048,576 UTF-16 code units reuses the most recent successful WASM scan. Only one source is retained; a different input or mode change invalidates it. Every call still creates fresh result arrays and objects and evaluates escaped names as before. Cold parses and changing inputs receive no cache speedup.
+
 A faster drop-in replacement for [`es-module-lexer@1.7.0`](https://www.npmjs.com/package/es-module-lexer):
 the same exports (`ImportType`, `init`, `initSync`, `parse`), identical
 results (object shapes, key order, values) and identical errors.
 
 ```jsonc
 // package.json
-"dependencies": { "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.0" }
+"dependencies": { "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.2" }
 ```
 
 | input | times faster than es-module-lexer 1.7.0, in Node | in Chromium |

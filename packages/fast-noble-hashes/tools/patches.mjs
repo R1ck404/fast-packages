@@ -88,7 +88,7 @@ const SHA2 = (x, clean, hasher, fastHasher) => [
   ),
   ...[["SHA256", "SHA256"], ["SHA224", "SHA256"], ["SHA512", "SHA512"], ["SHA384", "SHA512"], ["SHA512_256", "SHA512"], ["SHA512_224", "SHA512"]].map(([c, f]) => [
     `${hasher}(() => new ${c}());`,
-    `${fastHasher}(() => new ${c}(), FAST_${f});`,
+    `${fastHasher}(() => new ${c}(), FAST_${f}, "${c.toLowerCase().replace("_", "-")}");`,
   ]),
 ];
 
@@ -186,8 +186,8 @@ import { fastHasher, fastProcess, wasmFamily, MD5_X, WASM_MD5, WASM_SHA1 } from 
 ${LEGACY_FAMILIES(esm)}`,
     ],
     ...LEGACY(esm, "clean"),
-    [`export const sha1 = /* @__PURE__ */ createHasher(() => new SHA1());`, `export const sha1 = /* @__PURE__ */ fastHasher(() => new SHA1(), FAST_SHA1);`],
-    [`export const md5 = /* @__PURE__ */ createHasher(() => new MD5());`, `export const md5 = /* @__PURE__ */ fastHasher(() => new MD5(), FAST_MD5);`],
+    [`export const sha1 = /* @__PURE__ */ createHasher(() => new SHA1());`, `export const sha1 = /* @__PURE__ */ fastHasher(() => new SHA1(), FAST_SHA1, "sha1");`],
+    [`export const md5 = /* @__PURE__ */ createHasher(() => new MD5());`, `export const md5 = /* @__PURE__ */ fastHasher(() => new MD5(), FAST_MD5, "md5");`],
   ],
   "legacy.js": [
     [
@@ -202,8 +202,8 @@ ${LEGACY_FAMILIES(cjs)}
 /** Initial SHA1 state */`,
     ],
     ...LEGACY(cjs, "(0, utils_ts_1.clean)"),
-    [`exports.sha1 = (0, utils_ts_1.createHasher)(() => new SHA1());`, `exports.sha1 = (0, _fast_js_1.fastHasher)(() => new SHA1(), FAST_SHA1);`],
-    [`exports.md5 = (0, utils_ts_1.createHasher)(() => new MD5());`, `exports.md5 = (0, _fast_js_1.fastHasher)(() => new MD5(), FAST_MD5);`],
+    [`exports.sha1 = (0, utils_ts_1.createHasher)(() => new SHA1());`, `exports.sha1 = (0, _fast_js_1.fastHasher)(() => new SHA1(), FAST_SHA1, "sha1");`],
+    [`exports.md5 = (0, utils_ts_1.createHasher)(() => new MD5());`, `exports.md5 = (0, _fast_js_1.fastHasher)(() => new MD5(), FAST_MD5, "md5");`],
   ],
   "esm/pbkdf2.js": [
     [

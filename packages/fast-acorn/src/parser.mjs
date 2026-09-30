@@ -1886,12 +1886,15 @@ const readCodePoint = function readCodePoint(p) {
   return code;
 }
 
+const STRING_STOP_DQ = /["\\\r\n\u2028\u2029]/g;
+const STRING_STOP_SQ = /['\\\r\n\u2028\u2029]/g;
 const readString = function readString(p, quote) {
   const src = p.input, n = p.len;
   // fast path: no escapes, no line terminators
   let q = p.pos + 1;
+  const scanEnd = Math.min(n, q + 128);
   for (;;) {
-    if (q >= n) break;
+    if (q >= scanEnd) break;
     const ch = src.charCodeAt(q);
     if (ch === quote) {
       const out = src.slice(p.pos + 1, q);
@@ -1900,6 +1903,16 @@ const readString = function readString(p, quote) {
     }
     if (ch === 92 || ch === 10 || ch === 13 || ch === 0x2028 || ch === 0x2029) break;
     q++;
+  }
+  if (q === scanEnd && q < n) {
+    const stop = quote === 34 ? STRING_STOP_DQ : STRING_STOP_SQ;
+    stop.lastIndex = q;
+    const match = stop.exec(src);
+    if (match !== null && src.charCodeAt(match.index) === quote) {
+      const out = src.slice(p.pos + 1, match.index);
+      p.pos = match.index + 1;
+      return finishToken(p, T_STRING, out);
+    }
   }
   let out = "", chunkStart = ++p.pos;
   for (;;) {

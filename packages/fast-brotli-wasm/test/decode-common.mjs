@@ -22,8 +22,10 @@ function inst() {
 export function call(name, input, arg) {
   const e = inst();
   const n = input.length;
-  const p = e.alloc(n);
+  const padding = name === "decompress_fast_padded" ? 8 : 0;
+  const p = e.alloc(n + padding);
   new Uint8Array(e.memory.buffer, p, n).set(input);
+  if (padding) new Uint8Array(e.memory.buffer, p + n, padding).fill(0);
   let r;
   try {
     r = arg === undefined ? e[name](p, n) : e[name](p, n, arg);
@@ -34,7 +36,7 @@ export function call(name, input, arg) {
   const h = new Uint32Array(e.memory.buffer, e.hdr(), 2);
   const out = new Uint8Array(e.memory.buffer, h[0], h[1]).slice();
   e.release();
-  e.free(p, n);
+  e.free(p, n + padding);
   if (r === -1) return { ok: false, bail: true };
   return r === 0 ? { ok: true, bytes: out } : { ok: false, err: new TextDecoder().decode(out) };
 }
@@ -50,7 +52,7 @@ export function exportsNow() {
   return inst();
 }
 
-export const fastDecode = (b) => call("decompress_fast", b);
+export const fastDecode = (b) => call(inst().decompress_fast_padded ? "decompress_fast_padded" : "decompress_fast", b);
 export const fastOnly = (b) => call("decompress_fast_only", b);
 export const refDecode = (b) => call("decompress", b);
 export const wasmCompress = (b, q) => call("compress", b, q);

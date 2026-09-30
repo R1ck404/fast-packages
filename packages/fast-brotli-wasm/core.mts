@@ -48,9 +48,11 @@ export const BrotliStreamResultCode = Object.freeze({
   3: "NeedsMoreOutput",
 });
 
-export function bind(W: FastBrotliExports) {
+// The optional padded entry point reads eight zero bytes after the input.
+export function bind(W: FastBrotliExports & { decompress_fast_padded?: (p: number, n: number) => number }) {
   const H = W.hdr() >>> 2;
   const decode = W.decompress_fast || W.decompress;
+  const paddedDecode = W.decompress_fast_padded;
   let mem: ArrayBuffer | null = null;
   let U8: Uint8Array, U32: Uint32Array;
   const views = () => {
@@ -64,12 +66,16 @@ export function bind(W: FastBrotliExports) {
   const encoder = new TextEncoder();
 
   // passArray8ToWasm0
-  function pass(arg: Input): [number, number] {
+  function pass(arg: Input, padding = 0): [number, number, number?] {
     const len = arg.length;
-    const p = W.alloc(len * 1);
+    // Small inputs don't consistently repay the extra wrapper work. Preserve the old
+    // coercion/allocation path for exotic array-like lengths too.
+    if (padding && (!Number.isInteger(len) || len < 262144 || len > 0xfffffff7)) padding = 0;
+    const p = W.alloc(len * 1 + padding);
     views();
     U8.set(arg, p);
-    return [p, len];
+    if (padding) U8.fill(0, p + len * 1, p + len * 1 + padding);
+    return padding ? [p, len, padding] : [p, len];
   }
   // the result in HDR (bytes or message); the wasm side keeps it until release()
   function take(): Uint8Array {
@@ -124,9 +130,10 @@ export function bind(W: FastBrotliExports) {
   }
 
   function decompress(buf: Input): Uint8Array {
-    const [p, len] = pass(buf);
-    const st = decode(p, len);
-    W.free(p, len);
+    const [p, len, padded] = pass(buf, paddedDecode ? 8 : 0);
+    const padding = padded || 0;
+    const st = padding ? paddedDecode!(p, len) : decode(p, len);
+    W.free(p, len * 1 + padding);
     const out = take();
     if (st !== 0) throw utf8.decode(out);
     return out;

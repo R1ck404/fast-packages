@@ -35,6 +35,10 @@ import { isIdentifier, isIdentifierStart, isIdentifierContinue, isWhitespace } f
 
 export { LexerPanic, LEXER_PANIC } from "./gopanic.mjs";
 
+const ASCII_STRING_DQ = /[^\x20-\x7e]|["\\$]/g;
+const ASCII_STRING_SQ = /[^\x20-\x7e]|['\\$]/g;
+const ASCII_STRING_BT = /[^\x20-\x7e]|[`\\$]/g;
+
 // ---------------------------------------------------------------------------
 // T (token kinds). If you add a new token, remember to add it to
 // "tokenToString" too.
@@ -1690,10 +1694,17 @@ export class Lexer {
               const contents = this.contents;
               const n = contents.length;
               let i = this.end + 1;
-              while (i < n) {
+              const prefixEnd = Math.min(n, i + 128);
+              while (i < prefixEnd) {
                 const c2 = contents.charCodeAt(i);
                 if (c2 < 0x20 || c2 >= 0x7f || c2 === quote || c2 === 92 || c2 === 36) break;
                 i++;
+              }
+              if (i === prefixEnd && i < n) {
+                const stop = quote === 34 ? ASCII_STRING_DQ : quote === 39 ? ASCII_STRING_SQ : ASCII_STRING_BT;
+                stop.lastIndex = i;
+                const match = stop.exec(contents);
+                i = match === null ? n : match.index;
               }
               this.current = i;
               this.step();

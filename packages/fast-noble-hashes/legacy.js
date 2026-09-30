@@ -55,7 +55,7 @@ class SHA1 extends _md_ts_1.HashMD {
 }
 exports.SHA1 = SHA1;
 /** SHA1 (RFC 3174) legacy hash function. It was cryptographically broken. */
-exports.sha1 = (0, _fast_js_1.fastHasher)(() => new SHA1(), FAST_SHA1);
+exports.sha1 = (0, _fast_js_1.fastHasher)(() => new SHA1(), FAST_SHA1, "sha1");
 /** Per-round constants */
 const p32 = /* @__PURE__ */ Math.pow(2, 32);
 const K = /* @__PURE__ */ Array.from({ length: 64 }, (_, i) => Math.floor(p32 * Math.abs(Math.sin(i + 1))));
@@ -101,7 +101,7 @@ exports.MD5 = MD5;
  * - Non-linear index selection: huge speed-up for unroll
  * - Per round constants: more memory accesses, additional speed-up for unroll
  */
-exports.md5 = (0, _fast_js_1.fastHasher)(() => new MD5(), FAST_MD5);
+exports.md5 = (0, _fast_js_1.fastHasher)(() => new MD5(), FAST_MD5, "md5");
 // RIPEMD-160
 const Rho160 = /* @__PURE__ */ Uint8Array.from([
     7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,

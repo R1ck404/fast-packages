@@ -208,20 +208,20 @@ export class SHA512_256 extends SHA512 {
  * To break sha256 using birthday attack, attackers need to try 2^128 hashes.
  * BTC network is doing 2^70 hashes/sec (2^95 hashes/year) as per 2025.
  */
-export const sha256 = /* @__PURE__ */ fastHasher(() => new SHA256(), FAST_SHA256);
+export const sha256 = /* @__PURE__ */ fastHasher(() => new SHA256(), FAST_SHA256, "sha256");
 /** SHA2-224 hash function from RFC 4634 */
-export const sha224 = /* @__PURE__ */ fastHasher(() => new SHA224(), FAST_SHA256);
+export const sha224 = /* @__PURE__ */ fastHasher(() => new SHA224(), FAST_SHA256, "sha224");
 /** SHA2-512 hash function from RFC 4634. */
-export const sha512 = /* @__PURE__ */ fastHasher(() => new SHA512(), FAST_SHA512);
+export const sha512 = /* @__PURE__ */ fastHasher(() => new SHA512(), FAST_SHA512, "sha512");
 /** SHA2-384 hash function from RFC 4634. */
-export const sha384 = /* @__PURE__ */ fastHasher(() => new SHA384(), FAST_SHA512);
+export const sha384 = /* @__PURE__ */ fastHasher(() => new SHA384(), FAST_SHA512, "sha384");
 /**
  * SHA2-512/256 "truncated" hash function, with improved resistance to length extension attacks.
  * See the paper on [truncated SHA512](https://eprint.iacr.org/2010/548.pdf).
  */
-export const sha512_256 = /* @__PURE__ */ fastHasher(() => new SHA512_256(), FAST_SHA512);
+export const sha512_256 = /* @__PURE__ */ fastHasher(() => new SHA512_256(), FAST_SHA512, "sha512-256");
 /**
  * SHA2-512/224 "truncated" hash function, with improved resistance to length extension attacks.
  * See the paper on [truncated SHA512](https://eprint.iacr.org/2010/548.pdf).
  */
-export const sha512_224 = /* @__PURE__ */ fastHasher(() => new SHA512_224(), FAST_SHA512);
+export const sha512_224 = /* @__PURE__ */ fastHasher(() => new SHA512_224(), FAST_SHA512, "sha512-224");

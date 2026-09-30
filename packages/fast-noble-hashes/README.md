@@ -6,9 +6,16 @@ MD5, PBKDF2's iteration loop and scrypt's ROMix running in WebAssembly.
 Identical digests, errors, callbacks and even instance state (every field of
 a hash object, buffer bytes included, is what noble's code would leave there).
 
+Node's built-in crypto is used for large
+one-shot hashes when `process.getBuiltinModule` is available: byte inputs of
+at least 64 KiB, or strings of at least 65,536 UTF-16 code units. Smaller inputs,
+streaming hashes and browsers use the existing WebAssembly kernels. Native
+algorithms that the host disables fall back to WebAssembly. WebAssembly is
+still required. This adds no static Node imports to browser bundles.
+
 ```jsonc
 // package.json
-"dependencies": { "@noble/hashes": "npm:@r1ck404/fast-noble-hashes@1.8.0" }
+"dependencies": { "@noble/hashes": "npm:@r1ck404/fast-noble-hashes@1.8.2" }
 ```
 
 Install it under the original name: like noble, `utils.js` imports

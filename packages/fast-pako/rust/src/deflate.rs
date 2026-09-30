@@ -357,7 +357,11 @@ impl Deflate {
     fn lm_init(&mut self) {
         self.window_size = 2 * self.w_size;
         let hs = self.hash_size;
-        self.head[..hs].fill(0);
+        // Stored mode never searches hash chains. A later compressed session
+        // still clears the table here before it can use any retained entries.
+        if self.cfg != 0 {
+            self.head[..hs].fill(0);
+        }
         let c = CONFIG[self.cfg];
         self.max_lazy_match = c.max_lazy as usize;
         self.good_match = c.good_length as usize;

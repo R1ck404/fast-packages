@@ -1,5 +1,7 @@
 # @r1ck404/fast-esbuild-wasm
 
+Long ASCII string literals scan their tail with a native regular expression after a 128-character prefix. Escapes, non-ASCII text and template interpolation resume the existing scanner. This targets long literals; it is not a general transform speedup.
+
 A faster drop-in replacement for [`esbuild-wasm@0.28.2`](https://www.npmjs.com/package/esbuild-wasm):
 esbuild ported to JavaScript. Every API (`transform`, `build`, `context`
 with watch mode, plugins, `formatMessages`, `analyzeMetafile`, the `*Sync`
@@ -13,7 +15,7 @@ Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#r
 
 ```jsonc
 // package.json
-"dependencies": { "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@0.28.2" }
+"dependencies": { "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@0.28.5" }
 ```
 
 Same files as esbuild-wasm minus the Go binary and its glue:

@@ -345,13 +345,61 @@ export function fastProcess(h    , view          , offset     , f        )      
  * same function shape (name, length, outputLen, blockLen, create). Also
  * registers the kernel of family f for the class hashCons creates.
  */
-export function fastHasher(hashCons          , f        )        {
+// Node's native hash kernels are useful for large messages (particularly
+// SHA-256 on CPUs with SHA instructions). Resolve lazily without a static
+// node:crypto import, so browser bundles and older Node versions keep wasm.
+let nodeCreateHash                                                            ;
+const typedLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length').get;
+const typedSubarray = Uint8Array.prototype.subarray;
+function nativeSize(msg                     )         {
+  if (typeof msg === 'string') return msg.length;
+  try {
+    const n = typedLength.call(msg);
+    if (n < 65536) return 0;
+    const proto = Object.getPrototypeOf(msg);
+    if (proto !== Uint8Array.prototype && !(typeof Buffer === 'function' && proto === Buffer.prototype)) return 0;
+    // Custom views can change the length or subarray behavior that feed()
+    // observes. Keep those on the existing path, without invoking getters.
+    for (const key of ['length', 'buffer', 'byteOffset', 'byteLength', 'subarray']) {
+      if (Object.getOwnPropertyDescriptor(msg, key)) return 0;
+    }
+    if (proto === Uint8Array.prototype && msg.subarray !== typedSubarray) return 0;
+    return n;
+  } catch {
+    return 0;
+  }
+}
+function nativeDigest(algorithm        , msg                     )                         {
+  if (nodeCreateHash === undefined) {
+    nodeCreateHash = null;
+    try {
+      if (typeof process === 'object' && typeof process.versions?.node === 'string' && typeof process.getBuiltinModule === 'function') {
+        nodeCreateHash = process.getBuiltinModule('node:crypto').createHash;
+      }
+    } catch {}
+  }
+  if (!nodeCreateHash) return;
+  try {
+    // Use noble's string conversion and return an ordinary, independently
+    // owned Uint8Array: Buffer.slice() would have different aliasing behavior.
+    return new Uint8Array(nodeCreateHash(algorithm).update(typeof msg === 'string' ? utf8ToBytes(msg) : msg).digest());
+  } catch {
+    // A host may disable an algorithm (e.g. MD5). The existing wasm path
+    // remains available and supplies the original behavior and errors.
+  }
+}
+
+export function fastHasher(hashCons          , f        , nativeAlgorithm         )        {
   const t = hashCons();
   const iv = new Int32Array(t.get());
   const outputLen = t.outputLen;
   const hashC = (msg                     )             => {
     if (typeof msg != 'string') abytes(msg);
     const F = inst(f);
+    if (nativeAlgorithm && nativeSize(msg) >= 65536) {
+      const native = nativeDigest(nativeAlgorithm, msg);
+      if (native) return native;
+    }
     F.i.set(iv);
     const n = message(F, msg);
     F.e.d(feed(F, 0, n), n);
@@ -499,7 +547,8 @@ export function fastScrypt(f        , B            , r        , N        , p    
   try {
     for (let cnt = 0, e, pi; cnt < total; cnt = e) {
       pi = Math.floor(cnt / steps);
-      e = Math.min(total, (Math.floor(cnt / per) + 1) * per, (pi + 1) * steps);
+      // Without progress callbacks, run a whole ROMix block per wasm call.
+      e = onProgress ? Math.min(total, (Math.floor(cnt / per) + 1) * per, (pi + 1) * steps) : (pi + 1) * steps;
       // (r = 0: empty blocks, nothing to mix; noble still reports progress)
       if (r) w.s(pi, cnt - pi * steps, e - pi * steps);
       if (onProgress && (!(e % per) || e === total)) onProgress(e / total);

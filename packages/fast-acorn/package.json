@@ -1,6 +1,6 @@
 {
   "name": "@r1ck404/fast-acorn",
-  "version": "8.18.0",
+  "version": "8.18.2",
   "description": "Faster drop-in replacement for acorn 8.18: identical ASTs, errors and callbacks, 2.5-3x faster parsing, fast paths for acorn-jsx and parseFunctionBody overrides",
   "keywords": [
     "acorn",
@@ -53,13 +53,13 @@
   "scripts": {
     "build": "node build.mjs",
     "gen": "node tools/gen-ident.mjs && node tools/gen-regexp.mjs && node tools/gen-jsx-data.mjs && node tools/gen-generic.mjs",
-    "test": "node test/bundle.mjs --limit 60 && node test/differences.mjs && node test/comments.mjs && node test/options.mjs && node test/diff.mjs --limit 800 && node test/versions.mjs --limit 40 --soup 20000 && node test/plugins.mjs --limit 60",
+    "test": "node test/string-scan.mjs && node test/bundle.mjs --limit 60 && node test/differences.mjs && node test/comments.mjs && node test/options.mjs && node test/diff.mjs --limit 800 && node test/versions.mjs --limit 40 --soup 20000 && node test/plugins.mjs --limit 60",
     "test:full": "node test/bundle.mjs && node test/differences.mjs && node test/comments.mjs && node test/options.mjs && node --stack-size=4000 test/diff.mjs --locs --comments --nodepod && node test/expr-diff.mjs && node --stack-size=4000 test/jsx-diff.mjs && node --stack-size=4000 test/override-diff.mjs && node --stack-size=4000 test/error-diff.mjs && node --stack-size=4000 test/acorn-diff.mjs && node --stack-size=4000 test/versions.mjs && node --stack-size=4000 test/plugins.mjs"
   },
   "devDependencies": {
     "acorn": "8.18.0",
     "acorn-jsx": "5.3.2",
-    "@r1ck404/fast-acorn-jsx": "5.3.2"
+    "@r1ck404/fast-acorn-jsx": "5.3.4"
   },
   "publishConfig": {
     "access": "public"

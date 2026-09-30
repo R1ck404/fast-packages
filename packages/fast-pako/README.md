@@ -1,5 +1,7 @@
 # @r1ck404/fast-pako
 
+Level-0 stored compression skips clearing its unused hash table during session initialization. Other compression modes still clear the table before searching it. This targets small level-0 operations and applies in browsers as well as Node; it does not change compressed bytes or chunk behavior.
+
 A faster drop-in replacement for [`pako@2.1.0`](https://www.npmjs.com/package/pako):
 pako's zlib (deflate/inflate state machines, trees, checksums) ported to
 Rust/WebAssembly with **byte-identical output**, the same API, results,
@@ -10,7 +12,7 @@ and its JavaScript layer.
 
 ```jsonc
 // package.json
-"dependencies": { "pako": "npm:@r1ck404/fast-pako@2.1.0" }
+"dependencies": { "pako": "npm:@r1ck404/fast-pako@2.1.2" }
 ```
 
 `deflate`, `deflateRaw`, `gzip`, `inflate`, `inflateRaw`, `ungzip`, `Deflate`,

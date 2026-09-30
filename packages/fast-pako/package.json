@@ -1,6 +1,6 @@
 {
   "name": "@r1ck404/fast-pako",
-  "version": "2.1.0",
+  "version": "2.1.2",
   "description": "Faster drop-in replacement for pako 2.1.0: pako's zlib ported to Rust/WebAssembly, byte-identical output, same API and errors",
   "keywords": [
     "pako",
@@ -48,7 +48,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/types.mjs && node test/load.mjs && node test/equiv.mjs --quick && node test/fuzz.mjs --quick && node test/exotic.mjs --quick",
+    "test": "node test/stored-session.mjs && node test/string-input.mjs && node test/types.mjs && node test/load.mjs && node test/equiv.mjs --quick && node test/fuzz.mjs --quick && node test/exotic.mjs --quick",
     "test:full": "node test/types.mjs && node test/load.mjs && node test/equiv.mjs && node test/fuzz.mjs && node test/exotic.mjs && node test/corpus.mjs"
   },
   "devDependencies": {

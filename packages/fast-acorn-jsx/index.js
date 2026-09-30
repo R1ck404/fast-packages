@@ -73,7 +73,7 @@ function getQualifiedJSXName(object) {
 module.exports = function(options) {
   options = options || {};
   return function(Parser) {
-    // @r1ck404/fast-acorn-jsx: the class is registered with fast-acorn (the only change)
+    // @r1ck404/fast-acorn-jsx: the class is registered with fast-acorn
     const o = {
       allowNamespaces: options.allowNamespaces !== false,
       allowNamespacedObjects: !!options.allowNamespacedObjects
@@ -209,6 +209,7 @@ function plugin(options, Parser) {
       while (this.pos < this.input.length && count++ < 10) {
         ch = this.input[this.pos++];
         if (ch === ';') {
+          if (typeof this.input === 'string') str = this.input.slice(startPos, this.pos - 1);
           if (str[0] === '#') {
             if (str[1] === 'x') {
               str = str.substr(2);
@@ -224,7 +225,7 @@ function plugin(options, Parser) {
           }
           break;
         }
-        str += ch;
+        if (typeof this.input !== 'string') str += ch;
       }
       if (!entity) {
         this.pos = startPos;

@@ -7,7 +7,7 @@ output** at every quality, identical decompression results and errors.
 
 ```jsonc
 // package.json
-"dependencies": { "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.1" }
+"dependencies": { "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.3" }
 ```
 
 Entry points like brotli-wasm's: `require()` in Node is synchronous (plus a
@@ -25,6 +25,13 @@ reads it). Node >= 20.19.
 Times and inputs: [benchmark results](https://github.com/R1ck404/fast-packages#results).
 
 ## How
+
+One-shot decompression of inputs at least 256
+KiB long now supplies the bit reader's eight zero padding bytes in the JS
+input allocation. This removes the decoder's second allocation and input
+copy. Older WASM binaries and the existing unpadded WASM exports keep their
+original path; streams and the reference fallback still use the same decoder.
+This targets large compressed inputs; smaller-input performance is generally unchanged.
 
 * The same Rust crates (brotli 5.0.0, brotli-decompressor 4.0.0), vendored in
   `rust/vendor` with the encoder's hot paths rewritten so that every decision,

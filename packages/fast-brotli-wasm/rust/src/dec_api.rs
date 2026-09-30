@@ -7,6 +7,16 @@
 #[path = "fastdec/mod.rs"]
 mod fastdec;
 
+// Wrapper-only entry point: p has n input bytes followed by eight zeros.
+// Keep the existing exports accepting ordinary, unpadded input.
+#[no_mangle]
+pub unsafe extern "C" fn decompress_fast_padded(p: *const u8, n: usize) -> i32 {
+    match fastdec::decode_padded(core::slice::from_raw_parts(p, n)) {
+        Some(out) => { crate::finish(out); 0 }
+        None => crate::decompress(p, n),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn decompress_fast(p: *const u8, n: usize) -> i32 {
     let input = core::slice::from_raw_parts(p, n);

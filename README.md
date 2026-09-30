@@ -35,7 +35,7 @@ against the originals that run in your browser:
   scope, so nobody else can publish into it; `fast-` marks the packages as
   faster re-implementations (not forks or official builds) and keeps the
   family together; the rest is the exact name of the package it replaces.
-* **Version**: the version of the original it mirrors (`@r1ck404/fast-acorn@8.18.0`
+* **Version**: the version of the original it mirrors (`@r1ck404/fast-acorn@8.18.2`
   is acorn 8.18.0). Major and minor always equal the original's, so peer
   dependency ranges keep working (acorn-jsx's `acorn ^8`); the patch number
   is ours and moves on for our own fixes. The exact mirrored release is in
@@ -49,13 +49,13 @@ other dependencies) gets the fast version:
 ```jsonc
 // package.json
 "dependencies": {
-  "pako": "npm:@r1ck404/fast-pako@2.1.0",
-  "acorn": "npm:@r1ck404/fast-acorn@8.18.0",
-  "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@5.3.2",
-  "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@0.28.2",
-  "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.0",
-  "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.1",
-  "@noble/hashes": "npm:@r1ck404/fast-noble-hashes@1.8.0"
+  "pako": "npm:@r1ck404/fast-pako@2.1.2",
+  "acorn": "npm:@r1ck404/fast-acorn@8.18.2",
+  "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@5.3.4",
+  "esbuild-wasm": "npm:@r1ck404/fast-esbuild-wasm@0.28.5",
+  "es-module-lexer": "npm:@r1ck404/fast-es-module-lexer@1.7.2",
+  "brotli-wasm": "npm:@r1ck404/fast-brotli-wasm@3.0.3",
+  "@noble/hashes": "npm:@r1ck404/fast-noble-hashes@1.8.2"
 }
 ```
 

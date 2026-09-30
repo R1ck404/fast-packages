@@ -1,5 +1,7 @@
 # @r1ck404/fast-acorn
 
+Long unescaped string literals now scan their tail with a native regular expression after a 128-character prefix. Escapes, line terminators, error positions, tokens and callbacks retain the original path. Ordinary short literals keep the bounded scalar scan.
+
 A faster drop-in replacement for [`acorn@8.18.0`](https://www.npmjs.com/package/acorn):
 the same exports, **identical ASTs** (keys, key order, values, `Node` /
 `SourceLocation` / `Position` objects and their sharing), identical errors
@@ -9,8 +11,8 @@ the same exports, **identical ASTs** (keys, key order, values, `Node` /
 ```jsonc
 // package.json
 "dependencies": {
-  "acorn": "npm:@r1ck404/fast-acorn@8.18.0",
-  "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@5.3.2"   // optional, see below
+  "acorn": "npm:@r1ck404/fast-acorn@8.18.2",
+  "acorn-jsx": "npm:@r1ck404/fast-acorn-jsx@5.3.4"   // optional, see below
 }
 ```
 

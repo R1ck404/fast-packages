@@ -1,6 +1,6 @@
 {
   "name": "@r1ck404/fast-es-module-lexer",
-  "version": "1.7.0",
+  "version": "1.7.2",
   "description": "Faster drop-in replacement for es-module-lexer 1.7.0: a SIMD Rust/WebAssembly port of its lexer, identical results and errors (3-18x faster)",
   "keywords": [
     "es-module-lexer",
@@ -49,7 +49,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/edge.mjs --fuzz=5000 && node test/edge.mjs --file=browser.mjs --fuzz=2000 && node test/diff.mjs --quick && node test/bundle.mjs",
+    "test": "node test/repeated.mjs && node test/edge.mjs --fuzz=5000 && node test/edge.mjs --file=browser.mjs --fuzz=2000 && node test/diff.mjs --quick && node test/bundle.mjs",
     "test:full": "node test/diff.mjs && node test/diff.mjs --file=browser.mjs --quick && node test/edge.mjs && node test/edge.mjs --file=browser.mjs && node test/bundle.mjs && node test/browser.mjs"
   },
   "devDependencies": {

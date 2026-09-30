@@ -85,9 +85,15 @@ pub fn decode(input: &[u8]) -> Option<Vec<u8>> {
     let mut inp = Vec::with_capacity(input.len() + bits::PAD);
     inp.extend_from_slice(input);
     inp.extend_from_slice(&[0; bits::PAD]);
+    unsafe { decode_padded(&inp[..input.len()]) }
+}
+
+// The caller provides eight readable zero bytes immediately after input.
+pub unsafe fn decode_padded(input: &[u8]) -> Option<Vec<u8>> {
+    if input.is_empty() { return None; }
     let mut d = Dec {
-        br: Br::new(inp.as_ptr(), input.len()),
-        inp: &inp[..input.len()],
+        br: Br::new(input.as_ptr(), input.len()),
+        inp: input,
         out: Vec::new(),
         mbd: 0,
         dist: [4, 11, 15, 16],
