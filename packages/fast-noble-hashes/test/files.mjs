@@ -50,6 +50,8 @@ const up = JSON.parse(readFileSync(join(upstream, "package.json"), "utf8"));
 const { "./package.json": _, ...exp } = pkg.exports;
 ok(JSON.stringify(exp) === JSON.stringify(up.exports), "exports = upstream's (+ ./package.json)");
 ok(JSON.stringify(pkg.browser) === JSON.stringify(up.browser) && pkg.sideEffects === up.sideEffects, "browser / sideEffects");
-ok(pkg.version === up.version && pkg.upstream === `@noble/hashes@${up.version}`, "version");
+// patch releases of this package may run ahead of upstream's, so match major.minor and pin the upstream version
+const mm = (v) => v.split(".").slice(0, 2).join(".");
+ok(mm(pkg.version) === mm(up.version) && pkg.upstream === `@noble/hashes@${up.version}`, "version");
 console.log(`files: ${checks} checks, ${fails} failures`);
 process.exit(fails ? 1 : 0);
